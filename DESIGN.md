@@ -1783,7 +1783,35 @@ The implementation is not internet-exposure-ready until these cases pass:
   signed release; it never supplies a URL, command, or unsigned `latest`
   pointer. `punaro-bootstrap update` verifies catalog/manifest signatures and
   exact artifact digests, then publishes `current`/`previous` slots.
-  `punaro-bootstrap run`, health, and enrollment are not implemented yet.
+  Platform services launch `punaro-bootstrap run`, which supervises the
+  current-slot adapter, requires a local ready signal within 60 seconds when a
+  previous slot exists, rolls back once if the fresh catalog still allows that
+  previous release, and otherwise enters recovery-only. A generation that
+  already passed that ready gate is not re-tested as a candidate after reboot.
+  The supervisor stays
+  parked until a later signed update or seed clears that marker, then exits so
+  the platform service restarts onto the repaired slot. An unreadable update
+  journal also enters recovery-only. Invalid `generation.json`,
+  `healthy-generation.json`, `release.pub`, or `auto-rollback.json` nodes are
+  quarantined so signed repair and supervision can continue. An exhausted
+  generation high-water mark is rejected instead of wrapping. Source installers
+  persist `--keys-file` into `release.pub` and refuse to leave a signed previous
+  slot without that key set, so catalog-gated rollback remains available. `run` holds a separate `run.lock` lease for
+  the child's lifetime so two supervisors cannot share the same mailbox and
+  ready file; the transaction lock stays free for `update`. A crash-safe
+  `run.pid` records the child's pid and image path. A starting marker is written
+  before the child is launched so a crash in that window cannot leave an
+  untracked adapter; the next supervisor identity-checks matching images on
+  Linux, macOS, and Windows and takes the lease only when they are gone. The next supervisor kills
+  that process only when the live image still matches, and it removes the file
+  when the child or supervisor exits. If the image cannot be verified, the
+  next supervisor refuses the run lease instead of launching a second adapter. A later publish stops the old adapter
+  with SIGTERM and a bounded wait before SIGKILL so the service can restart
+  onto the new slot. A healthy child that exits while the
+  supervisor is still running is a supervisor failure so systemd/launchd restart
+  it. The one-shot rollback decision is durable across supervisor restarts so a
+  later failure cannot swap back to the known-unhealthy slot. Enrollment is not
+  implemented yet.
 - PostgreSQL is the sole authoritative server database after cutover; SQLite is
   retained for client recovery, migration evidence, and parity tests only.
 - HTTP fetch/ack is authoritative; WebSocket carries topic ID and sequence only.

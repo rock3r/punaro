@@ -3,7 +3,7 @@ Description=Punaro machine mailbox adapter
 
 [Service]
 Type=exec
-ExecStart=%h/.local/bin/punaro-adapter
+ExecStart=%h/.local/bin/punaro-bootstrap run --directory %h/.local/state/punaro-bootstrap
 StandardInput=null
 StandardOutput=journal
 StandardError=journal
@@ -31,7 +31,7 @@ SystemCallArchitectures=native
 MemoryDenyWriteExecute=yes
 CapabilityBoundingSet=
 AmbientCapabilities=
-ReadWritePaths=%h/.local/state/punaro-adapter %h/.local/state/ai-agent/mailbox
+ReadWritePaths=%h/.local/state/punaro-adapter %h/.local/state/punaro-bootstrap %h/.local/state/ai-agent/mailbox
 UMask=0077
 
 [Install]

@@ -5,6 +5,40 @@
 set -eu
 
 repo_dir=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
+
+# --enable is also the live-apply path: it must restart an already-active user
+# service after switching ExecStart to punaro-bootstrap run.
+grep -Fqx "$(printf '\t\t\tsystemctl --user enable punaro-adapter.service')" "$repo_dir/scripts/install-adapter.sh"
+grep -Fqx "$(printf '\t\t\tsystemctl --user restart punaro-adapter.service')" "$repo_dir/scripts/install-adapter.sh"
+if grep -Fqx "$(printf '\t\t\tsystemctl --user enable --now punaro-adapter.service')" "$repo_dir/scripts/install-adapter.sh"; then
+	printf '%s\n' 'live adapter unit would not be applied to an already-running service' >&2
+	exit 1
+fi
+grep -Fq "fail 'could not reload the Linux user manager'" "$repo_dir/scripts/install-adapter.sh" || {
+	printf '%s\n' 'installer must fail a requested Linux service handoff when daemon-reload fails' >&2
+	exit 1
+}
+grep -Fq 'if ! systemctl --user daemon-reload; then' "$repo_dir/scripts/install-adapter.sh" || {
+	printf '%s\n' 'installer must reload the Linux user manager after replacing the unit' >&2
+	exit 1
+}
+grep -Fq 'systemctl --user is-active --quiet punaro-adapter.service' "$repo_dir/scripts/install-adapter.sh" || {
+	printf '%s\n' 'installer must restart an already-active Linux adapter without --enable' >&2
+	exit 1
+}
+grep -Fq 'launchctl print "gui/$(id -u)/org.punaro.adapter"' "$repo_dir/scripts/install-adapter.sh" || {
+	printf '%s\n' 'installer must restart an already-active macOS adapter without --enable' >&2
+	exit 1
+}
+grep -Fq -- '--keys-file' "$repo_dir/scripts/install-adapter.sh" || {
+	printf '%s\n' 'installer must accept --keys-file so signed slots can roll back' >&2
+	exit 1
+}
+grep -Fq 'seed-checkout --directory "$bootstrap_dir" --adapter "$bin_dir/punaro-adapter" --keys-file "$keys_file"' "$repo_dir/scripts/install-adapter.sh" || {
+	printf '%s\n' 'installer must persist release keys during seed-checkout' >&2
+	exit 1
+}
+
 fixture_dir=$(mktemp -d "${TMPDIR:-/tmp}/punaro-install-test.XXXXXXXX")
 fixture_dir=$(CDPATH= cd -- "$fixture_dir" && pwd -P)
 # The installer deliberately uses a temporary HOME. Keep Go's shared caches
@@ -48,6 +82,7 @@ run_install() {
 run_install >"$fixture_dir/first.out"
 
 adapter="$home/.local/bin/punaro-adapter"
+bootstrap="$home/.local/bin/punaro-bootstrap"
 attachment="$home/.local/bin/punaro-trusted-attachment"
 memory="$home/.local/bin/punaro-memory"
 enroll="$home/.local/bin/punaro-enroll"
@@ -65,6 +100,8 @@ file_mode() {
 }
 
 [ -x "$adapter" ] || { printf '%s\n' 'adapter binary was not installed' >&2; exit 1; }
+[ -x "$bootstrap" ] || { printf '%s\n' 'bootstrap binary was not installed' >&2; exit 1; }
+[ -d "$home/.local/state/punaro-bootstrap/current" ] || { printf '%s\n' 'bootstrap current slot was not seeded' >&2; exit 1; }
 [ -x "$attachment" ] || { printf '%s\n' 'attachment binary was not installed' >&2; exit 1; }
 [ -x "$memory" ] || { printf '%s\n' 'memory binary was not installed' >&2; exit 1; }
 [ -x "$enroll" ] || { printf '%s\n' 'enrollment binary was not installed' >&2; exit 1; }
@@ -74,9 +111,11 @@ file_mode() {
 [ -f "$guidance_project/AGENTS.md" ] || { printf '%s\n' 'opt-in agent guidance was not installed' >&2; exit 1; }
 if [ "$(uname -s)" = Darwin ]; then
 	[ -f "$plist" ] || { printf '%s\n' 'LaunchAgent was not installed' >&2; exit 1; }
+	grep -Fq 'punaro-bootstrap" run --directory' "$plist" || { printf '%s\n' 'LaunchAgent does not launch punaro-bootstrap run' >&2; exit 1; }
 else
 	[ -f "$home/.config/systemd/user/punaro-adapter.service" ] || { printf '%s\n' 'user systemd unit was not installed' >&2; exit 1; }
-	grep -Fqx "ReadWritePaths=%h/.local/state/punaro-adapter $mailbox_state" "$home/.config/systemd/user/punaro-adapter.service"
+	grep -Fqx "ReadWritePaths=%h/.local/state/punaro-adapter %h/.local/state/punaro-bootstrap $mailbox_state" "$home/.config/systemd/user/punaro-adapter.service"
+	grep -Fq 'punaro-bootstrap run --directory' "$home/.config/systemd/user/punaro-adapter.service" || { printf '%s\n' 'user unit does not launch punaro-bootstrap run' >&2; exit 1; }
 fi
 [ "$(file_mode "$key")" = 600 ] || { printf '%s\n' 'machine key permissions are not 0600' >&2; exit 1; }
 [ "$(file_mode "$config")" = 600 ] || { printf '%s\n' 'adapter environment permissions are not 0600' >&2; exit 1; }

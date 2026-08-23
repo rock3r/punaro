@@ -12,8 +12,15 @@ import (
 )
 
 const (
-	fileDeleteChild          = 0x0040
-	windowsAncestorWriteMask = windows.FILE_WRITE_DATA | windows.FILE_APPEND_DATA | windows.DELETE | fileDeleteChild | windows.WRITE_DAC | windows.WRITE_OWNER | windows.GENERIC_ALL | windows.GENERIC_WRITE
+	fileDeleteChild = 0x0040
+	// windowsLeafWriteMask rejects any Everyone/Authenticated Users write on
+	// the bootstrap directory itself.
+	windowsLeafWriteMask = windows.FILE_WRITE_DATA | windows.FILE_APPEND_DATA | windows.DELETE | fileDeleteChild | windows.WRITE_DAC | windows.WRITE_OWNER | windows.GENERIC_ALL | windows.GENERIC_WRITE
+	// windowsAncestorReplaceMask is the rights that let another account
+	// rename or replace an already-created child. Volume-root create-folder
+	// ACEs are excluded here; requireTrustedExistingAncestor still applies
+	// the leaf write mask to the MkdirAll parent.
+	windowsAncestorReplaceMask = windows.DELETE | fileDeleteChild | windows.WRITE_DAC | windows.WRITE_OWNER | windows.GENERIC_ALL
 )
 
 func requireTrustedExistingAncestor(path string) error {
@@ -21,7 +28,12 @@ func requireTrustedExistingAncestor(path string) error {
 	for {
 		_, err := os.Lstat(current) // #nosec G703 -- ancestor of the operator-selected bootstrap directory.
 		if err == nil {
-			return walkTrustedWindowsAncestors(current)
+			// The nearest existing ancestor is the MkdirAll parent. It must
+			// not grant Everyone/Authenticated Users create-folder rights.
+			if err := requireTrustedWindowsDirectory(current); err != nil {
+				return err
+			}
+			return walkTrustedWindowsAncestors(filepath.Dir(current))
 		}
 		if !os.IsNotExist(err) {
 			return errors.New("bootstrap directory is invalid")
@@ -35,11 +47,33 @@ func requireTrustedExistingAncestor(path string) error {
 }
 
 func requireTrustedBootstrapDirectory(path string) error {
+	if err := requireTrustedWindowsDirectory(path); err != nil {
+		return err
+	}
+	return walkTrustedWindowsAncestors(filepath.Dir(filepath.Clean(path)))
+}
+
+func requireTrustedWindowsDirectory(path string) error {
 	info, err := os.Lstat(path) // #nosec G703 -- operator-selected absolute bootstrap directory.
 	if err != nil || !info.IsDir() {
 		return errors.New("bootstrap directory is invalid")
 	}
-	return walkTrustedWindowsAncestors(path)
+	attributes, err := windows.GetFileAttributes(windows.StringToUTF16Ptr(path))
+	if err != nil || attributes&windows.FILE_ATTRIBUTE_REPARSE_POINT != 0 || attributes&windows.FILE_ATTRIBUTE_DIRECTORY == 0 {
+		return errors.New("bootstrap directory is invalid")
+	}
+	world, err := windows.CreateWellKnownSid(windows.WinWorldSid)
+	if err != nil {
+		return errors.New("bootstrap directory is invalid")
+	}
+	authenticated, err := windows.CreateWellKnownSid(windows.WinAuthenticatedUserSid)
+	if err != nil {
+		return errors.New("bootstrap directory is invalid")
+	}
+	if ancestorWritableByBroadSID(path, world, authenticated, windowsLeafWriteMask) {
+		return errors.New("bootstrap directory is invalid")
+	}
+	return nil
 }
 
 func walkTrustedWindowsAncestors(path string) error {
@@ -57,7 +91,7 @@ func walkTrustedWindowsAncestors(path string) error {
 		if err != nil || attributes&windows.FILE_ATTRIBUTE_REPARSE_POINT != 0 || attributes&windows.FILE_ATTRIBUTE_DIRECTORY == 0 {
 			return errors.New("bootstrap directory is invalid")
 		}
-		if ancestorWritableByBroadSID(current, world, authenticated) {
+		if ancestorWritableByBroadSID(current, world, authenticated, windowsAncestorReplaceMask) {
 			return errors.New("bootstrap directory is invalid")
 		}
 		parent := filepath.Dir(current)
@@ -68,7 +102,7 @@ func walkTrustedWindowsAncestors(path string) error {
 	}
 }
 
-func ancestorWritableByBroadSID(path string, world, authenticated *windows.SID) bool {
+func ancestorWritableByBroadSID(path string, world, authenticated *windows.SID, writeMask windows.ACCESS_MASK) bool {
 	sd, err := windows.GetNamedSecurityInfo(path, windows.SE_FILE_OBJECT, windows.DACL_SECURITY_INFORMATION)
 	if err != nil {
 		return true
@@ -85,7 +119,7 @@ func ancestorWritableByBroadSID(path string, world, authenticated *windows.SID) 
 		if ace.Header.AceFlags&windows.INHERIT_ONLY_ACE != 0 {
 			continue
 		}
-		if ace.Mask&windows.ACCESS_MASK(windowsAncestorWriteMask) == 0 {
+		if ace.Mask&writeMask == 0 {
 			continue
 		}
 		sid := (*windows.SID)(unsafe.Pointer(&ace.SidStart)) // #nosec G103 -- documented flexible-array start of this ACE SID.

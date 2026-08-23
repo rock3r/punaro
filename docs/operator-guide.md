@@ -14,7 +14,20 @@ explicit operator actions. Published native artifacts and the unsigned
 catalog/manifest pair live on GitHub Releases; see
 [github-releases.md](github-releases.md). `punaro-bootstrap` installs only
 signed catalog/manifest pairs; unsigned draft assets are not an automatic
-update source.
+update source. Platform services launch `punaro-bootstrap run` against the
+current slot. An unhealthy candidate rolls back once when the fresh catalog
+still lists the previous release; that decision is durable across restarts
+so a later failure cannot swap back to the known-unhealthy slot. An
+unreadable update journal also stays recovery-only. `run` holds a separate
+run lease so two supervisors cannot share the same mailbox; `update` still
+uses the transaction lock. A crash-safe `run.pid` is killed only when the
+live process image still matches the recorded adapter path; an unverifiable
+live pid refuses the run lease instead of launching a second adapter. A later publish stops the old adapter with
+SIGTERM and a bounded wait before SIGKILL. A healthy adapter that exits
+while the supervisor is still running is a supervisor failure so the
+platform service restarts it. Recovery-only keeps the supervisor parked
+until a later signed update or seed clears that marker, then the platform
+service restarts onto the repaired slot.
 
 ## Run locally
 

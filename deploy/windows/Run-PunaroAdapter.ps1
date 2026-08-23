@@ -2,5 +2,7 @@ Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 
 $root = $PSScriptRoot
-& (Join-Path $root 'bin\punaro-adapter.exe')
+$bootstrap = Join-Path $root 'bootstrap'
+$bin = Join-Path $root 'bin\punaro-bootstrap.exe'
+& $bin run --directory $bootstrap
 exit $LASTEXITCODE

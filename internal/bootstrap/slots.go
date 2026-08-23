@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"errors"
 	"io"
+	"math"
 	"os"
 	"path/filepath"
 	"strings"
@@ -17,11 +18,20 @@ type acceptedState struct {
 	ManifestSHA256  string `json:"manifest_sha256"`
 }
 
+type healthyGenerationState struct {
+	Schema         int64  `json:"schema"`
+	Release        string `json:"release"`
+	Sequence       int64  `json:"sequence"`
+	ManifestSHA256 string `json:"manifest_sha256"`
+	Generation     int64  `json:"generation"`
+}
+
 type slotState struct {
 	Schema         int64  `json:"schema"`
 	Release        string `json:"release"`
 	Sequence       int64  `json:"sequence"`
 	ManifestSHA256 string `json:"manifest_sha256"`
+	Generation     int64  `json:"generation,omitempty"`
 }
 
 type journal struct {
@@ -31,6 +41,14 @@ type journal struct {
 	Sequence        int64  `json:"sequence"`
 	CatalogSequence int64  `json:"catalog_sequence,omitempty"`
 	ManifestSHA256  string `json:"manifest_sha256,omitempty"`
+}
+
+type autoRollbackState struct {
+	Schema         int64  `json:"schema"`
+	Release        string `json:"release"`
+	Sequence       int64  `json:"sequence"`
+	ManifestSHA256 string `json:"manifest_sha256"`
+	Generation     int64  `json:"generation,omitempty"`
 }
 
 func prepareDirectory(directory string) error {
@@ -62,7 +80,11 @@ func publishSlot(directory, release string, sequence int64, manifestSHA256 strin
 	if err := requireRealDir(candidate); err != nil {
 		return err
 	}
-	record, err := json.Marshal(slotState{Schema: 1, Release: release, Sequence: sequence, ManifestSHA256: manifestSHA256})
+	generation, err := nextSlotGeneration(directory)
+	if err != nil {
+		return err
+	}
+	record, err := json.Marshal(slotState{Schema: 1, Release: release, Sequence: sequence, ManifestSHA256: manifestSHA256, Generation: generation})
 	if err != nil {
 		return err
 	}
@@ -96,11 +118,18 @@ func replaceCurrent(directory, release string, sequence int64, manifestSHA256 st
 	if err := requireRealDir(candidate); err != nil {
 		return err
 	}
-	record, err := json.Marshal(slotState{Schema: 1, Release: release, Sequence: sequence, ManifestSHA256: manifestSHA256})
+	generation, err := nextSlotGeneration(directory)
+	if err != nil {
+		return err
+	}
+	record, err := json.Marshal(slotState{Schema: 1, Release: release, Sequence: sequence, ManifestSHA256: manifestSHA256, Generation: generation})
 	if err != nil {
 		return err
 	}
 	if err := writeAtomic(filepath.Join(candidate, slotRecord), record, 0o600); err != nil {
+		return err
+	}
+	if err := quarantineUnreadablePrevious(directory); err != nil {
 		return err
 	}
 	if err := os.RemoveAll(current); err != nil {
@@ -127,7 +156,7 @@ func Rollback(directory string) (Result, error) {
 		return Result{}, err
 	}
 	defer unlock()
-	if err := recoverJournal(directory); err != nil {
+	if err := recoverRepairableJournal(directory); err != nil {
 		return Result{}, err
 	}
 	current := filepath.Join(directory, currentSlot)
@@ -148,6 +177,12 @@ func Rollback(directory string) (Result, error) {
 	if err := completeRollback(directory, target); err != nil {
 		return Result{}, err
 	}
+	if err := recordRolledAwayCurrent(directory); err != nil {
+		return Result{}, err
+	}
+	if err := clearRecovery(directory); err != nil {
+		return Result{}, err
+	}
 	if err := clearJournal(directory); err != nil {
 		return Result{}, err
 	}
@@ -158,27 +193,69 @@ func Rollback(directory string) (Result, error) {
 	return Result{Release: slot.Release, Sequence: slot.Sequence, Manifest: slot.ManifestSHA256}, nil
 }
 
+var errInvalidJournal = errors.New("bootstrap journal is invalid")
+
+func recoverRepairableJournal(directory string) error {
+	err := recoverJournal(directory)
+	if errors.Is(err, errInvalidJournal) {
+		return nil
+	}
+	return err
+}
+
 func recoverJournal(directory string) error {
 	if err := removeAbandonedTemps(directory); err != nil {
 		return err
 	}
+	completed, err := repairOrphanSwap(directory)
+	if err != nil {
+		return err
+	}
+	if completed {
+		if err := recordRolledAwayCurrent(directory); err != nil {
+			return err
+		}
+	}
 	record, err := readJournal(directory)
+	if errors.Is(err, errInvalidJournal) {
+		return failInvalidJournal(directory)
+	}
 	if err != nil {
 		return err
 	}
 	if record.Phase != "" && record.Schema != 1 {
-		return errors.New("bootstrap journal is invalid")
+		return failInvalidJournal(directory)
 	}
 	switch record.Phase {
 	case "", "staging":
 		return os.RemoveAll(filepath.Join(directory, candidateSlot))
-	case "publishing", "repairing":
-		if record.Release == "" || record.Sequence < 1 || record.CatalogSequence < 1 || !validManifestDigest(record.ManifestSHA256) {
-			return errors.New("bootstrap journal is invalid")
+	case "seeding":
+		if record.Release == "" || record.Sequence < 1 || !validManifestDigest(record.ManifestSHA256) {
+			return failInvalidJournal(directory)
 		}
-		exists, err := existsRealDir(filepath.Join(directory, candidateSlot))
+		exists, invalid, err := existsOrQuarantineSlot(directory, candidateSlot)
 		if err != nil {
 			return err
+		}
+		if invalid {
+			return failInvalidJournal(directory)
+		}
+		if exists {
+			if err := replaceCurrent(directory, record.Release, record.Sequence, record.ManifestSHA256); err != nil {
+				return err
+			}
+		}
+		return finishSeed(directory, record)
+	case "publishing", "repairing":
+		if record.Release == "" || record.Sequence < 1 || record.CatalogSequence < 1 || !validManifestDigest(record.ManifestSHA256) {
+			return failInvalidJournal(directory)
+		}
+		exists, invalid, err := existsOrQuarantineSlot(directory, candidateSlot)
+		if err != nil {
+			return err
+		}
+		if invalid {
+			return failInvalidJournal(directory)
 		}
 		if exists {
 			if record.Phase == "repairing" {
@@ -198,15 +275,287 @@ func recoverJournal(directory string) error {
 		})
 	case "rolling-back":
 		if record.Release == "" || record.Sequence < 1 || !validManifestDigest(record.ManifestSHA256) {
-			return errors.New("bootstrap journal is invalid")
+			return failInvalidJournal(directory)
 		}
 		if err := completeRollback(directory, slotState{Release: record.Release, Sequence: record.Sequence, ManifestSHA256: record.ManifestSHA256}); err != nil {
 			return err
 		}
+		if err := applyRollbackCatalogSequence(directory, record.CatalogSequence); err != nil {
+			return err
+		}
+		if err := recordRolledAwayCurrent(directory); err != nil {
+			return err
+		}
+		if err := clearRecovery(directory); err != nil {
+			return err
+		}
 		return clearJournal(directory)
 	default:
+		return failInvalidJournal(directory)
+	}
+}
+
+func readRepairableCurrent(directory string) (slotState, error) {
+	current, err := readOptionalSlot(filepath.Join(directory, currentSlot))
+	if err == nil {
+		if obsErr := observeGeneration(directory, current.Generation); obsErr != nil {
+			return slotState{}, obsErr
+		}
+		return current, nil
+	}
+	if recErr := writeRecoveryRecord(directory, recoveryCurrentExited); recErr != nil {
+		return slotState{}, recErr
+	}
+	if err := os.RemoveAll(filepath.Join(directory, currentSlot)); err != nil {
+		return slotState{}, err
+	}
+	return slotState{}, nil
+}
+
+func currentGenerationIsHealthy(directory string, current slotState) bool {
+	if current.Release == "" || current.Sequence < 1 || !validManifestDigest(current.ManifestSHA256) {
+		return false
+	}
+	record, err := loadHealthyGeneration(directory)
+	return err == nil && record.Release == current.Release && record.Sequence == current.Sequence && record.ManifestSHA256 == current.ManifestSHA256 && record.Generation == current.Generation
+}
+
+func rememberHealthyGeneration(directory string, current slotState) error {
+	if current.Release == "" || current.Sequence < 1 || !validManifestDigest(current.ManifestSHA256) {
+		return nil
+	}
+	body, err := json.Marshal(healthyGenerationState{
+		Schema:         1,
+		Release:        current.Release,
+		Sequence:       current.Sequence,
+		ManifestSHA256: current.ManifestSHA256,
+		Generation:     current.Generation,
+	})
+	if err != nil {
+		return err
+	}
+	path := filepath.Join(directory, healthyGenerationFile)
+	if err := removeNonRegular(path); err != nil {
+		return err
+	}
+	if err := writeAtomic(path, body, 0o600); err != nil {
+		return err
+	}
+	return observeGeneration(directory, current.Generation)
+}
+
+func loadHealthyGeneration(directory string) (healthyGenerationState, error) {
+	body, err := os.ReadFile(filepath.Join(directory, healthyGenerationFile)) // #nosec G304 -- healthy generation is a fixed child of the bootstrap directory.
+	if err != nil {
+		return healthyGenerationState{}, err
+	}
+	var record healthyGenerationState
+	if json.Unmarshal(body, &record) != nil || record.Schema != 1 || record.Release == "" || record.Sequence < 1 || !validManifestDigest(record.ManifestSHA256) {
+		return healthyGenerationState{}, errors.New("bootstrap healthy generation is invalid")
+	}
+	return record, nil
+}
+
+func failInvalidJournal(directory string) error {
+	if err := writeRecoveryRecord(directory, recoveryCurrentExited); err != nil {
+		return err
+	}
+	completed, err := repairOrphanSwap(directory)
+	if err != nil {
+		return err
+	}
+	if completed {
+		if err := recordRolledAwayCurrent(directory); err != nil {
+			return err
+		}
+	}
+	if err := os.RemoveAll(filepath.Join(directory, journalFile)); err != nil {
+		return err
+	}
+	if err := syncDir(directory); err != nil {
+		return err
+	}
+	return errInvalidJournal
+}
+
+func repairOrphanSwap(directory string) (bool, error) {
+	current := filepath.Join(directory, currentSlot)
+	previous := filepath.Join(directory, previousSlot)
+	swap := filepath.Join(directory, swapSlot)
+	currentExists, _, err := existsOrQuarantineSlot(directory, currentSlot)
+	if err != nil {
+		return false, err
+	}
+	previousExists, _, err := existsOrQuarantineSlot(directory, previousSlot)
+	if err != nil {
+		return false, err
+	}
+	swapExists, err := existsOrQuarantineSwap(directory)
+	if err != nil || !swapExists {
+		return false, err
+	}
+	if previousExists && !currentExists {
+		if err := os.Rename(previous, current); err != nil {
+			return false, err
+		}
+		if err := syncDir(directory); err != nil {
+			return false, err
+		}
+		if err := os.Rename(swap, previous); err != nil {
+			return false, err
+		}
+		if err := syncDir(directory); err != nil {
+			return false, err
+		}
+		return true, nil
+	}
+	if currentExists && !previousExists {
+		if err := os.Rename(swap, previous); err != nil {
+			return false, err
+		}
+		if err := syncDir(directory); err != nil {
+			return false, err
+		}
+		return true, nil
+	}
+	if err := os.RemoveAll(swap); err != nil {
+		return false, err
+	}
+	return false, syncDir(directory)
+}
+
+func recordRolledAwayCurrent(directory string) error {
+	away, err := readOptionalSlot(filepath.Join(directory, previousSlot))
+	if err != nil {
+		return err
+	}
+	if away.Release == "" {
+		return nil
+	}
+	return saveAutoRollback(directory, away)
+}
+
+func loadAutoRollback(directory string) (autoRollbackState, error) {
+	path := filepath.Join(directory, autoRollbackFile)
+	info, err := os.Lstat(path) // #nosec G703 -- auto-rollback record is a fixed child of the bootstrap directory.
+	if os.IsNotExist(err) {
+		return autoRollbackState{}, nil
+	}
+	if err != nil {
+		return autoRollbackState{}, err
+	}
+	if !info.Mode().IsRegular() {
+		if err := os.RemoveAll(path); err != nil {
+			return autoRollbackState{}, err
+		}
+		if err := syncDir(directory); err != nil {
+			return autoRollbackState{}, err
+		}
+		return autoRollbackState{}, nil
+	}
+	body, err := os.ReadFile(path) // #nosec G304 -- auto-rollback record is a fixed child of the bootstrap directory.
+	if err != nil {
+		return autoRollbackState{}, err
+	}
+	if err := rejectDuplicateJSONFields(body); err != nil {
+		return quarantineInvalidAutoRollback(directory)
+	}
+	decoder := json.NewDecoder(strings.NewReader(string(body)))
+	decoder.DisallowUnknownFields()
+	var record autoRollbackState
+	if err := decoder.Decode(&record); err != nil {
+		return quarantineInvalidAutoRollback(directory)
+	}
+	var trailing any
+	if err := decoder.Decode(&trailing); !errors.Is(err, io.EOF) {
+		return quarantineInvalidAutoRollback(directory)
+	}
+	if record.Schema != 1 || record.Release == "" || record.Sequence < 1 || record.Generation < 0 || !validManifestDigest(record.ManifestSHA256) {
+		return quarantineInvalidAutoRollback(directory)
+	}
+	return record, nil
+}
+
+func quarantineInvalidAutoRollback(directory string) (autoRollbackState, error) {
+	if err := os.RemoveAll(filepath.Join(directory, autoRollbackFile)); err != nil {
+		return autoRollbackState{}, err
+	}
+	if err := syncDir(directory); err != nil {
+		return autoRollbackState{}, err
+	}
+	return autoRollbackState{}, nil
+}
+
+func saveAutoRollback(directory string, away slotState) error {
+	if away.Release == "" || away.Sequence < 1 || away.Generation < 0 || !validManifestDigest(away.ManifestSHA256) {
+		return errors.New("bootstrap auto-rollback state is invalid")
+	}
+	body, err := json.Marshal(autoRollbackState{
+		Schema:         1,
+		Release:        away.Release,
+		Sequence:       away.Sequence,
+		ManifestSHA256: away.ManifestSHA256,
+		Generation:     away.Generation,
+	})
+	if err != nil {
+		return err
+	}
+	path := filepath.Join(directory, autoRollbackFile)
+	if err := removeNonRegular(path); err != nil {
+		return err
+	}
+	return writeAtomic(path, body, 0o600)
+}
+
+func blocksAutoRollback(directory string, previous slotState) (bool, error) {
+	record, err := loadAutoRollback(directory)
+	if err != nil {
+		return false, err
+	}
+	if record.Release == "" {
+		return false, nil
+	}
+	return record.Release == previous.Release && record.Sequence == previous.Sequence && record.ManifestSHA256 == previous.ManifestSHA256 && record.Generation == previous.Generation, nil
+}
+
+func applyRollbackCatalogSequence(directory string, catalogSequence int64) error {
+	if catalogSequence < 1 {
+		return nil
+	}
+	accepted, err := loadAccepted(directory)
+	if err != nil {
+		return err
+	}
+	if accepted.ReleaseSequence < 1 || accepted.CatalogSequence >= catalogSequence {
+		return nil
+	}
+	accepted.CatalogSequence = catalogSequence
+	return saveAccepted(directory, accepted)
+}
+
+func finishSeed(directory string, record journal) error {
+	if record.Release == "" || record.Sequence < 1 || !validManifestDigest(record.ManifestSHA256) {
 		return errors.New("bootstrap journal is invalid")
 	}
+	accepted, err := loadAccepted(directory)
+	if err != nil {
+		return err
+	}
+	if accepted.Release == "" || accepted.Release == localCheckoutRelease {
+		if err := saveAccepted(directory, acceptedState{
+			Schema:          1,
+			Release:         record.Release,
+			ReleaseSequence: record.Sequence,
+			CatalogSequence: 1,
+			ManifestSHA256:  record.ManifestSHA256,
+		}); err != nil {
+			return err
+		}
+	}
+	if err := clearRecovery(directory); err != nil {
+		return err
+	}
+	return clearJournal(directory)
 }
 
 func finishPublication(directory string, accepted acceptedState) error {
@@ -216,7 +565,23 @@ func finishPublication(directory string, accepted acceptedState) error {
 	if err := saveAccepted(directory, accepted); err != nil {
 		return err
 	}
+	if err := quarantineUnreadablePrevious(directory); err != nil {
+		return err
+	}
+	if err := clearRecovery(directory); err != nil {
+		return err
+	}
 	return clearJournal(directory)
+}
+
+func quarantineUnreadablePrevious(directory string) error {
+	if _, err := readOptionalSlot(filepath.Join(directory, previousSlot)); err != nil {
+		if err := os.RemoveAll(filepath.Join(directory, previousSlot)); err != nil {
+			return err
+		}
+		return syncDir(directory)
+	}
+	return nil
 }
 
 func completeRollback(directory string, target slotState) error {
@@ -305,10 +670,18 @@ func clearJournal(directory string) error {
 }
 
 func readJournal(directory string) (journal, error) {
-	body, err := os.ReadFile(filepath.Join(directory, journalFile)) // #nosec G304 -- journal is a fixed child of the bootstrap directory.
+	path := filepath.Join(directory, journalFile)
+	info, err := os.Lstat(path) // #nosec G703 -- journal is a fixed child of the bootstrap directory.
 	if os.IsNotExist(err) {
 		return journal{}, nil
 	}
+	if err != nil {
+		return journal{}, err
+	}
+	if !info.Mode().IsRegular() {
+		return journal{}, errInvalidJournal
+	}
+	body, err := os.ReadFile(path) // #nosec G304 -- journal is a fixed child of the bootstrap directory.
 	if err != nil {
 		return journal{}, err
 	}
@@ -317,17 +690,17 @@ func readJournal(directory string) (journal, error) {
 
 func parseJournal(body []byte) (journal, error) {
 	if err := rejectDuplicateJSONFields(body); err != nil {
-		return journal{}, errors.New("bootstrap journal is invalid")
+		return journal{}, errInvalidJournal
 	}
 	decoder := json.NewDecoder(strings.NewReader(string(body)))
 	decoder.DisallowUnknownFields()
 	var record journal
 	if err := decoder.Decode(&record); err != nil {
-		return journal{}, errors.New("bootstrap journal is invalid")
+		return journal{}, errInvalidJournal
 	}
 	var trailing any
 	if err := decoder.Decode(&trailing); !errors.Is(err, io.EOF) {
-		return journal{}, errors.New("bootstrap journal is invalid")
+		return journal{}, errInvalidJournal
 	}
 	return record, nil
 }
@@ -391,7 +764,7 @@ func Status(directory string) (State, error) {
 		return State{}, err
 	}
 	defer unlock()
-	if err := recoverJournal(directory); err != nil {
+	if err := recoverRepairableJournal(directory); err != nil {
 		return State{}, err
 	}
 	accepted, err := loadAccepted(directory)
@@ -406,13 +779,90 @@ func Status(directory string) (State, error) {
 	if err != nil {
 		return State{}, err
 	}
+	recovery, err := loadRecovery(directory)
+	if err != nil {
+		return State{}, err
+	}
 	return State{
 		Current:          current.Release,
 		CurrentSequence:  current.Sequence,
 		Previous:         previous.Release,
 		PreviousSequence: previous.Sequence,
 		CatalogSequence:  accepted.CatalogSequence,
+		RecoveryOnly:     recovery.Mode == recoveryMode,
 	}, nil
+}
+
+type generationHighWaterState struct {
+	Schema     int64 `json:"schema"`
+	Generation int64 `json:"generation"`
+}
+
+func nextSlotGeneration(directory string) (int64, error) {
+	var high int64
+	for _, name := range []string{currentSlot, previousSlot, candidateSlot} {
+		slot, err := readOptionalSlot(filepath.Join(directory, name))
+		if err != nil {
+			continue
+		}
+		if slot.Generation > high {
+			high = slot.Generation
+		}
+	}
+	if record, err := loadAutoRollback(directory); err == nil && record.Generation > high {
+		high = record.Generation
+	}
+	if record, err := loadHealthyGeneration(directory); err == nil && record.Generation > high {
+		high = record.Generation
+	}
+	if record, err := loadGenerationHighWater(directory); err == nil && record.Generation > high {
+		high = record.Generation
+	}
+	if high == math.MaxInt64 {
+		return 0, errors.New("bootstrap generation high-water is exhausted")
+	}
+	next := high + 1
+	if err := observeGeneration(directory, next); err != nil {
+		return 0, err
+	}
+	return next, nil
+}
+
+func observeGeneration(directory string, generation int64) error {
+	if generation < 1 {
+		return nil
+	}
+	if record, err := loadGenerationHighWater(directory); err == nil && record.Generation >= generation {
+		return nil
+	}
+	return saveGenerationHighWater(directory, generation)
+}
+
+func loadGenerationHighWater(directory string) (generationHighWaterState, error) {
+	body, err := os.ReadFile(filepath.Join(directory, generationHighWaterFile)) // #nosec G304 -- generation high-water is a fixed child of the bootstrap directory.
+	if err != nil {
+		return generationHighWaterState{}, err
+	}
+	var record generationHighWaterState
+	if json.Unmarshal(body, &record) != nil || record.Schema != 1 || record.Generation < 1 {
+		return generationHighWaterState{}, errors.New("bootstrap generation high-water is invalid")
+	}
+	return record, nil
+}
+
+func saveGenerationHighWater(directory string, generation int64) error {
+	if generation < 1 {
+		return nil
+	}
+	body, err := json.Marshal(generationHighWaterState{Schema: 1, Generation: generation})
+	if err != nil {
+		return err
+	}
+	path := filepath.Join(directory, generationHighWaterFile)
+	if err := removeNonRegular(path); err != nil {
+		return err
+	}
+	return writeAtomic(path, body, 0o600)
 }
 
 func readOptionalSlot(directory string) (slotState, error) {
@@ -460,7 +910,7 @@ func parseSlot(body []byte) (slotState, error) {
 	if err := decoder.Decode(&trailing); !errors.Is(err, io.EOF) {
 		return slotState{}, errors.New("bootstrap slot is invalid")
 	}
-	if slot.Schema != 1 || slot.Release == "" || slot.Sequence < 1 || !validManifestDigest(slot.ManifestSHA256) {
+	if slot.Schema != 1 || slot.Release == "" || slot.Sequence < 1 || slot.Generation < 0 || !validManifestDigest(slot.ManifestSHA256) {
 		return slotState{}, errors.New("bootstrap slot is invalid")
 	}
 	return slot, nil
@@ -521,6 +971,32 @@ func requireRealDir(path string) error {
 	return nil
 }
 
+func existsOrQuarantineSwap(directory string) (bool, error) {
+	exists, _, err := existsOrQuarantineSlot(directory, swapSlot)
+	return exists, err
+}
+
+func existsOrQuarantineSlot(directory, name string) (bool, bool, error) {
+	path := filepath.Join(directory, name)
+	info, err := os.Lstat(path) // #nosec G703 -- slot is a fixed child of the bootstrap directory.
+	if os.IsNotExist(err) {
+		return false, false, nil
+	}
+	if err != nil {
+		return false, false, err
+	}
+	if info.IsDir() && info.Mode()&os.ModeSymlink == 0 {
+		return true, false, nil
+	}
+	if err := os.RemoveAll(path); err != nil { // #nosec G703 -- slot is a fixed child of the bootstrap directory.
+		return false, false, err
+	}
+	if err := syncDir(directory); err != nil {
+		return false, false, err
+	}
+	return false, true, nil
+}
+
 func existsRealDir(path string) (bool, error) {
 	info, err := os.Lstat(path) // #nosec G703 -- path is a bootstrap-owned slot or the operator-selected absolute directory.
 	if os.IsNotExist(err) {
@@ -535,20 +1011,50 @@ func existsRealDir(path string) (bool, error) {
 	return true, nil
 }
 
+func isRunPIDTemp(name string) bool {
+	return strings.HasPrefix(name, "."+runPIDFile+"-") && strings.HasSuffix(name, ".tmp")
+}
+
 func removeAbandonedTemps(directory string) error {
+	return removeDirectoryTemps(directory, false)
+}
+
+func removeAbandonedRunPIDTemps(directory string) error {
+	return removeDirectoryTemps(directory, true)
+}
+
+func removeDirectoryTemps(directory string, runPIDOnly bool) error {
 	entries, err := os.ReadDir(directory)
 	if err != nil {
 		return err
 	}
 	for _, entry := range entries {
-		if entry.IsDir() || !strings.HasSuffix(entry.Name(), ".tmp") {
+		name := entry.Name()
+		if entry.IsDir() || strings.ContainsAny(name, `/\`) || !strings.HasSuffix(name, ".tmp") {
 			continue
 		}
-		if err := os.Remove(filepath.Join(directory, entry.Name())); err != nil && !os.IsNotExist(err) {
+		if isRunPIDTemp(name) != runPIDOnly {
+			continue
+		}
+		if err := os.Remove(filepath.Join(directory, name)); err != nil && !os.IsNotExist(err) { // #nosec G703 -- temps are directory entries of the bootstrap root.
 			return err
 		}
 	}
 	return nil
+}
+
+func removeNonRegular(path string) error {
+	info, err := os.Lstat(path) // #nosec G703 -- marker is a fixed child of the bootstrap directory.
+	if os.IsNotExist(err) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	if info.Mode().IsRegular() {
+		return nil
+	}
+	return os.RemoveAll(path) // #nosec G703 -- marker is a fixed child of the bootstrap directory.
 }
 
 func writeAtomic(path string, body []byte, mode os.FileMode) error {

@@ -1,10 +1,12 @@
 // Package bootstrap installs signed Punaro client artifacts from the fixed
 // GitHub Releases origin. It verifies catalog and manifest signatures and
-// exact artifact length/digest. It does not run children, open PostgreSQL, or
-// read Punaro message content.
+// exact artifact length/digest, supervises the current-slot adapter, and
+// rolls back once when a candidate is unhealthy. It does not open PostgreSQL
+// or read Punaro message content.
 package bootstrap
 
 import (
+	"context"
 	"crypto/ed25519"
 	"crypto/sha256"
 	"encoding/hex"
@@ -18,14 +20,20 @@ import (
 )
 
 const (
-	acceptedFile  = "accepted.json"
-	currentSlot   = "current"
-	previousSlot  = "previous"
-	candidateSlot = "candidate"
-	swapSlot      = "swap"
-	slotRecord    = "slot.json"
-	journalFile   = "journal.json"
-	lockFile      = "bootstrap.lock"
+	acceptedFile            = "accepted.json"
+	currentSlot             = "current"
+	previousSlot            = "previous"
+	candidateSlot           = "candidate"
+	swapSlot                = "swap"
+	runningSlot             = "running"
+	slotRecord              = "slot.json"
+	journalFile             = "journal.json"
+	lockFile                = "bootstrap.lock"
+	runLeaseFile            = "run.lock"
+	runPIDFile              = "run.pid"
+	autoRollbackFile        = "auto-rollback.json"
+	healthyGenerationFile   = "healthy-generation.json"
+	generationHighWaterFile = "generation.json"
 )
 
 // Request is one host-local update from a fixed origin.
@@ -55,6 +63,7 @@ type State struct {
 	Previous         string
 	PreviousSequence int64
 	CatalogSequence  int64
+	RecoveryOnly     bool
 }
 
 // Update fetches the signed catalog, honors only a listed release, and
@@ -71,21 +80,37 @@ func Update(request Request) (Result, error) {
 		return Result{}, err
 	}
 	defer unlock()
-	if err := recoverJournal(request.Directory); err != nil {
+	if err := recoverRepairableJournal(request.Directory); err != nil {
 		return Result{}, err
 	}
 	accepted, err := loadAccepted(request.Directory)
 	if err != nil {
 		return Result{}, err
 	}
+	if accepted.Release == localCheckoutRelease {
+		accepted = acceptedState{}
+	}
 	if accepted.ReleaseSequence < 1 {
-		exists, slotErr := existsRealDir(filepath.Join(request.Directory, currentSlot))
+		exists, _, slotErr := existsOrQuarantineSlot(request.Directory, currentSlot)
 		if slotErr != nil {
 			return Result{}, slotErr
 		}
 		if exists {
-			return Result{}, errors.New("bootstrap accepted state is invalid")
+			slot, readErr := readRepairableCurrent(request.Directory)
+			if readErr != nil {
+				return Result{}, readErr
+			}
+			if slot.Release != "" && slot.Release != localCheckoutRelease {
+				return Result{}, errors.New("bootstrap accepted state is invalid")
+			}
 		}
+	}
+	catalog, err := fetchVerifiedCatalog(context.Background(), request)
+	if err != nil {
+		return Result{}, err
+	}
+	if accepted.CatalogSequence > 0 && catalog.Sequence < accepted.CatalogSequence {
+		return Result{}, errors.New("release catalog sequence downgrade")
 	}
 	client := request.HTTP
 	if client == nil {
@@ -94,27 +119,6 @@ func Update(request Request) (Result, error) {
 			return Result{}, err
 		}
 		client = transport
-	}
-	catalogBody, err := client.Get(punarorelease.CatalogReleaseName+"/"+punarorelease.CatalogFile, punarorelease.MaximumManifestBytes)
-	if err != nil {
-		return Result{}, err
-	}
-	catalogSig, err := client.Get(punarorelease.CatalogReleaseName+"/"+punarorelease.CatalogSignatureFile, punarorelease.MaximumEnvelopeBytes)
-	if err != nil {
-		return Result{}, err
-	}
-	if err := verifyDocument(catalogBody, catalogSig, request.Keys); err != nil {
-		return Result{}, err
-	}
-	catalog, err := punarorelease.ParseCatalog(catalogBody)
-	if err != nil {
-		return Result{}, err
-	}
-	if !catalog.Fresh(request.Now) {
-		return Result{}, errors.New("release catalog is stale")
-	}
-	if accepted.CatalogSequence > 0 && catalog.Sequence < accepted.CatalogSequence {
-		return Result{}, errors.New("release catalog sequence downgrade")
 	}
 	wanted := request.Release
 	if wanted == "" {
@@ -138,7 +142,7 @@ func Update(request Request) (Result, error) {
 	if err := writeJournal(request.Directory, journal{Schema: 1, Phase: "staging", Release: listed.Release, Sequence: listed.Sequence, ManifestSHA256: listed.ManifestSHA256}); err != nil {
 		return Result{}, err
 	}
-	manifestBody, err := client.Get(listed.ManifestPath, listed.ManifestLength)
+	manifestBody, err := client.Get(context.Background(), listed.ManifestPath, listed.ManifestLength)
 	if err != nil {
 		return Result{}, err
 	}
@@ -149,7 +153,7 @@ func Update(request Request) (Result, error) {
 	if hex.EncodeToString(sum[:]) != listed.ManifestSHA256 {
 		return Result{}, errors.New("release manifest digest mismatch")
 	}
-	manifestSig, err := client.Get(listed.Release+"/"+punarorelease.ReleaseSignatureFile, punarorelease.MaximumEnvelopeBytes)
+	manifestSig, err := client.Get(context.Background(), listed.Release+"/"+punarorelease.ReleaseSignatureFile, punarorelease.MaximumEnvelopeBytes)
 	if err != nil {
 		return Result{}, err
 	}
@@ -180,12 +184,18 @@ func Update(request Request) (Result, error) {
 	if len(artifacts) == 0 {
 		return Result{}, errors.New("release has no artifacts for this platform")
 	}
-	current, err := readOptionalSlot(filepath.Join(request.Directory, currentSlot))
+	if !platformHasAdapter(artifacts, request.GOOS, request.GOARCH) {
+		return Result{}, errors.New("release has no adapter for this platform")
+	}
+	current, err := readRepairableCurrent(request.Directory)
 	if err != nil {
 		return Result{}, err
 	}
 	sameIdentity := current.Release == published.Release && current.Sequence == published.ReleaseSequence && current.ManifestSHA256 == published.ManifestSHA256
 	if sameIdentity && currentSlotMatches(request.Directory, artifacts) {
+		if err := persistDirectoryKeys(request.Directory, request.Keys); err != nil {
+			return Result{}, err
+		}
 		if err := finishPublication(request.Directory, published); err != nil {
 			return Result{}, err
 		}
@@ -200,7 +210,7 @@ func Update(request Request) (Result, error) {
 	}
 	var installed []string
 	for _, artifact := range artifacts {
-		body, err := client.Get(artifact.Path, artifact.Length)
+		body, err := client.Get(context.Background(), artifact.Path, artifact.Length)
 		if err != nil {
 			return Result{}, err
 		}
@@ -226,6 +236,9 @@ func Update(request Request) (Result, error) {
 	phase := "publishing"
 	if sameIdentity {
 		phase = "repairing"
+	}
+	if err := persistDirectoryKeys(request.Directory, request.Keys); err != nil {
+		return Result{}, err
 	}
 	if err := writeJournal(request.Directory, journal{
 		Schema:          1,
@@ -272,6 +285,39 @@ func (request *Request) normalize() error {
 	return nil
 }
 
+func fetchVerifiedCatalog(ctx context.Context, request Request) (punarorelease.Catalog, error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	client := request.HTTP
+	if client == nil {
+		transport, err := newFetcher(request.Origin)
+		if err != nil {
+			return punarorelease.Catalog{}, err
+		}
+		client = transport
+	}
+	catalogBody, err := client.Get(ctx, punarorelease.CatalogReleaseName+"/"+punarorelease.CatalogFile, punarorelease.MaximumManifestBytes)
+	if err != nil {
+		return punarorelease.Catalog{}, err
+	}
+	catalogSig, err := client.Get(ctx, punarorelease.CatalogReleaseName+"/"+punarorelease.CatalogSignatureFile, punarorelease.MaximumEnvelopeBytes)
+	if err != nil {
+		return punarorelease.Catalog{}, err
+	}
+	if err := verifyDocument(catalogBody, catalogSig, request.Keys); err != nil {
+		return punarorelease.Catalog{}, err
+	}
+	catalog, err := punarorelease.ParseCatalog(catalogBody)
+	if err != nil {
+		return punarorelease.Catalog{}, err
+	}
+	if !catalog.Fresh(request.Now) {
+		return punarorelease.Catalog{}, errors.New("release catalog is stale")
+	}
+	return catalog, nil
+}
+
 func verifyDocument(document, signature []byte, keys map[string]ed25519.PublicKey) error {
 	envelope, err := punarorelease.ParseEnvelope(signature)
 	if err != nil {
@@ -301,6 +347,16 @@ func currentSlotMatches(directory string, artifacts []punarorelease.Artifact) bo
 		}
 	}
 	return len(artifacts) > 0
+}
+
+func platformHasAdapter(artifacts []punarorelease.Artifact, goos, goarch string) bool {
+	want := artifactName(adapterComponent, goos, goarch)
+	for _, artifact := range artifacts {
+		if filepath.Base(artifact.Path) == want {
+			return true
+		}
+	}
+	return false
 }
 
 func platformArtifacts(artifacts []punarorelease.Artifact, goos, goarch string) []punarorelease.Artifact {
