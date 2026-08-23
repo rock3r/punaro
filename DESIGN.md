@@ -1834,8 +1834,10 @@ updates are not starved. Per-attempt network timeouts and kernel-released file
 locks keep provider hooks isolated from collector outages. Enqueue, drain, and
 supervisor ownership is bound to each process's open handle, so process exit
 releases it and neither stale timestamps nor wall-clock jumps can fence out a
-live holder. Under the enqueue lock, every enqueue removes crash-left temporary
-event files before admitting new work. The same protected-token checks apply on the adapter
+live holder. Concurrent enqueues wait on that kernel lock until the prior bounded
+local publication completes rather than timing out and losing an event; no
+collector network I/O runs under it. Under the enqueue lock, every enqueue removes
+crash-left temporary event files before admitting new work. The same protected-token checks apply on the adapter
 host. A persistent
 `supervise` mode runs under the host service manager, holds a singleton lease,
 polls even while the spool is empty, and provides a durable wake/restart path

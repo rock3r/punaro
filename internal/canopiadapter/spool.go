@@ -21,8 +21,6 @@ import (
 const (
 	defaultMaxSpoolEvents = 4_096
 	maxSpoolEventBytes    = 64 << 10
-	spoolLockAttempts     = 10
-	spoolLockDelay        = 5 * time.Millisecond
 	supervisorPoll        = 250 * time.Millisecond
 )
 
@@ -401,19 +399,11 @@ func acquireSpoolLock(path string) (func(), error) {
 	if err != nil {
 		return nil, err
 	}
-	for range spoolLockAttempts {
-		acquired, lockErr := tryLockSpoolFile(file)
-		if lockErr != nil {
-			_ = file.Close()
-			return nil, lockErr
-		}
-		if acquired {
-			return spoolLockRelease(file), nil
-		}
-		time.Sleep(spoolLockDelay)
+	if err := lockSpoolFile(file); err != nil {
+		_ = file.Close()
+		return nil, err
 	}
-	_ = file.Close()
-	return nil, errors.New("canopi spool is busy")
+	return spoolLockRelease(file), nil
 }
 
 func tryAcquireDrainLock(path string) (func(), bool, error) {

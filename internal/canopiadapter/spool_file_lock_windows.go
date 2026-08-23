@@ -18,6 +18,11 @@ func tryLockSpoolFile(file *os.File) (bool, error) {
 	return err == nil, err
 }
 
+func lockSpoolFile(file *os.File) error {
+	var overlapped windows.Overlapped
+	return windows.LockFileEx(windows.Handle(file.Fd()), windows.LOCKFILE_EXCLUSIVE_LOCK, 0, 1, 0, &overlapped)
+}
+
 func createSpoolLockFile(path string) (*os.File, error) {
 	return openWindowsSpoolLockFile(path, windows.CREATE_NEW)
 }

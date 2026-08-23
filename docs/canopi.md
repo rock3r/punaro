@@ -78,6 +78,9 @@ HTTP attempts are bounded, and a rejected event remains queued without starving
 independent events behind it. A crashed worker leaves its events queued and its
 kernel-held lock is released automatically. Enqueue, drain, and supervisor locks
 cannot be reclaimed from a live process by stale timestamps or wall-clock jumps.
+A concurrent enqueue waits for the live kernel lock and completes its bounded
+local publication instead of timing out and dropping the event; collector network
+I/O remains detached and never occurs while that enqueue lock is held.
 Missing configuration, malformed provider input, spool or process-launch
 failure, token-file failure, network failure, and collector rejection all leave
 the coding agent unblocked and produce no provider-visible output.

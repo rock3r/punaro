@@ -22,6 +22,14 @@ func tryLockSpoolFile(file *os.File) (bool, error) {
 	return err == nil, err
 }
 
+func lockSpoolFile(file *os.File) error {
+	fd, err := spoolFileDescriptor(file)
+	if err != nil {
+		return err
+	}
+	return unix.Flock(fd, unix.LOCK_EX)
+}
+
 func createSpoolLockFile(path string) (*os.File, error) {
 	descriptor, err := unix.Open(path, unix.O_CREAT|unix.O_EXCL|unix.O_RDWR|unix.O_CLOEXEC|unix.O_NOFOLLOW, 0o600) // #nosec G304 -- fixed lock name is inside the validated private spool.
 	if err != nil {

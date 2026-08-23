@@ -279,21 +279,37 @@ func TestSpoolSupervisorDeliversEventEnqueuedAfterStartup(t *testing.T) {
 	}
 }
 
-func TestActiveEnqueueLockIsNotReclaimedFromStaleTimestamp(t *testing.T) {
+func TestEnqueueWaitsForActiveLockAndPersistsAfterRelease(t *testing.T) {
 	directory := t.TempDir()
 	lock := filepath.Join(directory, ".enqueue.lock")
 	release, err := acquireSpoolLock(lock)
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer release()
 	stale := time.Now().Add(-3 * time.Second)
 	if err := os.Chtimes(lock, stale, stale); err != nil {
+		release()
 		t.Fatal(err)
 	}
-	secondRelease, err := acquireSpoolLock(lock)
-	if err == nil {
-		secondRelease()
-		t.Fatal("active enqueue lock was reclaimed")
+	done := make(chan error, 1)
+	spool := Spool{Directory: directory, MaxEvents: 1}
+	go func() { done <- spool.Enqueue(spoolEvent("event-after-contention")) }()
+	select {
+	case err := <-done:
+		release()
+		t.Fatalf("Enqueue() returned before active lock release: %v", err)
+	case <-time.After(100 * time.Millisecond):
+	}
+	release()
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("Enqueue() after lock release = %v", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("Enqueue() did not resume after lock release")
+	}
+	if got, err := spool.Pending(); err != nil || got != 1 {
+		t.Fatalf("Pending() after contention = %d, %v; want 1", got, err)
 	}
 }
