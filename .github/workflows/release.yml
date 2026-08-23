@@ -54,7 +54,6 @@ jobs:
           repository="ghcr.io/${GITHUB_REPOSITORY_OWNER,,}/punaro"
           facts=$(env -u GOOS -u GOARCH -u CGO_ENABLED go run ./cmd/punaro-release build-facts \
             --release "$RELEASE" \
-            --compose-file "$PWD/deploy/compose/production.yaml" \
             --plugin-root "$PWD")
           compose_sha256=$(printf '%s\n' "$facts" | jq -er .compose_sha256)
           migration_sha256=$(printf '%s\n' "$facts" | jq -er .migration_manifest_sha256)

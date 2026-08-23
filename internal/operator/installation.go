@@ -4,6 +4,8 @@ package operator
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -40,6 +42,13 @@ func ConfigFile(directory string) string { return filepath.Join(directory, confi
 
 // OverrideFile returns the generated immutable-image Compose file.
 func OverrideFile(directory string) string { return filepath.Join(directory, overrideName) }
+
+// ComposeManifestSHA256 returns the digest of the exact generated Compose
+// artifact written into every current installation and update candidate.
+func ComposeManifestSHA256() string {
+	digest := sha256.Sum256([]byte(composeOverride()))
+	return hex.EncodeToString(digest[:])
+}
 
 // ComposeProjectName returns the stable, installation-specific Docker Compose
 // project name derived from the persisted and database-verified owner identity.

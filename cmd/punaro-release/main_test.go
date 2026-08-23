@@ -7,6 +7,7 @@ import (
 	"runtime"
 	"testing"
 
+	"github.com/rock3r/punaro/internal/operator"
 	punarorelease "github.com/rock3r/punaro/internal/release"
 )
 
@@ -19,10 +20,6 @@ func TestReleaseToolAssemblesSignsAndVerifiesExactBytes(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(artifacts, "punaro-adapter-linux-amd64"), []byte("adapter"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	compose := filepath.Join(dir, "production.yaml")
-	if err := os.WriteFile(compose, []byte("services: {}\n"), 0o600); err != nil {
-		t.Fatal(err)
-	}
 	if err := run([]string{
 		"assemble",
 		"--dir", artifacts,
@@ -31,7 +28,6 @@ func TestReleaseToolAssemblesSignsAndVerifiesExactBytes(t *testing.T) {
 		"--catalog-sequence", "1",
 		"--published-at", "2026-08-16T12:00:00Z",
 		"--expires-at", "2026-08-23T12:00:00Z",
-		"--compose-file", compose,
 		"--minimum-bootstrap-release", "v0.1.0",
 	}); err != nil {
 		t.Fatal(err)
@@ -66,6 +62,9 @@ func TestReleaseToolAssemblesSignsAndVerifiesExactBytes(t *testing.T) {
 	if parsed.MinimumBootstrapRelease != "v0.1.0" {
 		t.Fatalf("minimum bootstrap=%q", parsed.MinimumBootstrapRelease)
 	}
+	if parsed.ComposeSHA256 != operator.ComposeManifestSHA256() {
+		t.Fatalf("compose digest=%q want generated artifact %q", parsed.ComposeSHA256, operator.ComposeManifestSHA256())
+	}
 	catalog, err := os.ReadFile(filepath.Join(artifacts, punarorelease.CatalogFile)) // #nosec G304 -- assembled file in t.TempDir.
 	if err != nil {
 		t.Fatal(err)
@@ -82,20 +81,16 @@ func TestReleaseToolAssemblesSignsAndVerifiesExactBytes(t *testing.T) {
 	}
 }
 
-func TestBuildFactsBindsPluginSkillsComposeAndMigrations(t *testing.T) {
+func TestBuildFactsBindsPluginSkillsGeneratedComposeAndMigrations(t *testing.T) {
 	root, err := filepath.Abs(filepath.Join("..", ".."))
 	if err != nil {
 		t.Fatal(err)
 	}
-	compose := filepath.Join(t.TempDir(), "production.yaml")
-	if err := os.WriteFile(compose, []byte("services: {}\n"), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	facts, err := buildFacts([]string{"--release", "v0.1.0-alpha.1", "--compose-file", compose, "--plugin-root", root})
-	if err != nil || facts.Release != "v0.1.0-alpha.1" || len(facts.ComposeSHA256) != 64 || len(facts.MigrationManifestSHA256) != 64 || len(facts.SkillSetSHA256) != 64 {
+	facts, err := buildFacts([]string{"--release", "v0.1.0-alpha.1", "--plugin-root", root})
+	if err != nil || facts.Release != "v0.1.0-alpha.1" || facts.ComposeSHA256 != operator.ComposeManifestSHA256() || len(facts.MigrationManifestSHA256) != 64 || len(facts.SkillSetSHA256) != 64 {
 		t.Fatalf("facts=%#v err=%v", facts, err)
 	}
-	if _, err := buildFacts([]string{"--release", "v0.1.0", "--compose-file", compose, "--plugin-root", root}); err == nil {
+	if _, err := buildFacts([]string{"--release", "v0.1.0", "--plugin-root", root}); err == nil {
 		t.Fatal("release not matching all plugin manifests was accepted")
 	}
 }

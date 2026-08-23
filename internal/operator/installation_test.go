@@ -3,7 +3,9 @@ package operator
 import (
 	"context"
 	"crypto/ed25519"
+	"crypto/sha256"
 	"encoding/base64"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"os"
@@ -776,6 +778,14 @@ func TestComposeOverrideKeepsMemoryAPIDarkButOperatorEnableable(t *testing.T) {
 	}
 	if environment := daemonEnv(Installation{}); !strings.Contains(environment, "PUNARO_MEMORY_API_ENABLED=false\n") {
 		t.Fatalf("default generated environment is not dark: %s", environment)
+	}
+}
+
+func TestComposeManifestSHA256BindsGeneratedArtifact(t *testing.T) {
+	digest := sha256.Sum256([]byte(composeOverride()))
+	want := hex.EncodeToString(digest[:])
+	if got := ComposeManifestSHA256(); got != want {
+		t.Fatalf("ComposeManifestSHA256() = %q, want %q", got, want)
 	}
 }
 

@@ -16,6 +16,7 @@ import (
 	"path/filepath"
 	"time"
 
+	"github.com/rock3r/punaro/internal/operator"
 	"github.com/rock3r/punaro/internal/plugindiagnostic"
 	punaropostgres "github.com/rock3r/punaro/internal/postgres"
 	punarorelease "github.com/rock3r/punaro/internal/release"
@@ -67,24 +68,19 @@ func buildFacts(args []string) (releaseBuildFacts, error) {
 	flags := flag.NewFlagSet("punaro-release build-facts", flag.ContinueOnError)
 	flags.SetOutput(io.Discard)
 	releaseName := flags.String("release", "", "product release name")
-	composeFile := flags.String("compose-file", "", "production compose source")
 	pluginRoot := flags.String("plugin-root", "", "portable Punaro plugin root")
-	if flags.Parse(args) != nil || flags.NArg() != 0 || *releaseName == "" || *composeFile == "" || *pluginRoot == "" {
+	if flags.Parse(args) != nil || flags.NArg() != 0 || *releaseName == "" || *pluginRoot == "" {
 		return releaseBuildFacts{}, errors.New("release build facts are invalid")
 	}
 	version, err := plugindiagnostic.Version(*pluginRoot)
 	if err != nil || *releaseName != "v"+version {
 		return releaseBuildFacts{}, errors.New("release build facts are invalid")
 	}
-	composeDigest, err := hashFile(*composeFile)
-	if err != nil {
-		return releaseBuildFacts{}, errors.New("release build facts are invalid")
-	}
 	skillDigest, err := plugindiagnostic.SkillSetDigest(filepath.Join(*pluginRoot, "skills"))
 	if err != nil {
 		return releaseBuildFacts{}, errors.New("release build facts are invalid")
 	}
-	return releaseBuildFacts{Release: *releaseName, ComposeSHA256: composeDigest, MigrationManifestSHA256: punaropostgres.MigrationManifestSHA256(), SkillSetSHA256: skillDigest}, nil
+	return releaseBuildFacts{Release: *releaseName, ComposeSHA256: operator.ComposeManifestSHA256(), MigrationManifestSHA256: punaropostgres.MigrationManifestSHA256(), SkillSetSHA256: skillDigest}, nil
 }
 
 func runAssemble(args []string) error {
@@ -96,7 +92,6 @@ func runAssemble(args []string) error {
 	catalogSequence := flags.Int64("catalog-sequence", 0, "monotonic catalog sequence")
 	publishedAt := flags.String("published-at", "", "UTC publication time")
 	expiresAt := flags.String("expires-at", "", "UTC catalog expiry")
-	composeFile := flags.String("compose-file", "deploy/compose/production.yaml", "compose source to hash")
 	image := flags.String("image", "", "optional digest-pinned gateway image")
 	minSafe := flags.Int64("minimum-safe-sequence", 0, "lowest sequence still safe for automatic updates")
 	minBootstrap := flags.String("minimum-bootstrap-release", "", "oldest bootstrap that may install this release")
@@ -107,10 +102,6 @@ func runAssemble(args []string) error {
 		return errors.New("release assembly is invalid")
 	}
 	published, expires, err := assembleTimes(*publishedAt, *expiresAt)
-	if err != nil {
-		return err
-	}
-	composeDigest, err := hashFile(*composeFile)
 	if err != nil {
 		return err
 	}
@@ -132,7 +123,7 @@ func runAssemble(args []string) error {
 		MinimumSafeSequence:     minimumSafe,
 		CatalogSequence:         *catalogSequence,
 		Image:                   *image,
-		ComposeSHA256:           composeDigest,
+		ComposeSHA256:           operator.ComposeManifestSHA256(),
 		MigrationManifestSHA256: punaropostgres.MigrationManifestSHA256(),
 		Database:                schema,
 		PostgreSQLMajor:         productionPostgresMajor,
@@ -349,20 +340,6 @@ func currentSchemaRange() punarorelease.SchemaRange {
 		Target:        manifest.MaxSupported,
 		RollbackFloor: manifest.MinSupported,
 	}
-}
-
-func hashFile(path string) (string, error) {
-	file, err := os.Open(path) // #nosec G304 -- explicit compose source path.
-	if err != nil {
-		return "", errors.New("release assembly is invalid")
-	}
-	hash := sha256.New()
-	_, copyErr := io.Copy(hash, file)
-	closeErr := file.Close()
-	if copyErr != nil || closeErr != nil {
-		return "", errors.New("release assembly is invalid")
-	}
-	return hex.EncodeToString(hash.Sum(nil)), nil
 }
 
 func requireAbsentFile(path string) error {

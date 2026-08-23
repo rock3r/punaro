@@ -54,7 +54,7 @@ repo_dir=$(CDPATH= cd -- "$script_dir/.." && pwd)
 
 facts=$(
 	cd "$repo_dir"
-	env -u GOOS -u GOARCH -u CGO_ENABLED go run ./cmd/punaro-release build-facts --release "$release" --compose-file "$repo_dir/deploy/compose/production.yaml" --plugin-root "$repo_dir"
+	env -u GOOS -u GOARCH -u CGO_ENABLED go run ./cmd/punaro-release build-facts --release "$release" --plugin-root "$repo_dir"
 ) || fail 'release build identity is invalid'
 compose_sha256=$(printf '%s\n' "$facts" | sed -n 's/.*"compose_sha256":"\([0-9a-f]*\)".*/\1/p')
 migration_sha256=$(printf '%s\n' "$facts" | sed -n 's/.*"migration_manifest_sha256":"\([0-9a-f]*\)".*/\1/p')

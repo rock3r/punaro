@@ -160,9 +160,12 @@ go run ./cmd/punaro-release assemble \
 go run ./cmd/punaro-release validate --dir ./dist
 ```
 
-`assemble` hashes `deploy/compose/production.yaml` and the embedded migration
+`assemble` hashes the exact generated `compose.operator.yaml` template installed
+by `punaro init` and staged by `punaro update`, plus the embedded migration
 manifest. Published releases require the workflow-produced digest-pinned GHCR
-image; it must be `@sha256:` and `release_sha256` must match.
+image; it must be `@sha256:` and `release_sha256` must match. The separate
+`deploy/compose/production.yaml` file remains the reference single-node bundle;
+it is not the host-local operator artifact checked during update and doctor.
 
 ## Bootstrap pull
 
