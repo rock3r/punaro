@@ -80,6 +80,28 @@ type Event struct {
 	Metadata              map[string]any `json:"metadata,omitempty"`
 }
 
+// UnmarshalJSON preserves strict object semantics for the optional metadata
+// field: omission is valid, while an explicit JSON null contradicts the schema.
+func (e *Event) UnmarshalJSON(payload []byte) error {
+	var fields map[string]json.RawMessage
+	if err := json.Unmarshal(payload, &fields); err != nil {
+		return err
+	}
+	if metadata, present := fields["metadata"]; present && bytes.Equal(bytes.TrimSpace(metadata), []byte("null")) {
+		return errors.New("metadata must be an object when present")
+	}
+	type wireEvent Event
+	decoder := json.NewDecoder(bytes.NewReader(payload))
+	decoder.DisallowUnknownFields()
+	decoder.UseNumber()
+	var decoded wireEvent
+	if err := decoder.Decode(&decoded); err != nil {
+		return err
+	}
+	*e = Event(decoded)
+	return nil
+}
+
 var machineIDPattern = regexp.MustCompile(`^[A-Za-z0-9._-]+$`)
 
 var allowedMetadataKeys = map[string]struct{}{

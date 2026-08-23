@@ -11,7 +11,8 @@ Prompt text, transcripts, assistant messages, credentials, tool inputs, tool
 outputs, and unrecognized provider fields have no wire representation.
 JSON numeric metadata is decoded as an exact `json.Number`, so schema-valid
 integers are never rounded through IEEE-754 conversion during ingestion or a
-durable-store restart.
+durable-store restart. Metadata may be omitted, but an explicit JSON `null` is
+rejected because the published schema requires an object when the field is present.
 
 Card identity is `(source, machine.id, agent_instance_id)`. `event_id` is the
 at-least-once idempotency key; `activity_at`, then `event_id`, orders updates for

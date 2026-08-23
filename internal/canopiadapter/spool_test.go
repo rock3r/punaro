@@ -139,6 +139,19 @@ func TestWindowsSpoolSyncFlushesPublishedDirectoryEntry(t *testing.T) {
 	}
 }
 
+func TestWindowsSpoolLocksUseExclusiveNoReparseOpens(t *testing.T) {
+	payload, err := os.ReadFile("spool_file_lock_windows.go")
+	if err != nil {
+		t.Fatal(err)
+	}
+	source := string(payload)
+	for _, required := range []string{"CREATE_NEW", "OPEN_EXISTING", "FILE_FLAG_OPEN_REPARSE_POINT", "FILE_ATTRIBUTE_REPARSE_POINT"} {
+		if !strings.Contains(source, required) {
+			t.Fatalf("Windows spool lock open is missing %q", required)
+		}
+	}
+}
+
 func TestSpoolQueuedEventReadsAreBoundedBeforeAllocation(t *testing.T) {
 	payload, err := os.ReadFile("spool.go")
 	if err != nil {

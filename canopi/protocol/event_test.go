@@ -98,3 +98,16 @@ func TestDecodeEventPreservesLargeIntegerMetadataExactly(t *testing.T) {
 		t.Fatalf("decoded metadata = %s, want %s", got, want)
 	}
 }
+
+func TestDecodeEventRejectsExplicitNullMetadata(t *testing.T) {
+	event := validEvent()
+	event.Metadata = nil
+	payload, err := json.Marshal(event)
+	if err != nil {
+		t.Fatal(err)
+	}
+	payload = bytes.Replace(payload, []byte(`"task":`), []byte(`"metadata":null,"task":`), 1)
+	if _, err := DecodeEvent(bytes.NewReader(payload), int64(len(payload))); err == nil {
+		t.Fatal("DecodeEvent() accepted explicit null metadata")
+	}
+}

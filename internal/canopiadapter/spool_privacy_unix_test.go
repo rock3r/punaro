@@ -4,6 +4,7 @@ package canopiadapter
 
 import (
 	"os"
+	"path/filepath"
 	"syscall"
 	"testing"
 	"time"
@@ -31,5 +32,28 @@ func TestSpoolDirectoryMustBelongToCurrentUser(t *testing.T) {
 	}
 	if ownedSpoolDirectory(spoolDirectoryInfo{uid: other}) {
 		t.Fatal("other-user spool directory was accepted")
+	}
+}
+
+func TestSpoolLocksRejectPreexistingSymlinks(t *testing.T) {
+	for _, name := range []string{".enqueue.lock", ".drain.lock", ".supervisor.lock"} {
+		t.Run(name, func(t *testing.T) {
+			path := filepath.Join(t.TempDir(), name)
+			if err := os.Symlink(name, path); err != nil {
+				t.Fatal(err)
+			}
+			file, err := openSpoolLockFile(path)
+			if err != nil {
+				t.Fatalf("openSpoolLockFile() did not recover from planted symlink: %v", err)
+			}
+			defer func() { _ = file.Close() }()
+			info, err := os.Lstat(path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !privateSpoolFile(path, info) {
+				t.Fatal("recovered spool lock is not a private current-user file")
+			}
+		})
 	}
 }

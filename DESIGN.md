@@ -1813,7 +1813,9 @@ Prompts, transcripts, assistant messages, credentials, tool inputs, and tool
 outputs are not part of the protocol. Metadata is default-deny: the schema and
 Go validator expose only `hook`, `simulated`, and `agent_type`, with matching
 per-key types. Wire and persisted decoding retain numeric metadata as exact JSON
-numbers instead of converting through `float64`. Only explicit, trusted hook fields drive lifecycle state;
+numbers instead of converting through `float64`; omission is valid, while an
+explicit JSON `null` is rejected because the schema requires an object. Only
+explicit, trusted hook fields drive lifecycle state;
 assistant text is neither inspected for classification nor forwarded. Claude
 invocation IDs use a fixed-length, secret-keyed HMAC over machine identity,
 provider payload, and local invocation time, never an unkeyed content digest.
@@ -1847,6 +1849,9 @@ Each queued child must also be a stable, no-follow, private current-user-owned
 regular file. Event enumeration discards pre-existing foreign or shared children
 after the parent is tightened and before capacity accounting or delivery; enqueue
 protects new files before publication.
+Fixed-name enqueue, drain, and supervisor locks are created exclusively and
+opened without following links. Pre-existing entries that fail current-user
+ownership or privacy checks are removed, directory-synced, and safely recreated.
 
 Structurally valid event batches continue across per-event admission failures
 and return ordered per-event status records with HTTP 207 when mixed; only a

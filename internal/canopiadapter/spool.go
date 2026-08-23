@@ -438,15 +438,47 @@ func tryAcquireRecoverableLock(path string) (func(), bool, error) {
 }
 
 func openSpoolLockFile(path string) (*os.File, error) {
-	file, err := os.OpenFile(path, os.O_CREATE|os.O_RDWR, 0o600) // #nosec G304 -- path is inside the configured private spool.
-	if err != nil {
-		return nil, err
+	for range 2 {
+		file, err := createSpoolLockFile(path)
+		if err == nil {
+			if err := protectSpoolFile(path, file); err != nil {
+				_ = file.Close()
+				_ = os.Remove(path)
+				return nil, err
+			}
+			return file, nil
+		}
+		if !errors.Is(err, os.ErrExist) {
+			return nil, err
+		}
+		before, err := os.Lstat(path)
+		if errors.Is(err, os.ErrNotExist) {
+			continue
+		}
+		if err != nil {
+			return nil, err
+		}
+		if !privateSpoolFile(path, before) {
+			if err := os.Remove(path); err != nil && !errors.Is(err, os.ErrNotExist) {
+				return nil, err
+			}
+			if err := syncDirectory(filepath.Dir(path)); err != nil {
+				return nil, err
+			}
+			continue
+		}
+		file, err = openExistingSpoolLockFile(path)
+		if err != nil {
+			return nil, err
+		}
+		after, err := file.Stat()
+		if err != nil || !os.SameFile(before, after) || !privateSpoolFile(path, after) {
+			_ = file.Close()
+			return nil, errors.New("canopi spool lock changed while opening")
+		}
+		return file, nil
 	}
-	if err := file.Chmod(0o600); err != nil {
-		_ = file.Close()
-		return nil, err
-	}
-	return file, nil
+	return nil, errors.New("cannot replace unprotected Canopi spool lock")
 }
 
 func spoolLockRelease(file *os.File) func() {

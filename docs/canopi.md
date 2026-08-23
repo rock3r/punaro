@@ -66,7 +66,8 @@ creates a fixed-length invocation identifier from a keyed HMAC over machine
 identity, provider payload, and local invocation time; neither the source text
 nor an unkeyed source digest is transmitted. Only task title,
 optional repository, stable IDs, state, timestamps, and primitive allowlisted
-metadata leave the machine.
+metadata leave the machine. Metadata may be omitted, while explicit JSON `null`
+is rejected to match the schema's object contract.
 
 The hook-facing Claude process performs no network I/O. It normalizes the event,
 durably enqueues only that privacy-safe event, starts a detached delivery child,
@@ -241,6 +242,10 @@ private current-user-owned regular file across the open; entries planted before
 the spool directory was tightened are discarded before capacity accounting or
 delivery rather than authenticated to the collector. Newly enqueued files receive
 the same protection before publication.
+The fixed enqueue, drain, and supervisor lock names use create-exclusive and
+no-follow opens with the same ownership and privacy validation. Unsafe entries
+left from a previously shared directory are removed, directory-synced, and
+replaced instead of permanently blocking the adapter.
 
 Run the durable worker as a continuously supervised companion using the same
 environment (for example with `Restart=always`/`KeepAlive` in the host service
