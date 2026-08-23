@@ -1489,31 +1489,6 @@ func TestAdapterServiceBindingRejectsStalePlatformDefinitions(t *testing.T) {
 	}
 }
 
-func TestReadAdapterServiceFileIsBoundedAndContextAware(t *testing.T) {
-	dir := t.TempDir()
-	path := filepath.Join(dir, "punaro-adapter.service")
-	if err := os.WriteFile(path, []byte("[Service]\n"), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	body, err := readAdapterServiceFile(context.Background(), path, 64<<10)
-	if err != nil || string(body) != "[Service]\n" {
-		t.Fatalf("body=%q err=%v", body, err)
-	}
-
-	if err := os.WriteFile(path, make([]byte, (64<<10)+1), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := readAdapterServiceFile(context.Background(), path, 64<<10); err == nil {
-		t.Fatal("oversized service definition accepted")
-	}
-
-	ctx, cancel := context.WithCancel(context.Background())
-	cancel()
-	if _, err := readAdapterServiceFile(ctx, path, 64<<10); err == nil {
-		t.Fatal("canceled service definition read accepted")
-	}
-}
-
 func TestAdapterWindowsTaskRequiresExactProtectedRunner(t *testing.T) {
 	valid := `<Task><Actions><Exec><Command>C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe</Command><Arguments>-NoProfile -NonInteractive -WindowStyle Hidden -ExecutionPolicy Bypass -File "C:\Users\Seb\AppData\Local\Punaro\Run-PunaroAdapter.ps1"</Arguments></Exec></Actions></Task>`
 	if !adapterWindowsTaskBound(valid) {

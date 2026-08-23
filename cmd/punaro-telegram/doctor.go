@@ -17,6 +17,7 @@ import (
 
 	"github.com/rock3r/punaro/internal/adapter"
 	punarodiagnostic "github.com/rock3r/punaro/internal/diagnostic"
+	"github.com/rock3r/punaro/internal/incrementalfs"
 	"github.com/rock3r/punaro/internal/relay"
 	"github.com/rock3r/punaro/internal/telegram"
 )
@@ -238,8 +239,7 @@ func inspectTelegramService(ctx context.Context) telegramServiceDoctorResult {
 		result.Installed = true
 	} else if info, statErr := os.Lstat(installedPath); statErr == nil && info.Mode().IsRegular() && info.Mode()&os.ModeSymlink == 0 {
 		result.Installed = true
-		// #nosec G304 -- fixed service definition selected only by the local platform.
-		if body, readErr := os.ReadFile(installedPath); readErr == nil && len(body) <= 64<<10 {
+		if body, readErr := incrementalfs.ReadFile(ctx, installedPath, 64<<10); readErr == nil {
 			result.Executable = telegramServiceFileBound(runtime.GOOS, string(body))
 		}
 	}
