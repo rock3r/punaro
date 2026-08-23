@@ -20,6 +20,7 @@ import (
 	"github.com/rock3r/punaro/internal/adapter"
 	punarobackup "github.com/rock3r/punaro/internal/backup"
 	"github.com/rock3r/punaro/internal/clienttransport"
+	"github.com/rock3r/punaro/internal/incrementalfs"
 	"github.com/rock3r/punaro/internal/listener"
 	"github.com/rock3r/punaro/internal/operator"
 	punaropostgres "github.com/rock3r/punaro/internal/postgres"
@@ -48,9 +49,7 @@ func inspectServerDoctorState(parent context.Context, installation operator.Inst
 	state.RunningImage = inspectRunningImage(ctx, installation)
 	state.Storage = inspectServerStorage(installation.DataDir, serverDoctorMinimumFree)
 	state.BackupAvailable, state.BackupFresh = inspectServerBackups(ctx, installation.BackupDir, time.Now().UTC())
-	state.DatabasePrivate = known(true, serverComposeTopologyPrivate(installation))
 	state.HealthPrivate = known(true, listener.IsLoopback(installation.HealthListenAddr))
-	state.AdminPrivate = state.DatabasePrivate
 	state.BlobPrivate = known(true, serverBlobTopologyPrivate(installation))
 	state.TunnelRoute, state.TunnelOrigin, state.AccessAdmission, state.RelayEnrollment, state.RelayProtocol = inspectServerRelay(ctx, installation, relayProfile)
 	if gatewayColocated {
@@ -59,9 +58,17 @@ func inspectServerDoctorState(parent context.Context, installation operator.Inst
 
 	database, err := punaropostgres.OpenApplication(ctx, punaropostgres.Config{DSNFile: installation.AppDSNFile})
 	if err == nil {
+		private, listenerErr := database.ListenerPrivate(ctx)
+		state.DatabasePrivate = known(listenerErr == nil, private)
 		state.PostgresMajor, err = database.PostgreSQLMajor(ctx)
 		state.PostgresKnown = err == nil
 		_ = database.Close()
+	}
+	administration, err := punaropostgres.OpenAdministration(ctx, punaropostgres.Config{DSNFile: installation.OwnerDSNFile})
+	if err == nil {
+		private, listenerErr := administration.ListenerPrivate(ctx)
+		state.AdminPrivate = known(listenerErr == nil, private)
+		_ = administration.Close()
 	}
 	state.UpdateTransaction, state.RecoveryReceipt, state.UpdateRecovery = inspectUpdateState(ctx, installation)
 	return state
@@ -150,15 +157,6 @@ func inspectServerBackups(ctx context.Context, root string, now time.Time) (know
 	latest := backups[len(backups)-1]
 	age := now.Sub(latest.CreatedAt)
 	return known(true, true), known(true, age >= 0 && age <= serverDoctorBackupFresh)
-}
-
-func serverComposeTopologyPrivate(installation operator.Installation) bool {
-	for _, failure := range operator.CheckPaths(installation) {
-		if strings.Contains(failure, "Compose override") || strings.Contains(failure, "daemon environment") {
-			return false
-		}
-	}
-	return true
 }
 
 func serverBlobTopologyPrivate(installation operator.Installation) bool {
@@ -321,20 +319,16 @@ func inspectGatewayService(parent context.Context, expectedRelease string) (know
 	running := activeKnown && strings.TrimSpace(activeState) == "active"
 	exitStatus, exitKnown := boundedCommand(parent, "systemctl", "show", "--property=ExecMainStatus", "--value", "punaro-telegram.service")
 	serviceResult, resultKnown := boundedCommand(parent, "systemctl", "show", "--property=Result", "--value", "punaro-telegram.service")
-	executable := known(true, serverGatewayServiceFileBound("/etc/systemd/system/punaro-telegram.service"))
+	executable := known(true, serverGatewayServiceFileBound(parent, "/etc/systemd/system/punaro-telegram.service"))
 	release, releaseKnown := boundedCommand(parent, "/usr/local/bin/punaro-telegram", "version")
 	return known(true, installed), known(true, enabled), known(activeKnown, running), executable,
 		known(exitKnown, strings.TrimSpace(exitStatus) == "0"), known(resultKnown, strings.TrimSpace(serviceResult) == "success"),
 		known(releaseKnown && expectedRelease != "", strings.TrimSpace(release) == expectedRelease)
 }
 
-func serverGatewayServiceFileBound(path string) bool {
-	info, err := os.Lstat(path) // #nosec G703 -- fixed system service definition.
-	if err != nil || !info.Mode().IsRegular() || info.Mode()&os.ModeSymlink != 0 {
-		return false
-	}
-	body, err := os.ReadFile(path) // #nosec G304 -- fixed system service definition.
-	if err != nil || len(body) > 64<<10 {
+func serverGatewayServiceFileBound(ctx context.Context, path string) bool {
+	body, err := incrementalfs.ReadFile(ctx, path, 64<<10)
+	if err != nil {
 		return false
 	}
 	count := 0

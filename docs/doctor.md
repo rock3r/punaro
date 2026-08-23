@@ -142,7 +142,8 @@ Installation and provenance: `installation_configuration`,
 `machine_identity`.
 
 Database, storage, and update recovery: `database_connection`,
-`database_listener_private`, `database_owner`, `database_pair`,
+`database_listener_private`, `administration_listener_private`,
+`database_owner`, `database_pair`,
 `database_schema`, `postgres_major`, `storage_capacity`, `verified_backup`,
 `backup_freshness`, `maintenance_fence`, `host_update_stage`,
 `update_transaction`, `recovery_receipt`, `update_recovery`,
@@ -152,9 +153,13 @@ Database, storage, and update recovery: `database_connection`,
 `postgres_major` passes only when the running server reports the exact major
 compiled into that release and used by its release manifest; accepting any
 newer generic PostgreSQL floor would hide restore or partial-upgrade drift.
+`database_listener_private` and `administration_listener_private` query
+PostgreSQL's effective `listen_addresses` through the application and owner
+connections respectively; every configured TCP address must be localhost or a
+literal loopback address.
 
 Service and edge: `health_endpoint`, `readiness_endpoint`,
-`health_listener_private`, `administration_listener_private`, `tunnel_route`,
+`health_listener_private`, `tunnel_route`,
 `tunnel_origin`, `access_admission`, `relay_enrollment`, `relay_protocol`,
 `gateway_service_installed`, `gateway_service_enabled`,
 `gateway_service_running`, `gateway_service_executable`,

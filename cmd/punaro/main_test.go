@@ -993,6 +993,28 @@ func TestServerDoctorBackupInspectionBoundsRootEntries(t *testing.T) {
 	}
 }
 
+func TestServerGatewayServiceDefinitionReadIsBoundedAndContextAware(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "punaro-telegram.service")
+	valid := []byte("[Service]\nExecStart=/usr/local/bin/punaro-telegram\n")
+	if err := os.WriteFile(path, valid, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if !serverGatewayServiceFileBound(t.Context(), path) {
+		t.Fatal("valid gateway service definition rejected")
+	}
+	if err := os.WriteFile(path, make([]byte, (64<<10)+1), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if serverGatewayServiceFileBound(t.Context(), path) {
+		t.Fatal("oversized gateway service definition accepted")
+	}
+	ctx, cancel := context.WithCancel(t.Context())
+	cancel()
+	if serverGatewayServiceFileBound(ctx, path) {
+		t.Fatal("canceled gateway service definition read continued")
+	}
+}
+
 func TestServerDoctorRequiresReleasePostgreSQLMajor(t *testing.T) {
 	preserveDependencies(t)
 	directory := testInstallation(t)
