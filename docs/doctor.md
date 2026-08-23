@@ -190,6 +190,11 @@ Service, release, and plugin state: `adapter_service_installed`,
 `claude_plugin_registration`, `plugin_launcher`, `plugin_version`,
 `skill_set_parity`.
 
+The adapter runs `version` on the fixed installer-owned `punaro-bootstrap`
+executable under the shared diagnostic deadline and passes that identity into
+the bootstrap compatibility checks. It does not substitute the adapter's
+release identity for `minimum_bootstrap_release`.
+
 ### Bootstrap
 
 `bootstrap_directory`, `bootstrap_lock`, `run_lock`, `disk_space`,

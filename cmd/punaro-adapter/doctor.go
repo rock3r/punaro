@@ -25,11 +25,12 @@ import (
 )
 
 const (
-	defaultAdapterDoctorTimeout = 15 * time.Second
-	maximumAdapterDoctorTimeout = 30 * time.Second
-	maximumMailboxDoctorOutput  = 64 << 10
-	maximumMailboxDoctorEntries = 4096
-	maximumMailboxDoctorBytes   = 64 << 20
+	defaultAdapterDoctorTimeout   = 15 * time.Second
+	maximumAdapterDoctorTimeout   = 30 * time.Second
+	maximumMailboxDoctorOutput    = 64 << 10
+	maximumMailboxDoctorEntries   = 4096
+	maximumMailboxDoctorBytes     = 64 << 20
+	maximumBootstrapVersionOutput = 256
 )
 
 type serviceDoctorResult struct {
@@ -50,6 +51,27 @@ type pluginDoctorResult struct {
 	SkillDigest string
 }
 
+type boundedDoctorOutput struct {
+	buffer   strings.Builder
+	maximum  int
+	overflow bool
+}
+
+func (output *boundedDoctorOutput) Write(value []byte) (int, error) {
+	remaining := output.maximum - output.buffer.Len()
+	if remaining > 0 {
+		retained := value
+		if len(retained) > remaining {
+			retained = retained[:remaining]
+		}
+		_, _ = output.buffer.Write(retained)
+	}
+	if len(value) > remaining {
+		output.overflow = true
+	}
+	return len(value), nil
+}
+
 var adapterBuildRelease string
 
 var (
@@ -67,10 +89,13 @@ var (
 		}
 		return client.DoctorNotifications(ctx)
 	}
-	adapterDoctorMailboxProbe   = probeMailboxMCP
-	adapterDoctorServiceProbe   = inspectAdapterService
-	adapterDoctorBootstrapProbe = func(ctx context.Context, directory string) (punarodiagnostic.Report, error) {
-		return bootstrap.Doctor(ctx, bootstrap.DoctorRequest{Directory: directory, BootstrapRelease: adapterBuildRelease})
+	adapterDoctorMailboxProbe          = probeMailboxMCP
+	adapterDoctorServiceProbe          = inspectAdapterService
+	adapterDoctorBootstrapReleaseProbe = func(ctx context.Context) string {
+		return inspectAdapterBootstrapRelease(ctx, defaultAdapterBootstrapExecutable())
+	}
+	adapterDoctorBootstrapProbe = func(ctx context.Context, directory, bootstrapRelease string) (punarodiagnostic.Report, error) {
+		return bootstrap.Doctor(ctx, bootstrap.DoctorRequest{Directory: directory, BootstrapRelease: bootstrapRelease})
 	}
 	adapterDoctorPluginProbe = inspectAdapterPlugin
 )
@@ -178,7 +203,8 @@ func runAdapterDoctor(args []string, stdout, stderr io.Writer) int {
 		boolDoctorCheck(service.RestartState, "adapter_service_restart_state", "repair_adapter_service_restart"),
 	)
 
-	bootstrapReport, bootstrapErr := adapterDoctorBootstrapProbe(ctx, *bootstrapDirectory)
+	bootstrapRelease := adapterDoctorBootstrapReleaseProbe(ctx)
+	bootstrapReport, bootstrapErr := adapterDoctorBootstrapProbe(ctx, *bootstrapDirectory, bootstrapRelease)
 	if bootstrapErr != nil {
 		checks = append(checks,
 			punarodiagnostic.Unavailable("bootstrap_selected_artifact", "repair_bootstrap_state"),
@@ -490,6 +516,44 @@ func defaultAdapterBootstrapDirectory() string {
 		return ""
 	}
 	return filepath.Join(home, ".local", "state", "punaro-bootstrap")
+}
+
+func defaultAdapterBootstrapExecutable() string {
+	if runtime.GOOS == "windows" {
+		root := strings.TrimSpace(os.Getenv("LOCALAPPDATA"))
+		if root == "" {
+			return ""
+		}
+		return filepath.Join(root, "Punaro", "bin", "punaro-bootstrap.exe")
+	}
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return ""
+	}
+	return filepath.Join(home, ".local", "bin", "punaro-bootstrap")
+}
+
+func inspectAdapterBootstrapRelease(ctx context.Context, executable string) string {
+	if executable == "" || !filepath.IsAbs(executable) || ctx.Err() != nil {
+		return ""
+	}
+	info, err := os.Lstat(executable) // #nosec G703 -- fixed installer-owned bootstrap path for the local platform.
+	if err != nil || !info.Mode().IsRegular() || info.Mode()&os.ModeSymlink != 0 || runtime.GOOS != "windows" && info.Mode().Perm()&0o111 == 0 {
+		return ""
+	}
+	command := exec.CommandContext(ctx, executable, "version") // #nosec G204 -- validated fixed installer-owned executable, without a shell.
+	command.Stdin = nil
+	command.Stderr = io.Discard
+	output := boundedDoctorOutput{maximum: maximumBootstrapVersionOutput}
+	command.Stdout = &output
+	if err := command.Run(); err != nil || output.overflow {
+		return ""
+	}
+	release := strings.TrimSpace(output.buffer.String())
+	if release == "" || strings.ContainsAny(release, "\r\n\t ") {
+		return ""
+	}
+	return release
 }
 
 func writeMCPDoctorRequest(writer *bufio.Writer, id int, method string, params any) error {

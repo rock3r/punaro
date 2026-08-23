@@ -305,7 +305,11 @@ func TestAdapterDoctorEmitsStrictHealthyReport(t *testing.T) {
 		return serviceDoctorResult{Installed: true, Enabled: true, Running: true, Executable: true, ExitStatus: true, RestartState: true}
 	}
 	adapterBuildRelease = "v0.1.0-alpha.1"
-	adapterDoctorBootstrapProbe = func(context.Context, string) (punarodiagnostic.Report, error) {
+	adapterDoctorBootstrapReleaseProbe = func(context.Context) string { return "v0.1.0-alpha.0" }
+	adapterDoctorBootstrapProbe = func(_ context.Context, _ string, bootstrapRelease string) (punarodiagnostic.Report, error) {
+		if bootstrapRelease != "v0.1.0-alpha.0" {
+			t.Fatalf("bootstrap release=%q", bootstrapRelease)
+		}
 		return healthyAdapterBootstrapReport(t), nil
 	}
 	adapterDoctorPluginProbe = func(context.Context, string) pluginDoctorResult {
@@ -584,14 +588,30 @@ func preserveAdapterDoctorDependencies(t *testing.T) {
 	t.Helper()
 	relayProbe, notificationProbe := adapterDoctorRelayProbe, adapterDoctorNotificationProbe
 	mailboxProbe, serviceProbe := adapterDoctorMailboxProbe, adapterDoctorServiceProbe
-	bootstrapProbe, pluginProbe := adapterDoctorBootstrapProbe, adapterDoctorPluginProbe
+	bootstrapReleaseProbe, bootstrapProbe, pluginProbe := adapterDoctorBootstrapReleaseProbe, adapterDoctorBootstrapProbe, adapterDoctorPluginProbe
 	buildRelease := adapterBuildRelease
 	t.Cleanup(func() {
 		adapterDoctorRelayProbe, adapterDoctorNotificationProbe = relayProbe, notificationProbe
 		adapterDoctorMailboxProbe, adapterDoctorServiceProbe = mailboxProbe, serviceProbe
-		adapterDoctorBootstrapProbe, adapterDoctorPluginProbe = bootstrapProbe, pluginProbe
+		adapterDoctorBootstrapReleaseProbe, adapterDoctorBootstrapProbe, adapterDoctorPluginProbe = bootstrapReleaseProbe, bootstrapProbe, pluginProbe
 		adapterBuildRelease = buildRelease
 	})
+}
+
+func TestInspectAdapterBootstrapReleaseExecutesInstalledIdentity(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("shell fixture is Unix-only")
+	}
+	executable := filepath.Join(t.TempDir(), "punaro-bootstrap")
+	if err := os.WriteFile(executable, []byte("#!/bin/sh\n[ \"$1\" = version ] || exit 2\nprintf '%s\\n' v0.1.0-alpha.0\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(executable, 0o700); err != nil { // #nosec G302 -- private executable fixture in a test-owned temporary directory.
+		t.Fatal(err)
+	}
+	if release := inspectAdapterBootstrapRelease(t.Context(), executable); release != "v0.1.0-alpha.0" {
+		t.Fatalf("bootstrap release=%q", release)
+	}
 }
 
 func healthyAdapterBootstrapReport(t *testing.T) punarodiagnostic.Report {
