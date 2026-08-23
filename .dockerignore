@@ -6,6 +6,13 @@
 !Dockerfile
 !.dockerignore
 !docker-compose.memory-onboarding-e2e.yml
+!plugin.json
+!.codex-plugin/
+!.codex-plugin/plugin.json
+!.claude-plugin/
+!.claude-plugin/plugin.json
+!skills/
+!skills/**
 !cmd/
 !cmd/**
 !internal/

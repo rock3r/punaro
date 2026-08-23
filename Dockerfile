@@ -12,6 +12,10 @@ COPY go.mod go.sum ./
 RUN go mod download
 COPY cmd ./cmd
 COPY internal ./internal
+COPY plugin.json ./
+COPY .codex-plugin/plugin.json ./.codex-plugin/
+COPY .claude-plugin/plugin.json ./.claude-plugin/
+COPY skills ./skills
 COPY Dockerfile .dockerignore docker-compose.memory-onboarding-e2e.yml ./
 COPY scripts/install-client.sh scripts/install-adapter.sh ./scripts/
 COPY scripts/verify-deployment-files.sh ./scripts/

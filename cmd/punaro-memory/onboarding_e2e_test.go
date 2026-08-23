@@ -48,6 +48,10 @@ func TestMemoryOnboardingE2EImageIncludesInstallerAssets(t *testing.T) {
 		t.Fatal("E2E image Dockerfile is unavailable")
 	}
 	for _, expected := range []string{
+		"COPY plugin.json ./",
+		"COPY .codex-plugin/plugin.json ./.codex-plugin/",
+		"COPY .claude-plugin/plugin.json ./.claude-plugin/",
+		"COPY skills ./skills",
 		"COPY scripts/install-client.sh scripts/install-adapter.sh ./scripts/",
 		"COPY deploy/systemd/user/punaro-adapter.service ./deploy/systemd/user/",
 	} {
@@ -59,7 +63,7 @@ func TestMemoryOnboardingE2EImageIncludesInstallerAssets(t *testing.T) {
 	if err != nil {
 		t.Fatal("E2E image ignore policy is unavailable")
 	}
-	for _, expected := range []string{"!scripts/install-client.sh", "!scripts/install-adapter.sh", "!deploy/systemd/user/punaro-adapter.service"} {
+	for _, expected := range []string{"!plugin.json", "!.codex-plugin/plugin.json", "!.claude-plugin/plugin.json", "!skills/**", "!scripts/install-client.sh", "!scripts/install-adapter.sh", "!deploy/systemd/user/punaro-adapter.service"} {
 		if !strings.Contains(string(ignored), expected) {
 			t.Fatal("E2E image build context excludes required installer assets")
 		}
