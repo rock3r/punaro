@@ -36,6 +36,27 @@ const (
 	serverDoctorBackupFresh    = 24 * time.Hour
 )
 
+type boundedServerDoctorOutput struct {
+	buffer   strings.Builder
+	maximum  int
+	overflow bool
+}
+
+func (output *boundedServerDoctorOutput) Write(value []byte) (int, error) {
+	remaining := output.maximum - output.buffer.Len()
+	if remaining > 0 {
+		retained := value
+		if len(retained) > remaining {
+			retained = retained[:remaining]
+		}
+		_, _ = output.buffer.Write(retained)
+	}
+	if len(value) > remaining {
+		output.overflow = true
+	}
+	return len(value), nil
+}
+
 func inspectServerDoctorState(parent context.Context, installation operator.Installation, machineID string, gatewayColocated bool, relayProfile string) serverDoctorState {
 	ctx, cancel := context.WithTimeout(parent, serverDoctorTimeout)
 	defer cancel()
@@ -390,9 +411,10 @@ func boundedCommand(parent context.Context, executable string, arguments ...stri
 	command := exec.CommandContext(ctx, executable, arguments...) // #nosec G204 -- fixed audited executable and structured arguments.
 	command.Stdin = nil
 	command.Stderr = io.Discard
-	output, err := command.Output()
-	if err != nil || ctx.Err() != nil || len(output) > serverDoctorOutputLimit {
+	output := boundedServerDoctorOutput{maximum: serverDoctorOutputLimit}
+	command.Stdout = &output
+	if err := command.Run(); err != nil || ctx.Err() != nil || output.overflow {
 		return "", false
 	}
-	return string(output), true
+	return output.buffer.String(), true
 }

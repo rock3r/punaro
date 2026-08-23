@@ -576,6 +576,17 @@ func TestRunRoutesUpdateCommand(t *testing.T) {
 	}
 }
 
+func TestServerDoctorCommandOutputIsBounded(t *testing.T) {
+	output := boundedServerDoctorOutput{maximum: serverDoctorOutputLimit}
+	if written, err := output.Write([]byte("healthy")); err != nil || written != len("healthy") || output.buffer.String() != "healthy" || output.overflow {
+		t.Fatalf("bounded output=%q overflow=%v written=%d err=%v", output.buffer.String(), output.overflow, written, err)
+	}
+	oversized := strings.Repeat("x", serverDoctorOutputLimit+1)
+	if written, err := output.Write([]byte(oversized)); err != nil || written != len(oversized) || output.buffer.Len() != serverDoctorOutputLimit || !output.overflow {
+		t.Fatalf("oversized length=%d overflow=%v written=%d err=%v", output.buffer.Len(), output.overflow, written, err)
+	}
+}
+
 func TestPostgresToolNeverPlacesPasswordInArgumentsOrInheritedEnvironment(t *testing.T) {
 	root := t.TempDir()
 	dsnFile := filepath.Join(root, "owner.dsn")
