@@ -29,6 +29,8 @@ All component deadlines are bounded to 1–30 seconds. Network probes use signed
 non-consuming nonces and read-only protocol handshakes. Local SQLite checks use
 a read-only connection and bounded queries. Installed mailbox smoke checks
 hash their state tree before and after the MCP initialize/tools-only exchange.
+Backup contents, mailbox state, and nested skill trees are traversed in bounded
+directory batches with total-entry ceilings and deadline checks between reads.
 
 ## Commands
 

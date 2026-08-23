@@ -14,6 +14,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -21,6 +22,7 @@ import (
 	"github.com/rock3r/punaro/internal/adapter"
 	"github.com/rock3r/punaro/internal/bootstrap"
 	punarodiagnostic "github.com/rock3r/punaro/internal/diagnostic"
+	"github.com/rock3r/punaro/internal/incrementalfs"
 	"github.com/rock3r/punaro/internal/relay"
 )
 
@@ -401,53 +403,34 @@ func probeMailboxMCP(ctx context.Context, config adapterConfig) (resultErr error
 }
 
 func mailboxDoctorTreeDigest(ctx context.Context, root string) ([sha256.Size]byte, error) {
-	hash := sha256.New()
-	entries := 0
-	var totalBytes int64
-	writeField := func(value []byte) error {
-		if err := binary.Write(hash, binary.BigEndian, uint64(len(value))); err != nil {
-			return err
-		}
-		_, err := hash.Write(value)
-		return err
+	type digestEntry struct {
+		relative string
+		kind     string
+		digest   [sha256.Size]byte
 	}
-	err := filepath.WalkDir(root, func(path string, entry os.DirEntry, walkErr error) error {
+	records := make([]digestEntry, 0, 32)
+	var totalBytes int64
+	err := incrementalfs.Walk(ctx, root, maximumMailboxDoctorEntries, func(path, relative string, info os.FileInfo) error {
 		if err := ctx.Err(); err != nil {
 			return err
 		}
-		if walkErr != nil {
-			return walkErr
-		}
-		entries++
-		if entries > maximumMailboxDoctorEntries {
-			return errors.New("mailbox state has too many entries")
-		}
-		relative, err := filepath.Rel(root, path)
-		if err != nil || relative == ".." || strings.HasPrefix(relative, ".."+string(filepath.Separator)) {
-			return errors.New("mailbox state path is invalid")
-		}
-		info, err := entry.Info()
-		if err != nil || info.Mode()&os.ModeSymlink != 0 {
+		if info.Mode()&os.ModeSymlink != 0 {
 			return errors.New("mailbox state entry is unsafe")
 		}
-		if err := writeField([]byte(filepath.ToSlash(relative))); err != nil {
-			return err
-		}
 		if info.IsDir() {
-			return writeField([]byte("directory"))
+			records = append(records, digestEntry{relative: filepath.ToSlash(relative), kind: "directory"})
+			return nil
 		}
 		if !info.Mode().IsRegular() || info.Size() < 0 || totalBytes > maximumMailboxDoctorBytes-info.Size() {
 			return errors.New("mailbox state entry is unsafe")
 		}
 		totalBytes += info.Size()
-		if err := writeField([]byte("file")); err != nil {
-			return err
-		}
 		file, err := openMailboxDoctorSnapshotFile(path, info)
 		if err != nil {
 			return err
 		}
-		_, copyErr := io.CopyN(hash, mailboxDoctorContextReader{ctx: ctx, reader: file}, info.Size())
+		fileHash := sha256.New()
+		_, copyErr := io.CopyN(fileHash, mailboxDoctorContextReader{ctx: ctx, reader: file}, info.Size())
 		var extra [1]byte
 		extraCount, extraErr := 0, ctx.Err()
 		if extraErr == nil {
@@ -457,10 +440,35 @@ func mailboxDoctorTreeDigest(ctx context.Context, root string) ([sha256.Size]byt
 		if copyErr != nil || extraCount != 0 || !errors.Is(extraErr, io.EOF) || closeErr != nil {
 			return errors.New("mailbox state changed during inspection")
 		}
+		record := digestEntry{relative: filepath.ToSlash(relative), kind: "file"}
+		copy(record.digest[:], fileHash.Sum(nil))
+		records = append(records, record)
 		return nil
 	})
 	if err != nil {
 		return [sha256.Size]byte{}, err
+	}
+	sort.Slice(records, func(i, j int) bool { return records[i].relative < records[j].relative })
+	hash := sha256.New()
+	writeField := func(value []byte) error {
+		if err := binary.Write(hash, binary.BigEndian, uint64(len(value))); err != nil {
+			return err
+		}
+		_, err := hash.Write(value)
+		return err
+	}
+	for _, record := range records {
+		if err := writeField([]byte(record.relative)); err != nil {
+			return [sha256.Size]byte{}, err
+		}
+		if err := writeField([]byte(record.kind)); err != nil {
+			return [sha256.Size]byte{}, err
+		}
+		if record.kind == "file" {
+			if err := writeField(record.digest[:]); err != nil {
+				return [sha256.Size]byte{}, err
+			}
+		}
 	}
 	var digest [sha256.Size]byte
 	copy(digest[:], hash.Sum(nil))

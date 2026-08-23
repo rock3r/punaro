@@ -18,6 +18,7 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/rock3r/punaro/internal/incrementalfs"
 )
 
 const (
@@ -164,22 +165,15 @@ func verifyContext(ctx context.Context, directory string) (Manifest, string, err
 			allowedDirectories[directory] = true
 		}
 	}
-	err = filepath.WalkDir(directory, func(path string, _ os.DirEntry, walkErr error) error {
+	maximumEntries := len(seen) + len(allowedDirectories)
+	err = incrementalfs.Walk(ctx, directory, maximumEntries, func(path, relative string, info os.FileInfo) error {
 		if err := ctx.Err(); err != nil {
 			return err
-		}
-		if walkErr != nil {
-			return walkErr
 		}
 		if path == directory {
 			return nil
 		}
-		relative, relErr := filepath.Rel(directory, path)
-		if relErr != nil || relative == "." || strings.HasPrefix(relative, ".."+string(filepath.Separator)) {
-			return errors.New("backup path escapes its directory")
-		}
-		info, infoErr := os.Lstat(path)
-		if infoErr != nil || info.Mode()&os.ModeSymlink != 0 {
+		if info.Mode()&os.ModeSymlink != 0 {
 			return errors.New("backup contains an unsafe filesystem entry")
 		}
 		if info.IsDir() {

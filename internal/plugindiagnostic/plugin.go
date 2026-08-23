@@ -14,6 +14,8 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+
+	"github.com/rock3r/punaro/internal/incrementalfs"
 )
 
 const (
@@ -86,21 +88,20 @@ func SkillSetDigestContext(ctx context.Context, root string) (string, error) {
 	}
 	var files []string
 	total := int64(0)
-	err = filepath.WalkDir(root, func(path string, entry os.DirEntry, walkErr error) error {
+	err = incrementalfs.Walk(ctx, root, maximumSkillEntries, func(path, _ string, info os.FileInfo) error {
 		if err := ctx.Err(); err != nil {
 			return err
 		}
-		if walkErr != nil || entry.Type()&os.ModeSymlink != 0 {
+		if info.Mode()&os.ModeSymlink != 0 {
 			return errors.New("unsafe skill entry")
 		}
-		if path == root || entry.IsDir() {
+		if path == root || info.IsDir() {
 			return nil
 		}
-		if !entry.Type().IsRegular() || len(files) >= maximumSkillEntries {
+		if !info.Mode().IsRegular() {
 			return errors.New("unsafe skill entry")
 		}
-		info, err := entry.Info()
-		if err != nil || info.Size() < 1 || info.Size() > maximumSkillBytes || total+info.Size() > maximumSkillBytes {
+		if info.Size() < 1 || info.Size() > maximumSkillBytes || total+info.Size() > maximumSkillBytes {
 			return errors.New("unsafe skill entry")
 		}
 		total += info.Size()

@@ -2,6 +2,7 @@ package plugindiagnostic
 
 import (
 	"context"
+	"fmt"
 	"os"
 	"path/filepath"
 	"testing"
@@ -65,5 +66,26 @@ func TestSkillSetDigestRejectsFourthRootEntry(t *testing.T) {
 	}
 	if _, err := SkillSetDigestContext(t.Context(), root); err == nil {
 		t.Fatal("fourth skill root entry accepted")
+	}
+}
+
+func TestSkillSetDigestBoundsNestedDirectoryEntries(t *testing.T) {
+	root := t.TempDir()
+	for _, skill := range []string{"punaro-attachment", "punaro-mailbox", "punaro-reply"} {
+		directory := filepath.Join(root, skill)
+		if err := os.Mkdir(directory, 0o700); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(directory, "SKILL.md"), []byte(skill), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for index := range maximumSkillEntries {
+		if err := os.Mkdir(filepath.Join(root, "punaro-mailbox", fmt.Sprintf("nested-%02d", index)), 0o700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if _, err := SkillSetDigestContext(t.Context(), root); err == nil {
+		t.Fatal("oversized nested skill tree accepted")
 	}
 }
