@@ -147,6 +147,10 @@ Database, storage, and update recovery: `database_connection`,
 `owner_credential_file`, `application_credential_file`,
 `attachment_blob_directory`, `blob_storage_private`.
 
+`postgres_major` passes only when the running server reports the exact major
+compiled into that release and used by its release manifest; accepting any
+newer generic PostgreSQL floor would hide restore or partial-upgrade drift.
+
 Service and edge: `health_endpoint`, `readiness_endpoint`,
 `health_listener_private`, `administration_listener_private`, `tunnel_route`,
 `tunnel_origin`, `access_admission`, `relay_enrollment`, `relay_protocol`,
@@ -169,6 +173,13 @@ Relay and attachment state: `relay_transport`, `relay_origin`, `relay_access`,
 `notification_origin`, `notification_access`, `notification_enrollment`,
 `notification_protocol`, `endpoint_attachment`, `expired_endpoint_bindings`,
 `expired_role_bindings`.
+
+`endpoint_attachment` is the required current-state gate. The two `expired_*`
+checks are informational and optional because normal endpoint or role
+retirement leaves durable tombstones for referential and audit history; their
+presence alone does not make an otherwise current adapter unhealthy. They
+remain visible so an operator can inspect unexpected retirement history
+without exposing endpoint or role inventory in the report.
 
 Service, release, and plugin state: `adapter_service_installed`,
 `adapter_service_enabled`, `adapter_service_running`,
@@ -274,7 +285,8 @@ operator explicitly approves that separate action.
   `repair_access_service_auth`, `repair_server_doctor_enrollment`,
   `repair_tunnel_route`, `repair_tunnel_device_route`,
   `restart_endpoint_attachment`, `restart_gateway_attachment`,
-  `renew_role_bindings`, plus the generated families
+  `inspect_retired_endpoint_bindings`, `inspect_retired_role_bindings`, plus
+  the generated families
   `repair_relay_transport`, `repair_relay_route`, `repair_relay_access`,
   `repair_relay_enrollment`, `repair_notification_transport`,
   `repair_notification_route`, `repair_notification_access`, and
@@ -295,7 +307,7 @@ operator explicitly approves that separate action.
   or relax a credential/path permission to make a check pass.
 - Database, backup, and update recovery: `repair_database_connection`,
   `repair_database_owner`, `repair_database_pair`, `repair_database_schema`,
-  `upgrade_postgres_major`, `create_verified_backup`,
+  `install_release_postgres_major`, `create_verified_backup`,
   `refresh_verified_backup`, `repair_update_recovery_receipt`,
   `resume_or_recover_update`, `resume_abort_or_recover_update`,
   `run_supported_update_or_recovery`, `resume_or_recover_bootstrap`, and

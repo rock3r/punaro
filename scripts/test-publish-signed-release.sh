@@ -12,13 +12,15 @@ prepare_case() {
 	cp "$repo_dir/scripts/testdata/fake-publish-go.sh" "$case_root/bin/go"
 	cp "$repo_dir/scripts/testdata/fake-publish-gh.sh" "$case_root/bin/gh"
 	chmod +x "$case_root/bin/go" "$case_root/bin/gh"
-	printf '%s\n' manifest >"$case_root/documents/punaro-release.json"
+	printf '%s\n' '{"artifacts":[{"path":"v0.1.0-alpha.1/punaro-adapter-linux-amd64"}]}' >"$case_root/documents/punaro-release.json"
 	printf '%s\n' manifest-signature >"$case_root/documents/punaro-release.sig"
 	printf '%s\n' catalog >"$case_root/documents/punaro-catalog.json"
 	printf '%s\n' catalog-signature >"$case_root/documents/punaro-catalog.sig"
+	printf '%s\n' artifact >"$case_root/documents/punaro-adapter-linux-amd64"
 	printf '%s\n' public-key >"$case_root/release.pub"
 	cp "$case_root/documents/punaro-release.json" "$case_root/state/remote/v0.1.0-alpha.1/"
 	cp "$case_root/documents/punaro-catalog.json" "$case_root/state/remote/v0.1.0-alpha.1/"
+	cp "$case_root/documents/punaro-adapter-linux-amd64" "$case_root/state/remote/v0.1.0-alpha.1/"
 	printf '%s\n' true >"$case_root/state/release-draft"
 	printf '%s\n' false >"$case_root/state/release-prerelease"
 }
@@ -56,6 +58,22 @@ if PATH="$sequence/bin:$PATH" \
 fi
 if grep -Eq '^release (upload|edit|create) ' "$sequence/gh.log"; then
 	printf '%s\n' 'publication mutated GitHub state after a failed sequence preflight' >&2
+	exit 1
+fi
+
+artifacts="$temporary/artifacts"
+prepare_case "$artifacts"
+printf '%s\n' tampered >"$artifacts/state/remote/v0.1.0-alpha.1/punaro-adapter-linux-amd64"
+if PATH="$artifacts/bin:$PATH" \
+	PUNARO_FAKE_GH_STATE="$artifacts/state" \
+	PUNARO_FAKE_GH_LOG="$artifacts/gh.log" \
+	PUNARO_FAKE_GO_LOG="$artifacts/go.log" \
+	"$repo_dir/scripts/publish-signed-release.sh" --release v0.1.0-alpha.1 --dir "$artifacts/documents" --keys-file "$artifacts/release.pub" >/dev/null 2>&1; then
+	printf '%s\n' 'tampered draft artifact unexpectedly published' >&2
+	exit 1
+fi
+if grep -Eq '^release (upload|edit|create) ' "$artifacts/gh.log"; then
+	printf '%s\n' 'publication mutated GitHub state after artifact verification failed' >&2
 	exit 1
 fi
 

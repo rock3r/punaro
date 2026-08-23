@@ -106,8 +106,8 @@ func runAdapterDoctor(args []string, stdout, stderr io.Writer) int {
 			punarodiagnostic.Unavailable("client_identity_file", "repair_adapter_configuration"),
 			punarodiagnostic.Unavailable("installer_path_aliases", "repair_adapter_configuration"),
 			punarodiagnostic.Unavailable("endpoint_attachment", "repair_adapter_configuration"),
-			punarodiagnostic.Unavailable("expired_endpoint_bindings", "repair_adapter_configuration"),
-			punarodiagnostic.Unavailable("expired_role_bindings", "repair_adapter_configuration"),
+			punarodiagnostic.OptionalUnavailable("expired_endpoint_bindings", "inspect_retired_endpoint_bindings"),
+			punarodiagnostic.OptionalUnavailable("expired_role_bindings", "inspect_retired_role_bindings"),
 			punarodiagnostic.Unavailable("bootstrap_selected_artifact", "repair_adapter_configuration"),
 			punarodiagnostic.Unavailable("bootstrap_running_artifact", "repair_adapter_configuration"),
 			punarodiagnostic.Unavailable("bootstrap_supervisor", "repair_adapter_configuration"),
@@ -143,14 +143,14 @@ func runAdapterDoctor(args []string, stdout, stderr io.Writer) int {
 	if relayResult.AttachmentsKnown {
 		checks = append(checks,
 			boolDoctorCheck(relayResult.ActiveEndpoints > 0, "endpoint_attachment", "restart_endpoint_attachment"),
-			boolDoctorCheck(relayResult.ExpiredEndpoints == 0, "expired_endpoint_bindings", "restart_endpoint_attachment"),
-			boolDoctorCheck(relayResult.ExpiredRoles == 0, "expired_role_bindings", "renew_role_bindings"),
+			retiredBindingDoctorCheck(relayResult.ExpiredEndpoints, "expired_endpoint_bindings", "inspect_retired_endpoint_bindings"),
+			retiredBindingDoctorCheck(relayResult.ExpiredRoles, "expired_role_bindings", "inspect_retired_role_bindings"),
 		)
 	} else {
 		checks = append(checks,
 			punarodiagnostic.Unavailable("endpoint_attachment", "install_compatible_release"),
-			punarodiagnostic.Unavailable("expired_endpoint_bindings", "install_compatible_release"),
-			punarodiagnostic.Unavailable("expired_role_bindings", "install_compatible_release"),
+			punarodiagnostic.OptionalUnavailable("expired_endpoint_bindings", "install_compatible_release"),
+			punarodiagnostic.OptionalUnavailable("expired_role_bindings", "install_compatible_release"),
 		)
 	}
 	notificationResult, _ := adapterDoctorNotificationProbe(ctx, config)
@@ -214,6 +214,13 @@ func runAdapterDoctor(args []string, stdout, stderr io.Writer) int {
 	}
 	report, reportErr := punarodiagnostic.New(punarodiagnostic.ComponentAdapter, identity, checks)
 	return writeAdapterDoctorReport(stdout, stderr, report, reportErr)
+}
+
+func retiredBindingDoctorCheck(count int, code, remediation string) punarodiagnostic.Check {
+	if count == 0 {
+		return punarodiagnostic.Check{Code: code, Status: punarodiagnostic.StatusPass}
+	}
+	return punarodiagnostic.OptionalFail(code, remediation)
 }
 
 func writeAdapterDoctorReport(stdout, stderr io.Writer, report punarodiagnostic.Report, err error) int {

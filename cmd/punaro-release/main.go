@@ -22,8 +22,6 @@ import (
 	punarorelease "github.com/rock3r/punaro/internal/release"
 )
 
-const productionPostgresMajor = 18
-
 var publicationNow = func() time.Time { return time.Now().UTC() }
 
 func main() {
@@ -35,7 +33,7 @@ func main() {
 
 func run(args []string) error {
 	if len(args) == 0 {
-		return errors.New("usage: punaro-release assemble|build-facts|validate|publication-check|keygen|sign|verify")
+		return errors.New("usage: punaro-release assemble|build-facts|validate|verify-artifacts|publication-check|keygen|sign|verify")
 	}
 	switch args[0] {
 	case "assemble":
@@ -48,6 +46,8 @@ func run(args []string) error {
 		return json.NewEncoder(os.Stdout).Encode(facts)
 	case "validate":
 		return runValidate(args[1:])
+	case "verify-artifacts":
+		return runVerifyArtifacts(args[1:])
 	case "publication-check":
 		return runPublicationCheck(args[1:])
 	case "keygen":
@@ -57,7 +57,7 @@ func run(args []string) error {
 	case "verify":
 		return runVerify(args[1:])
 	default:
-		return errors.New("usage: punaro-release assemble|build-facts|validate|publication-check|keygen|sign|verify")
+		return errors.New("usage: punaro-release assemble|build-facts|validate|verify-artifacts|publication-check|keygen|sign|verify")
 	}
 }
 
@@ -130,7 +130,7 @@ func runAssemble(args []string) error {
 		ComposeSHA256:           operator.ComposeManifestSHA256(),
 		MigrationManifestSHA256: punaropostgres.MigrationManifestSHA256(),
 		Database:                schema,
-		PostgreSQLMajor:         productionPostgresMajor,
+		PostgreSQLMajor:         punarorelease.ProductionPostgreSQLMajor,
 		GatewayProtocol:         punarorelease.ProtocolRange{Min: 1, Max: 1},
 		ClientProtocol:          punarorelease.ProtocolRange{Min: 1, Max: 1},
 		MinimumRecoveryProtocol: 1,
@@ -174,6 +174,25 @@ func runValidate(args []string) error {
 		return errors.New("catalog does not allow the assembled manifest")
 	}
 	return nil
+}
+
+func runVerifyArtifacts(args []string) error {
+	flags := flag.NewFlagSet("punaro-release verify-artifacts", flag.ContinueOnError)
+	flags.SetOutput(io.Discard)
+	dir := flags.String("dir", "", "directory containing downloaded native artifacts")
+	manifestFile := flags.String("manifest", "", "verified release manifest")
+	if flags.Parse(args) != nil || flags.NArg() != 0 || *dir == "" || *manifestFile == "" {
+		return errors.New("release artifact verification is invalid")
+	}
+	body, err := os.ReadFile(*manifestFile) // #nosec G304 -- explicit verified release manifest.
+	if err != nil || len(body) > punarorelease.MaximumManifestBytes {
+		return errors.New("release artifact verification is invalid")
+	}
+	manifest, err := punarorelease.ParseReleaseManifest(body)
+	if err != nil {
+		return errors.New("release artifact verification is invalid")
+	}
+	return punarorelease.VerifyArtifactDirectory(*dir, manifest)
 }
 
 func runPublicationCheck(args []string) error {

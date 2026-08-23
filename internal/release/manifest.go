@@ -18,6 +18,10 @@ const (
 	maxArtifactBytes       = 256 << 20
 )
 
+// ProductionPostgreSQLMajor is the exact database major bound to artifacts
+// built from this source revision and to the release manifests it assembles.
+const ProductionPostgreSQLMajor = 18
+
 // ProtocolRange is an inclusive wire-protocol interval.
 type ProtocolRange struct {
 	Min int64 `json:"min"`

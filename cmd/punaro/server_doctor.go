@@ -24,6 +24,7 @@ import (
 	"github.com/rock3r/punaro/internal/operator"
 	punaropostgres "github.com/rock3r/punaro/internal/postgres"
 	"github.com/rock3r/punaro/internal/relay"
+	punarorelease "github.com/rock3r/punaro/internal/release"
 )
 
 const (
@@ -38,7 +39,7 @@ func inspectServerDoctorState(parent context.Context, installation operator.Inst
 	ctx, cancel := context.WithTimeout(parent, serverDoctorTimeout)
 	defer cancel()
 
-	state := serverDoctorState{MachineID: validServerMachineID(machineID), Release: serverBuildRelease, Protocol: relay.ProtocolVersion}
+	state := serverDoctorState{MachineID: validServerMachineID(machineID), Release: serverBuildRelease, Protocol: relay.ProtocolVersion, ExpectedPostgresMajor: punarorelease.ProductionPostgreSQLMajor}
 	state.ReleaseSequence, _ = strconv.ParseInt(serverBuildSequence, 10, 64)
 	state.CatalogSequence, _ = strconv.ParseInt(serverBuildCatalogSequence, 10, 64)
 	state.InstalledRelease = known(serverBuildRelease != "" && serverBuildImage != "", serverBuildRelease != "" && serverBuildImage == installation.Image)

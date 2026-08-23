@@ -178,39 +178,40 @@ type knownDoctorBool struct {
 }
 
 type serverDoctorState struct {
-	MachineID           string
-	Release             string
-	ReleaseSequence     int64
-	CatalogSequence     int64
-	Protocol            int64
-	InstalledRelease    knownDoctorBool
-	RunningImage        knownDoctorBool
-	ComposeBinding      knownDoctorBool
-	MigrationBinding    knownDoctorBool
-	PostgresMajor       int
-	PostgresKnown       bool
-	Storage             knownDoctorBool
-	BackupAvailable     knownDoctorBool
-	BackupFresh         knownDoctorBool
-	UpdateTransaction   knownDoctorBool
-	RecoveryReceipt     knownDoctorBool
-	UpdateRecovery      knownDoctorBool
-	DatabasePrivate     knownDoctorBool
-	HealthPrivate       knownDoctorBool
-	AdminPrivate        knownDoctorBool
-	BlobPrivate         knownDoctorBool
-	TunnelRoute         knownDoctorBool
-	TunnelOrigin        knownDoctorBool
-	AccessAdmission     knownDoctorBool
-	RelayEnrollment     knownDoctorBool
-	RelayProtocol       knownDoctorBool
-	GatewayInstalled    knownDoctorBool
-	GatewayEnabled      knownDoctorBool
-	GatewayRunning      knownDoctorBool
-	GatewayExecutable   knownDoctorBool
-	GatewayExitStatus   knownDoctorBool
-	GatewayRestartState knownDoctorBool
-	GatewayRelease      knownDoctorBool
+	MachineID             string
+	Release               string
+	ReleaseSequence       int64
+	CatalogSequence       int64
+	Protocol              int64
+	InstalledRelease      knownDoctorBool
+	RunningImage          knownDoctorBool
+	ComposeBinding        knownDoctorBool
+	MigrationBinding      knownDoctorBool
+	PostgresMajor         int
+	ExpectedPostgresMajor int
+	PostgresKnown         bool
+	Storage               knownDoctorBool
+	BackupAvailable       knownDoctorBool
+	BackupFresh           knownDoctorBool
+	UpdateTransaction     knownDoctorBool
+	RecoveryReceipt       knownDoctorBool
+	UpdateRecovery        knownDoctorBool
+	DatabasePrivate       knownDoctorBool
+	HealthPrivate         knownDoctorBool
+	AdminPrivate          knownDoctorBool
+	BlobPrivate           knownDoctorBool
+	TunnelRoute           knownDoctorBool
+	TunnelOrigin          knownDoctorBool
+	AccessAdmission       knownDoctorBool
+	RelayEnrollment       knownDoctorBool
+	RelayProtocol         knownDoctorBool
+	GatewayInstalled      knownDoctorBool
+	GatewayEnabled        knownDoctorBool
+	GatewayRunning        knownDoctorBool
+	GatewayExecutable     knownDoctorBool
+	GatewayExitStatus     knownDoctorBool
+	GatewayRestartState   knownDoctorBool
+	GatewayRelease        knownDoctorBool
 }
 
 type restoreRequest struct {
@@ -730,10 +731,10 @@ func diagnoseServer(ctx context.Context, installation operator.Installation, mac
 	checks = appendKnownServerCheck(checks, "compose_manifest_binding", "reinstall_release_compose_manifest", extended.ComposeBinding)
 	checks = appendKnownServerCheck(checks, "migration_manifest_binding", "reinstall_release_migration_manifest", extended.MigrationBinding)
 	switch {
-	case !extended.PostgresKnown:
+	case !extended.PostgresKnown || extended.ExpectedPostgresMajor < 14:
 		checks = append(checks, punarodiagnostic.Unavailable("postgres_major", "repair_database_connection"))
-	case extended.PostgresMajor < 14:
-		checks = append(checks, punarodiagnostic.Fail("postgres_major", "upgrade_postgres_major"))
+	case extended.PostgresMajor != extended.ExpectedPostgresMajor:
+		checks = append(checks, punarodiagnostic.Fail("postgres_major", "install_release_postgres_major"))
 	default:
 		checks = append(checks, punarodiagnostic.Pass("postgres_major"))
 	}

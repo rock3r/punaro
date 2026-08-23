@@ -467,7 +467,7 @@ func healthyServerDoctorState() serverDoctorState {
 		MachineID: "punaro-lxc", Release: "v0.1.0-alpha.1", ReleaseSequence: 1, CatalogSequence: 1, Protocol: 1,
 		InstalledRelease: knownDoctorBool{Known: true, OK: true}, RunningImage: knownDoctorBool{Known: true, OK: true},
 		ComposeBinding: knownDoctorBool{Known: true, OK: true}, MigrationBinding: knownDoctorBool{Known: true, OK: true},
-		PostgresMajor: 18, PostgresKnown: true, Storage: knownDoctorBool{Known: true, OK: true},
+		PostgresMajor: 18, ExpectedPostgresMajor: 18, PostgresKnown: true, Storage: knownDoctorBool{Known: true, OK: true},
 		BackupAvailable: knownDoctorBool{Known: true, OK: true}, BackupFresh: knownDoctorBool{Known: true, OK: true},
 		UpdateTransaction: knownDoctorBool{Known: true, OK: true}, RecoveryReceipt: knownDoctorBool{Known: true, OK: true}, UpdateRecovery: knownDoctorBool{Known: true, OK: true}, DatabasePrivate: knownDoctorBool{Known: true, OK: true},
 		HealthPrivate: knownDoctorBool{Known: true, OK: true}, AdminPrivate: knownDoctorBool{Known: true, OK: true},
@@ -967,6 +967,39 @@ func TestDoctorClassifiesEveryExtendedServerDependency(t *testing.T) {
 	}
 	if len(want) != 0 {
 		t.Fatalf("missing checks: %v", want)
+	}
+}
+
+func TestServerDoctorRequiresReleasePostgreSQLMajor(t *testing.T) {
+	preserveDependencies(t)
+	directory := testInstallation(t)
+	inspectSchema = func(context.Context, string) (punaropostgres.SchemaState, error) {
+		return punaropostgres.SchemaState{Classification: punaropostgres.Compatible, Version: 44}, nil
+	}
+	probe = func(context.Context, string) error { return nil }
+	for _, actual := range []int{17, 19} {
+		t.Run(fmt.Sprintf("major-%d", actual), func(t *testing.T) {
+			state := healthyServerDoctorState()
+			state.PostgresMajor = actual
+			serverDoctorInspect = func(context.Context, operator.Installation, string, bool, string) serverDoctorState { return state }
+			var stdout, stderr bytes.Buffer
+			if code := run([]string{"doctor", "--directory", directory, "--machine-id", "punaro-lxc"}, &stdout, &stderr); code != 1 {
+				t.Fatalf("code=%d stdout=%q stderr=%q", code, stdout.String(), stderr.String())
+			}
+			report, err := punarodiagnostic.Decode(bytes.NewReader(stdout.Bytes()))
+			if err != nil {
+				t.Fatal(err)
+			}
+			for _, check := range report.Checks {
+				if check.Code == "postgres_major" {
+					if check.Status != punarodiagnostic.StatusFail || check.Remediation != "install_release_postgres_major" {
+						t.Fatalf("postgres major check=%#v", check)
+					}
+					return
+				}
+			}
+			t.Fatal("postgres_major check missing")
+		})
 	}
 }
 

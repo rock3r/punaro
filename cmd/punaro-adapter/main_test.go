@@ -297,7 +297,7 @@ func TestAdapterDoctorEmitsStrictHealthyReport(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Setenv(adapterProfileFileEnv, profile)
-	healthy := adapter.DoctorProbeResult{Transport: true, Origin: true, Access: true, Enrolled: true, Protocol: true, AttachmentsKnown: true, ActiveEndpoints: 2}
+	healthy := adapter.DoctorProbeResult{Transport: true, Origin: true, Access: true, Enrolled: true, Protocol: true, AttachmentsKnown: true, ActiveEndpoints: 2, ExpiredEndpoints: 3, ExpiredRoles: 4}
 	adapterDoctorRelayProbe = func(context.Context, adapterConfig) (adapter.DoctorProbeResult, error) { return healthy, nil }
 	adapterDoctorNotificationProbe = func(context.Context, adapterConfig) (adapter.DoctorProbeResult, error) { return healthy, nil }
 	adapterDoctorMailboxProbe = func(context.Context, adapterConfig) error { return nil }
@@ -318,6 +318,20 @@ func TestAdapterDoctorEmitsStrictHealthyReport(t *testing.T) {
 	report, err := punarodiagnostic.Decode(bytes.NewReader(stdout.Bytes()))
 	if err != nil || !report.Healthy || report.Component != punarodiagnostic.ComponentAdapter || report.Identity.MachineID != "profile-machine" || report.Identity.Protocol != 1 {
 		t.Fatalf("report=%#v err=%v", report, err)
+	}
+	for _, code := range []string{"expired_endpoint_bindings", "expired_role_bindings"} {
+		found := false
+		for _, check := range report.Checks {
+			if check.Code == code {
+				found = true
+				if check.Status != punarodiagnostic.StatusFail || check.Required {
+					t.Fatalf("retired binding check=%#v", check)
+				}
+			}
+		}
+		if !found {
+			t.Fatalf("missing retired binding check %q", code)
+		}
 	}
 	for _, forbidden := range []string{profile, "relay.example", "machine.key", "agent-mailbox", "PUNARO_CF_ACCESS"} {
 		if strings.Contains(stdout.String(), forbidden) {

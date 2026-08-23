@@ -8,9 +8,9 @@ usage() {
 	cat <<'EOF'
 Usage: scripts/publish-signed-release.sh --release RELEASE --dir DIR --keys-file FILE [--repo OWNER/REPO]
 
-DIR must contain punaro-release.json, punaro-release.sig,
-punaro-catalog.json, and punaro-catalog.sig signed offline. The matching draft
-GitHub Release must already exist.
+DIR must contain every native artifact plus punaro-release.json,
+punaro-release.sig, punaro-catalog.json, and punaro-catalog.sig signed offline.
+The matching draft GitHub Release must already exist.
 EOF
 }
 
@@ -58,6 +58,7 @@ done
 	go run ./cmd/punaro-release validate --dir "$document_dir" --release "$release"
 	go run ./cmd/punaro-release verify --keys-file "$keys_file" --document "$manifest" --signature "$manifest_signature"
 	go run ./cmd/punaro-release verify --keys-file "$keys_file" --document "$catalog" --signature "$catalog_signature"
+	go run ./cmd/punaro-release verify-artifacts --manifest "$manifest" --dir "$document_dir"
 ) || fail 'signed release documents are invalid'
 
 (
@@ -80,6 +81,18 @@ catalog_restore_required=false
 catalog_redraft_required=false
 previous_catalog=
 previous_catalog_signature=
+artifact_names="$download_dir/artifact-names"
+jq -r '.artifacts[].path | split("/") | last' "$manifest" >"$artifact_names"
+download_release_candidate() {
+	tag=$1
+	destination=$2
+	mkdir "$destination"
+	gh release download "$tag" --repo "$repository" --pattern punaro-release.json --pattern punaro-catalog.json --dir "$destination"
+	while IFS= read -r asset; do
+		[ -n "$asset" ] || return 1
+		gh release download "$tag" --repo "$repository" --pattern "$asset" --dir "$destination"
+	done <"$artifact_names"
+}
 restore_previous_catalog() {
 	attempt=1
 	while [ "$attempt" -le 3 ]; do
@@ -121,9 +134,14 @@ trap cleanup EXIT
 trap 'exit 129' HUP
 trap 'exit 130' INT
 trap 'exit 143' TERM
-gh release download "$release" --repo "$repository" --pattern punaro-release.json --pattern punaro-catalog.json --dir "$download_dir"
-cmp -s "$manifest" "$download_dir/punaro-release.json" || fail 'draft manifest differs from signed bytes'
-cmp -s "$catalog" "$download_dir/punaro-catalog.json" || fail 'draft catalog differs from signed bytes'
+draft_release_dir="$download_dir/draft-release"
+download_release_candidate "$release" "$draft_release_dir"
+cmp -s "$manifest" "$draft_release_dir/punaro-release.json" || fail 'draft manifest differs from signed bytes'
+cmp -s "$catalog" "$draft_release_dir/punaro-catalog.json" || fail 'draft catalog differs from signed bytes'
+(
+	cd "$repo_dir"
+	go run ./cmd/punaro-release verify-artifacts --manifest "$manifest" --dir "$draft_release_dir"
+) || fail 'draft release artifacts differ from the signed manifest'
 
 catalog_exists=false
 catalog_draft=false
@@ -188,6 +206,10 @@ fi
 verification_dir="$download_dir/verification"
 mkdir "$verification_dir"
 gh release download "$release" --repo "$repository" --pattern punaro-release.json --pattern punaro-release.sig --dir "$verification_dir"
+while IFS= read -r asset; do
+	[ -n "$asset" ] || fail 'signed release artifact name is invalid'
+	gh release download "$release" --repo "$repository" --pattern "$asset" --dir "$verification_dir"
+done <"$artifact_names"
 gh release download catalog --repo "$repository" --pattern punaro-catalog.json --pattern punaro-catalog.sig --dir "$verification_dir"
 cmp -s "$manifest" "$verification_dir/punaro-release.json" || fail 'published manifest verification failed'
 cmp -s "$manifest_signature" "$verification_dir/punaro-release.sig" || fail 'published manifest signature verification failed'
@@ -197,6 +219,7 @@ cmp -s "$catalog_signature" "$verification_dir/punaro-catalog.sig" || fail 'publ
 	cd "$repo_dir"
 	go run ./cmd/punaro-release verify --keys-file "$keys_file" --document "$verification_dir/punaro-release.json" --signature "$verification_dir/punaro-release.sig"
 	go run ./cmd/punaro-release verify --keys-file "$keys_file" --document "$verification_dir/punaro-catalog.json" --signature "$verification_dir/punaro-catalog.sig"
+	go run ./cmd/punaro-release verify-artifacts --manifest "$verification_dir/punaro-release.json" --dir "$verification_dir"
 ) || fail 'published signature verification failed'
 
 catalog_restore_required=false

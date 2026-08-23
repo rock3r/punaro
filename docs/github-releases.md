@@ -69,6 +69,13 @@ Unsigned draft bytes are a publication candidate. Bootstrap must fail closed
 until both detached signatures are present and verify against a public key
 embedded in that bootstrap.
 
+The offline publisher re-hashes every native artifact named by the verified
+manifest in the operator's signing directory and in the GitHub draft before it
+publishes anything. It repeats remote artifact verification after publication;
+a mismatch prevents catalog advancement or restores/hides the previous catalog
+state. The signing directory must therefore retain the exact native artifacts
+alongside the four signed document files.
+
 The unsigned workflow never creates or mutates the live `catalog` prerelease.
 Only the offline-signature publisher can make those stable assets visible.
 

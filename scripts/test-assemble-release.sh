@@ -63,6 +63,8 @@ if ! "$repo_dir/scripts/publish-signed-release.sh" --help >/dev/null ||
 	! grep -Fq 'catalog_restore_required=true' "$repo_dir/scripts/publish-signed-release.sh" ||
 	! grep -Fq 'catalog_redraft_required=true' "$repo_dir/scripts/publish-signed-release.sh" ||
 	! grep -Fq 'redraft_catalog' "$repo_dir/scripts/publish-signed-release.sh" ||
+	! grep -Fq 'verify-artifacts --manifest "$manifest" --dir "$draft_release_dir"' "$repo_dir/scripts/publish-signed-release.sh" ||
+	! grep -Fq 'verify-artifacts --manifest "$verification_dir/punaro-release.json" --dir "$verification_dir"' "$repo_dir/scripts/publish-signed-release.sh" ||
 	! grep -Fq 'publication-check --catalog "$catalog"' "$repo_dir/scripts/publish-signed-release.sh" ||
 	! grep -Fq -- '--previous-catalog "$previous_catalog"' "$repo_dir/scripts/publish-signed-release.sh" ||
 	! grep -Fq 'release_is_prerelease' "$repo_dir/scripts/publish-signed-release.sh" ||
