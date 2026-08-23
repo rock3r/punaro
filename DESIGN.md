@@ -1805,7 +1805,9 @@ Unix resolves the existing state path or its parent before deriving the key,
 collapsing aliases introduced by symlinks in ancestor directories.
 The fixed lock file uses exclusive creation and no-follow opening on both
 platforms; unsafe pre-existing entries are removed, directory-synced, and
-recreated with current-user-only protection.
+recreated with current-user-only protection. Repair rechecks that the path still
+names the inspected inode immediately before unlinking it; a changed path is
+retried without disturbing another collector's replacement lock.
 Signal shutdown waits for the HTTP server to drain active handlers before closing
 the store and releasing this lifetime lock, so a rolling replacement cannot load
 or write state while an old ingestion is still persisting.
@@ -1843,7 +1845,11 @@ releases it and neither stale timestamps nor wall-clock jumps can fence out a
 live holder. Concurrent enqueues wait at most 250 ms for the primary lane. Longer
 contention publishes through an atomically claimed, fsynced reserve slot within
 the same total event bound, staying below Claude's two-second hook deadline; no
-collector network I/O runs under the primary lock. Under the enqueue lock, every enqueue removes
+collector network I/O runs under the primary lock. The fallback temporary starts
+under a pre-lock staging name, acquires its kernel lock, and only then renames
+into the cleanup-visible namespace. Cleanup therefore cannot unlink the file in
+the create-to-lock window; a pre-lock crash remnant becomes reclaimable after one
+minute. Under the enqueue lock, every enqueue removes
 crash-left temporary event files before admitting new work. The same protected-token checks apply on the adapter
 host. A persistent
 `supervise` mode runs under the host service manager, holds a singleton lease,

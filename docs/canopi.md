@@ -158,7 +158,9 @@ Unix resolves the existing state path or its parent before hashing, so paths
 whose ancestors traverse symlinks cannot acquire separate writer locks.
 The predictable state-lock file itself is created exclusively and opened without
 following links; an unsafe pre-existing entry is removed, directory-synced, and
-recreated with current-user-only protection.
+recreated with current-user-only protection. Repair rechecks that the path still
+names the inspected inode immediately before unlinking it; if another collector
+already replaced the entry, repair retries without touching that replacement.
 Signal-driven shutdown waits for `http.Server.Shutdown` to finish draining active
 handlers before `Store.Close` releases that lifetime lock, fencing rolling restarts
 until every acknowledged write from the old collector has completed.
@@ -256,12 +258,16 @@ the same protection before publication.
 The fixed enqueue, drain, and supervisor lock names use create-exclusive and
 no-follow opens with the same ownership and privacy validation. Unsafe entries
 left from a previously shared directory are removed, directory-synced, and
-replaced instead of permanently blocking the adapter.
+replaced instead of permanently blocking the adapter, with the same immediate
+inode recheck before unlinking.
 The configured spool capacity includes a fixed contention reserve (one sixteenth,
 at least one and at most 256 slots). Normal and contention lanes therefore remain
 jointly bounded while concurrent hooks can publish without waiting past their
 provider deadline. Active contention temporaries hold kernel locks, so cleanup
-can reclaim crash leftovers without deleting an in-progress publication.
+can reclaim crash leftovers without deleting an in-progress publication. A
+fallback starts under a pre-lock staging name that ordinary cleanup ignores and
+renames into the cleanup namespace only after acquiring its kernel lock.
+Pre-lock crash remnants become reclaimable after one minute.
 
 Run the durable worker as a continuously supervised companion using the same
 environment (for example with `Restart=always`/`KeepAlive` in the host service

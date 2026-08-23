@@ -42,7 +42,7 @@ func acquireStateStoreLock(statePath string) (func() error, error) {
 }
 
 func openStateLockFile(path string) (*os.File, error) {
-	for range 2 {
+	for range 4 {
 		file, err := createStateLockFile(path)
 		if err == nil {
 			if err := protectStateFile(path, file); err != nil {
@@ -63,26 +63,55 @@ func openStateLockFile(path string) (*os.File, error) {
 			return nil, err
 		}
 		if !privateStateFile(path, before) {
-			if err := os.Remove(path); err != nil && !errors.Is(err, os.ErrNotExist) {
+			removed, err := removeStateLockIfSame(path, before)
+			if err != nil {
 				return nil, err
 			}
-			if err := syncStateDirectory(filepath.Dir(path)); err != nil {
-				return nil, err
+			if removed {
+				if err := syncStateDirectory(filepath.Dir(path)); err != nil {
+					return nil, err
+				}
 			}
 			continue
 		}
 		file, err = openExistingStateLockFile(path)
 		if err != nil {
+			if errors.Is(err, os.ErrNotExist) {
+				continue
+			}
 			return nil, err
 		}
 		after, err := file.Stat()
 		if err != nil || !os.SameFile(before, after) || !privateStateFile(path, after) {
 			_ = file.Close()
+			if err == nil && !os.SameFile(before, after) {
+				continue
+			}
 			return nil, errors.New("canopi state lock changed while opening")
 		}
 		return file, nil
 	}
 	return nil, errors.New("cannot replace unprotected Canopi state lock")
+}
+
+func removeStateLockIfSame(path string, inspected os.FileInfo) (bool, error) {
+	current, err := os.Lstat(path)
+	if errors.Is(err, os.ErrNotExist) {
+		return false, nil
+	}
+	if err != nil {
+		return false, err
+	}
+	if !os.SameFile(inspected, current) {
+		return false, nil
+	}
+	if err := os.Remove(path); err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return false, nil
+		}
+		return false, err
+	}
+	return true, nil
 }
 
 func stateStoreLockPath(statePath string) (string, error) {

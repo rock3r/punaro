@@ -25,6 +25,7 @@ const (
 	defaultEnqueueWait    = 250 * time.Millisecond
 	enqueueLockPoll       = 5 * time.Millisecond
 	supervisorPoll        = 250 * time.Millisecond
+	stagingAbandonmentAge = time.Minute
 )
 
 // ErrSpoolFull reports that the bounded durable adapter queue is full.
@@ -256,7 +257,9 @@ func queuedSpoolEventMatches(path, eventID string) (match, occupied bool, err er
 }
 
 func (s Spool) publishContentionEvent(target string, payload []byte) (created bool, err error) {
-	temporary, err := os.CreateTemp(s.Directory, ".contention-event-*.tmp")
+	// The pre-lock name is outside the ordinary cleanup namespace. Once the
+	// inode is locked, renaming it makes ownership visible to cleanup atomically.
+	temporary, err := os.CreateTemp(s.Directory, ".contention-publishing-*.tmp")
 	if err != nil {
 		return false, err
 	}
@@ -276,6 +279,11 @@ func (s Spool) publishContentionEvent(target string, payload []byte) (created bo
 		return false, err
 	}
 	locked = true
+	cleanupName := filepath.Join(s.Directory, strings.Replace(filepath.Base(temporaryName), ".contention-publishing-", ".contention-event-", 1))
+	if err := os.Rename(temporaryName, cleanupName); err != nil {
+		return false, err
+	}
+	temporaryName = cleanupName
 	if _, err := temporary.Write(payload); err != nil {
 		return false, err
 	}
@@ -433,7 +441,9 @@ func (s Spool) removeOrphanTemporaries() error {
 	for {
 		names, readErr := directory.Readdirnames(128)
 		for _, name := range names {
-			if (!strings.HasPrefix(name, ".event-") && !strings.HasPrefix(name, ".contention-event-")) || !strings.HasSuffix(name, ".tmp") {
+			ordinaryTemporary := strings.HasPrefix(name, ".event-") || strings.HasPrefix(name, ".contention-event-")
+			publishingTemporary := strings.HasPrefix(name, ".contention-publishing-")
+			if (!ordinaryTemporary && !publishingTemporary) || !strings.HasSuffix(name, ".tmp") {
 				continue
 			}
 			path := filepath.Join(s.Directory, name)
@@ -444,11 +454,18 @@ func (s Spool) removeOrphanTemporaries() error {
 			if statErr != nil {
 				return statErr
 			}
+			// A publisher locks before renaming into the ordinary cleanup
+			// namespace. Only a pre-lock file older than the provider lifetime
+			// can be an abandoned crash remnant.
+			if publishingTemporary && time.Since(before.ModTime()) < stagingAbandonmentAge {
+				continue
+			}
 			if !privateSpoolFile(path, before) {
-				if err := os.Remove(path); err != nil && !errors.Is(err, os.ErrNotExist) {
+				removedNow, err := removeSpoolFileIfSame(path, before)
+				if err != nil {
 					return err
 				}
-				removed = true
+				removed = removed || removedNow
 				continue
 			}
 			file, err := openSpoolEventFile(path)
@@ -469,14 +486,15 @@ func (s Spool) removeOrphanTemporaries() error {
 				_ = file.Close()
 				continue
 			}
-			if err := os.Remove(path); err != nil && !errors.Is(err, os.ErrNotExist) {
+			removedNow, err := removeSpoolFileIfSame(path, after)
+			if err != nil {
 				_ = unlockSpoolFile(file)
 				_ = file.Close()
 				return err
 			}
 			_ = unlockSpoolFile(file)
 			_ = file.Close()
-			removed = true
+			removed = removed || removedNow
 		}
 		if errors.Is(readErr, io.EOF) {
 			break
@@ -668,7 +686,7 @@ func tryAcquireRecoverableLock(path string) (func(), bool, error) {
 }
 
 func openSpoolLockFile(path string) (*os.File, error) {
-	for range 2 {
+	for range 4 {
 		file, err := createSpoolLockFile(path)
 		if err == nil {
 			if err := protectSpoolFile(path, file); err != nil {
@@ -689,26 +707,55 @@ func openSpoolLockFile(path string) (*os.File, error) {
 			return nil, err
 		}
 		if !privateSpoolFile(path, before) {
-			if err := os.Remove(path); err != nil && !errors.Is(err, os.ErrNotExist) {
+			removed, err := removeSpoolFileIfSame(path, before)
+			if err != nil {
 				return nil, err
 			}
-			if err := syncDirectory(filepath.Dir(path)); err != nil {
-				return nil, err
+			if removed {
+				if err := syncDirectory(filepath.Dir(path)); err != nil {
+					return nil, err
+				}
 			}
 			continue
 		}
 		file, err = openExistingSpoolLockFile(path)
 		if err != nil {
+			if errors.Is(err, os.ErrNotExist) {
+				continue
+			}
 			return nil, err
 		}
 		after, err := file.Stat()
 		if err != nil || !os.SameFile(before, after) || !privateSpoolFile(path, after) {
 			_ = file.Close()
+			if err == nil && !os.SameFile(before, after) {
+				continue
+			}
 			return nil, errors.New("canopi spool lock changed while opening")
 		}
 		return file, nil
 	}
 	return nil, errors.New("cannot replace unprotected Canopi spool lock")
+}
+
+func removeSpoolFileIfSame(path string, inspected os.FileInfo) (bool, error) {
+	current, err := os.Lstat(path)
+	if errors.Is(err, os.ErrNotExist) {
+		return false, nil
+	}
+	if err != nil {
+		return false, err
+	}
+	if !os.SameFile(inspected, current) {
+		return false, nil
+	}
+	if err := os.Remove(path); err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return false, nil
+		}
+		return false, err
+	}
+	return true, nil
 }
 
 func spoolLockRelease(file *os.File) func() {

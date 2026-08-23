@@ -256,6 +256,37 @@ func TestOpenStoreExcludesSecondWriterForSameStateFile(t *testing.T) {
 	}
 }
 
+func TestStateLockRepairDoesNotRemoveReplacementInode(t *testing.T) {
+	path := filepath.Join(t.TempDir(), ".canopi-lock-test")
+	if err := os.WriteFile(path, []byte("inspected"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	inspected, err := os.Lstat(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Remove(path); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, []byte("replacement"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	removed, err := removeStateLockIfSame(path, inspected)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if removed {
+		t.Fatal("state lock repair removed a replacement inode")
+	}
+	contents, err := os.ReadFile(path) // #nosec G304 -- test path is inside t.TempDir.
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(contents) != "replacement" {
+		t.Fatalf("replacement contents = %q", contents)
+	}
+}
+
 func TestPersistStoreReclaimsCrashLeftTemporary(t *testing.T) {
 	directory := t.TempDir()
 	path := filepath.Join(directory, "state.json")

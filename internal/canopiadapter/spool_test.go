@@ -126,6 +126,41 @@ func TestSpoolEnqueueReclaimsTemporaryFileLeftByCrash(t *testing.T) {
 	}
 }
 
+func TestSpoolCleanupLeavesFreshPreLockPublisherAndReclaimsItAfterAbandonment(t *testing.T) {
+	spool := Spool{Directory: t.TempDir(), MaxEvents: 16}
+	if err := spool.ensureDirectory(); err != nil {
+		t.Fatal(err)
+	}
+	temporary, err := os.CreateTemp(spool.Directory, ".contention-publishing-*.tmp")
+	if err != nil {
+		t.Fatal(err)
+	}
+	path := temporary.Name()
+	if err := protectSpoolFile(path, temporary); err != nil {
+		_ = temporary.Close()
+		t.Fatal(err)
+	}
+	if err := temporary.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if err := spool.removeOrphanTemporaries(); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Lstat(path); err != nil {
+		t.Fatalf("fresh pre-lock publisher was removed: %v", err)
+	}
+	abandonedAt := time.Now().Add(-2 * stagingAbandonmentAge)
+	if err := os.Chtimes(path, abandonedAt, abandonedAt); err != nil {
+		t.Fatal(err)
+	}
+	if err := spool.removeOrphanTemporaries(); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Lstat(path); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("abandoned pre-lock publisher still exists: %v", err)
+	}
+}
+
 func TestWindowsSpoolSyncFlushesPublishedDirectoryEntry(t *testing.T) {
 	payload, err := os.ReadFile("spool_sync_windows.go")
 	if err != nil {
