@@ -56,6 +56,12 @@ func TestNewReportRejectsUnboundedOrUnstableFields(t *testing.T) {
 	}
 }
 
+func TestNewReportUsesSignedReleaseNameContract(t *testing.T) {
+	if _, err := New(ComponentAdapter, Identity{Release: "v1x.2y.3z", PluginVersion: "plugin+alpha"}, []Check{Pass("ok")}); err != nil {
+		t.Fatalf("signed-release identity rejected by diagnostics: %v", err)
+	}
+}
+
 func TestReportJSONIsDeterministicStrictAndContentFree(t *testing.T) {
 	report, err := New(ComponentBootstrap, Identity{Release: "v0.1.0-alpha.1", ReleaseSequence: 1, CatalogSequence: 2, ArtifactDigest: "sha256:" + strings.Repeat("a", 64), Platform: "darwin-arm64"}, []Check{
 		Fail("slot_integrity", "reinstall_signed_release"),

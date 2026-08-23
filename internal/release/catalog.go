@@ -43,7 +43,7 @@ func ParseCatalog(body []byte) (Catalog, error) {
 }
 
 func (catalog Catalog) validate() error {
-	if catalog.Schema != releaseDocumentSchema || catalog.Sequence < 1 || !validProductReleaseName(catalog.CurrentRelease) || catalog.MinimumSafeSequence < 1 {
+	if catalog.Schema != releaseDocumentSchema || catalog.Sequence < 1 || !ValidProductReleaseName(catalog.CurrentRelease) || catalog.MinimumSafeSequence < 1 {
 		return errors.New("invalid catalog identity")
 	}
 	published, ok := parseCanonicalUTC(catalog.PublishedAt)
@@ -102,7 +102,7 @@ func (catalog Catalog) validate() error {
 }
 
 func (entry CatalogRelease) validate() error {
-	if !validProductReleaseName(entry.Release) || entry.Sequence < 1 || entry.ManifestLength < 1 || entry.ManifestLength > MaximumManifestBytes || !validSHA256(entry.ManifestSHA256) {
+	if !ValidProductReleaseName(entry.Release) || entry.Sequence < 1 || entry.ManifestLength < 1 || entry.ManifestLength > MaximumManifestBytes || !validSHA256(entry.ManifestSHA256) {
 		return errors.New("invalid catalog release")
 	}
 	return validateManifestPath(entry.Release, entry.ManifestPath)

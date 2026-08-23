@@ -42,6 +42,19 @@ func validReleaseManifestJSON() string {
 }`
 }
 
+func TestValidProductReleaseNameDefinesSharedIdentityContract(t *testing.T) {
+	for _, name := range []string{"v0.1.0-alpha.1", "v1x.2y.3z", "plugin+alpha"} {
+		if !ValidProductReleaseName(name) {
+			t.Fatalf("valid release name rejected: %q", name)
+		}
+	}
+	for _, name := range []string{"", "latest", CatalogReleaseName, LocalCheckoutRelease, "release/name", "release secret"} {
+		if ValidProductReleaseName(name) {
+			t.Fatalf("invalid release name accepted: %q", name)
+		}
+	}
+}
+
 func TestParseReleaseManifestBindsExactPublicReleaseContract(t *testing.T) {
 	manifest, err := ParseReleaseManifest([]byte(validReleaseManifestJSON()))
 	if err != nil {

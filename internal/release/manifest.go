@@ -71,10 +71,10 @@ func ParseReleaseManifest(body []byte) (ReleaseManifest, error) {
 }
 
 func (manifest ReleaseManifest) validate() error {
-	if manifest.Schema != releaseDocumentSchema || manifest.Sequence < 1 || !validProductReleaseName(manifest.Release) || !canonicalUTCTime(manifest.PublishedAt) {
+	if manifest.Schema != releaseDocumentSchema || manifest.Sequence < 1 || !ValidProductReleaseName(manifest.Release) || !canonicalUTCTime(manifest.PublishedAt) {
 		return errors.New("invalid release identity")
 	}
-	if !validProtocolRange(manifest.GatewayProtocol) || !validProtocolRange(manifest.ClientProtocol) || manifest.MinimumRecoveryProtocol < 1 || !validProductReleaseName(manifest.MinimumBootstrapRelease) {
+	if !validProtocolRange(manifest.GatewayProtocol) || !validProtocolRange(manifest.ClientProtocol) || manifest.MinimumRecoveryProtocol < 1 || !ValidProductReleaseName(manifest.MinimumBootstrapRelease) {
 		return errors.New("invalid protocol bound")
 	}
 	if err := validPublishedDatabase(manifest.Database, manifest.PostgreSQLMajor); err != nil {
@@ -134,7 +134,9 @@ func (artifact Artifact) validate(release string) error {
 	return nil
 }
 
-func validProductReleaseName(name string) bool {
+// ValidProductReleaseName reports whether name is a canonical immutable
+// product release identity accepted by signed manifests and catalogs.
+func ValidProductReleaseName(name string) bool {
 	return releaseNamePattern.MatchString(name) && !reservedReleaseName(name)
 }
 
@@ -171,7 +173,7 @@ func validReleaseNameList(names []string, limit int) error {
 	}
 	seen := map[string]struct{}{}
 	for _, name := range names {
-		if !validProductReleaseName(name) {
+		if !ValidProductReleaseName(name) {
 			return errors.New("invalid release list")
 		}
 		if _, exists := seen[name]; exists {

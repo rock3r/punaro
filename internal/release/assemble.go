@@ -48,7 +48,7 @@ type Assembled struct {
 // catalog and manifest bootstrap will later verify. It performs no network I/O
 // and does not sign.
 func Assemble(request AssembleRequest) (Assembled, error) {
-	if request.Directory == "" || !validProductReleaseName(request.Release) || request.Sequence < 1 || request.CatalogSequence < 1 {
+	if request.Directory == "" || !ValidProductReleaseName(request.Release) || request.Sequence < 1 || request.CatalogSequence < 1 {
 		return Assembled{}, errors.New("release assembly is invalid")
 	}
 	publishedAt := request.PublishedAt.UTC().Format("2006-01-02T15:04:05Z")

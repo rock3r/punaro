@@ -4,6 +4,8 @@ import (
 	"errors"
 	"reflect"
 	"sort"
+
+	punarorelease "github.com/rock3r/punaro/internal/release"
 )
 
 // FleetTarget identifies one independently collected component report.
@@ -47,7 +49,7 @@ func AggregateFleet(reports []Report, policy FleetPolicy) (Report, error) {
 		expected[key] = target
 	}
 	for release, sequence := range policy.Catalog {
-		if !releasePattern.MatchString(release) || sequence < 1 {
+		if !punarorelease.ValidProductReleaseName(release) || sequence < 1 {
 			return Report{}, errors.New("invalid fleet diagnostic catalog")
 		}
 	}

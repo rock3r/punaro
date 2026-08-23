@@ -15,7 +15,7 @@ import (
 // ignored; every manifest-listed file is required and must be a regular,
 // non-symlinked file with the signed length and SHA-256 digest.
 func VerifyArtifactDirectory(directory string, manifest ReleaseManifest) error {
-	if directory == "" || !filepath.IsAbs(directory) || filepath.Clean(directory) != directory || !validProductReleaseName(manifest.Release) || len(manifest.Artifacts) == 0 || len(manifest.Artifacts) > maxArtifacts {
+	if directory == "" || !filepath.IsAbs(directory) || filepath.Clean(directory) != directory || !ValidProductReleaseName(manifest.Release) || len(manifest.Artifacts) == 0 || len(manifest.Artifacts) > maxArtifacts {
 		return errors.New("release artifact directory is invalid")
 	}
 	directoryInfo, err := os.Lstat(directory)

@@ -14,6 +14,8 @@ import (
 	"regexp"
 	"sort"
 	"strings"
+
+	punarorelease "github.com/rock3r/punaro/internal/release"
 )
 
 // Supported diagnostic components.
@@ -90,7 +92,6 @@ type Report struct {
 var (
 	stableCodePattern = regexp.MustCompile(`^[a-z][a-z0-9]*(?:_[a-z0-9]+)*$`)
 	machineIDPattern  = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$`)
-	releasePattern    = regexp.MustCompile(`^v[0-9]+\.[0-9]+\.[0-9]+(?:-[0-9A-Za-z][0-9A-Za-z.-]{0,63})?(?:\+[0-9A-Za-z][0-9A-Za-z.-]{0,63})?$`)
 	platformPattern   = regexp.MustCompile(`^[a-z0-9]+-[a-z0-9][a-z0-9_]{0,31}$`)
 	digestPattern     = regexp.MustCompile(`^sha256:[0-9a-f]{64}$`)
 )
@@ -273,7 +274,7 @@ func validateIdentity(identity Identity) error {
 	if identity.MachineID != "" && !machineIDPattern.MatchString(identity.MachineID) {
 		return errors.New("invalid diagnostic machine identity")
 	}
-	if identity.Release != "" && !releasePattern.MatchString(identity.Release) {
+	if identity.Release != "" && !punarorelease.ValidProductReleaseName(identity.Release) {
 		return errors.New("invalid diagnostic release")
 	}
 	if identity.ReleaseSequence < 0 || identity.CatalogSequence < 0 || identity.Protocol < 0 || identity.StorageSchema < 0 {
@@ -285,7 +286,7 @@ func validateIdentity(identity Identity) error {
 	if identity.Platform != "" && !platformPattern.MatchString(identity.Platform) {
 		return errors.New("invalid diagnostic platform")
 	}
-	if identity.PluginVersion != "" && !releasePattern.MatchString(identity.PluginVersion) {
+	if identity.PluginVersion != "" && !punarorelease.ValidProductReleaseName(identity.PluginVersion) {
 		return errors.New("invalid diagnostic plugin version")
 	}
 	if identity.SkillSetDigest != "" && !digestPattern.MatchString(identity.SkillSetDigest) {

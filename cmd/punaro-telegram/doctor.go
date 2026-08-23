@@ -26,6 +26,7 @@ const (
 	defaultTelegramDoctorTimeout = 15 * time.Second
 	maximumTelegramDoctorTimeout = 30 * time.Second
 	maximumHealthyCycleAge       = 2 * time.Minute
+	maximumServiceVersionOutput  = 256
 )
 
 // Telegram release identity is set from a verified release build with -X.
@@ -45,6 +46,27 @@ type telegramServiceDoctorResult struct {
 	Release      bool
 	ExitStatus   bool
 	RestartState bool
+}
+
+type boundedTelegramOutput struct {
+	buffer   strings.Builder
+	maximum  int
+	overflow bool
+}
+
+func (output *boundedTelegramOutput) Write(value []byte) (int, error) {
+	remaining := output.maximum - output.buffer.Len()
+	if remaining > 0 {
+		retained := value
+		if len(retained) > remaining {
+			retained = retained[:remaining]
+		}
+		_, _ = output.buffer.Write(retained)
+	}
+	if len(value) > remaining {
+		output.overflow = true
+	}
+	return len(value), nil
 }
 
 var (
@@ -302,11 +324,21 @@ func telegramServiceFileBound(goos, body string) bool {
 }
 
 func telegramServiceVersion(ctx context.Context) (string, bool) {
-	command := exec.CommandContext(ctx, "/usr/local/bin/punaro-telegram", "version") // #nosec G204 -- fixed installed gateway executable.
+	return telegramExecutableVersion(ctx, "/usr/local/bin/punaro-telegram")
+}
+
+func telegramExecutableVersion(ctx context.Context, executable string) (string, bool) {
+	command := exec.CommandContext(ctx, executable, "version") // #nosec G204 -- caller supplies the fixed installed gateway executable or a test fixture.
+	command.Stdin = nil
 	command.Stderr = io.Discard
-	output, err := command.Output()
-	if err != nil || len(output) > 256 || strings.Contains(strings.TrimSpace(string(output)), "\n") {
+	output := boundedTelegramOutput{maximum: maximumServiceVersionOutput}
+	command.Stdout = &output
+	if err := command.Run(); err != nil || output.overflow {
 		return "", false
 	}
-	return strings.TrimSpace(string(output)), true
+	release := strings.TrimSpace(output.buffer.String())
+	if release == "" || strings.ContainsAny(release, "\r\n\t ") {
+		return "", false
+	}
+	return release, true
 }

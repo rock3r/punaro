@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -44,6 +45,27 @@ func TestTelegramServiceBindingRejectsStaleDefinitions(t *testing.T) {
 		if telegramServiceFileBound("linux", stale) {
 			t.Fatalf("stale system service accepted: %q", stale)
 		}
+	}
+}
+
+func TestTelegramExecutableVersionStreamsIntoBoundedBuffer(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("shell fixture is Unix-only")
+	}
+	executable := filepath.Join(t.TempDir(), "punaro-telegram")
+	fixture := "#!/bin/sh\nprintf 'v0.1.0-alpha.1'\n"
+	if err := os.WriteFile(executable, []byte(fixture), 0o700); err != nil { // #nosec G306 -- executable test fixture in a private temporary directory.
+		t.Fatal(err)
+	}
+	if release, ok := telegramExecutableVersion(t.Context(), executable); !ok || release != "v0.1.0-alpha.1" {
+		t.Fatalf("release=%q ok=%v", release, ok)
+	}
+	fixture = "#!/bin/sh\ni=0\nwhile [ \"$i\" -lt 1024 ]; do printf '0123456789abcdef'; i=$((i + 1)); done\n"
+	if err := os.WriteFile(executable, []byte(fixture), 0o700); err != nil { // #nosec G306 -- executable test fixture in a private temporary directory.
+		t.Fatal(err)
+	}
+	if release, ok := telegramExecutableVersion(t.Context(), executable); ok || release != "" {
+		t.Fatalf("oversized release=%q ok=%v", release, ok)
 	}
 }
 
