@@ -438,7 +438,7 @@ func preserveDependencies(t *testing.T) {
 	originalVerify := verifyInstallationPair
 	originalStart, originalProbe, originalIssue, originalListClients, originalRevokeClient := startServices, probe, issueEnrollment, listClients, revokeClient
 	originalBackup, originalListBackups, originalVerifyBackup, originalRestore := createOperatorBackup, listOperatorBackups, verifyOperatorBackup, restoreOperatorBackup
-	originalServerDoctorInspect := serverDoctorInspect
+	originalServerDoctorInspect, originalServerDoctorLoad := serverDoctorInspect, serverDoctorLoad
 	t.Cleanup(func() {
 		inspectSchema, inspectOwner, migratePristinePair, maintenanceActive = originalInspect, originalOwner, originalMigrate, originalMaintenance
 		createOwner, recoverInstallationOwner = originalCreate, originalRecover
@@ -448,6 +448,7 @@ func preserveDependencies(t *testing.T) {
 		listClients, revokeClient = originalListClients, originalRevokeClient
 		createOperatorBackup, listOperatorBackups, verifyOperatorBackup, restoreOperatorBackup = originalBackup, originalListBackups, originalVerifyBackup, originalRestore
 		serverDoctorInspect = originalServerDoctorInspect
+		serverDoctorLoad = originalServerDoctorLoad
 	})
 	inspectOwner = func(context.Context, string) (punaropostgres.Principal, error) {
 		return punaropostgres.Principal{ID: "11111111-1111-4111-8111-111111111111", DisplayName: "owner"}, nil
@@ -459,6 +460,32 @@ func preserveDependencies(t *testing.T) {
 	maintenanceActive = func(context.Context, string) (bool, error) { return false, nil }
 	serverDoctorInspect = func(context.Context, operator.Installation, string, bool, string) serverDoctorState {
 		return healthyServerDoctorState()
+	}
+}
+
+func TestServerDoctorDeadlineIncludesInstallationLoad(t *testing.T) {
+	preserveDependencies(t)
+	directory := testInstallation(t)
+	loadCalled := false
+	serverDoctorLoad = func(ctx context.Context, gotDirectory string) (operator.Installation, error) {
+		loadCalled = true
+		deadline, ok := ctx.Deadline()
+		if !ok || gotDirectory != directory || time.Until(deadline) <= 0 || time.Until(deadline) > 2*time.Second {
+			t.Fatalf("directory=%q deadline=%v ok=%v", gotDirectory, deadline, ok)
+		}
+		return operator.Installation{}, context.DeadlineExceeded
+	}
+	serverDoctorInspect = func(context.Context, operator.Installation, string, bool, string) serverDoctorState {
+		t.Fatal("doctor inspection ran after installation load failed")
+		return serverDoctorState{}
+	}
+	var stdout, stderr bytes.Buffer
+	if code := run([]string{"doctor", "--directory", directory, "--machine-id", "punaro-lxc", "--timeout", "1s"}, &stdout, &stderr); code != 1 || !loadCalled {
+		t.Fatalf("code=%d load_called=%v stdout=%q stderr=%q", code, loadCalled, stdout.String(), stderr.String())
+	}
+	report, err := punarodiagnostic.Decode(bytes.NewReader(stdout.Bytes()))
+	if err != nil || report.Component != punarodiagnostic.ComponentServer || report.Healthy {
+		t.Fatalf("report=%#v err=%v", report, err)
 	}
 }
 

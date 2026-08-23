@@ -161,6 +161,7 @@ var (
 	verifyOperatorBackup  = punarobackup.Verify
 	restoreOperatorBackup = restoreBackup
 	serverDoctorInspect   = inspectServerDoctorState
+	serverDoctorLoad      = operator.LoadContext
 )
 
 var (
@@ -644,7 +645,9 @@ func runServerDoctor(args []string, stdout, stderr io.Writer) int {
 	if flags.Parse(args) != nil || flags.NArg() != 0 || *directory == "" || validServerMachineID(*machineID) == "" || *timeout < time.Second || *timeout > 30*time.Second {
 		return 2
 	}
-	installation, err := operator.Load(*directory)
+	ctx, cancel := context.WithTimeout(context.Background(), *timeout)
+	defer cancel()
+	installation, err := serverDoctorLoad(ctx, *directory)
 	if err != nil {
 		report, reportErr := punarodiagnostic.New(punarodiagnostic.ComponentServer, punarodiagnostic.Identity{MachineID: *machineID, Platform: runtime.GOOS + "-" + runtime.GOARCH}, unavailableServerDoctorChecks(*gatewayColocated))
 		if reportErr != nil || writeJSON(stdout, stderr, report) != 0 {
@@ -653,8 +656,6 @@ func runServerDoctor(args []string, stdout, stderr io.Writer) int {
 		}
 		return punarodiagnostic.ExitCode(report)
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), *timeout)
-	defer cancel()
 	report, err := diagnoseServer(ctx, installation, *machineID, *gatewayColocated, strings.TrimSpace(*relayProfile))
 	if err != nil {
 		_, _ = fmt.Fprintln(stderr, "punaro doctor failed: diagnostic report unavailable")

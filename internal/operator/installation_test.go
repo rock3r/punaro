@@ -407,6 +407,14 @@ func TestLoadPreservesMissingPathDiagnosticsForDoctor(t *testing.T) {
 	}
 }
 
+func TestLoadContextHonorsCancellationBeforeFilesystemInspection(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	if _, err := LoadContext(ctx, filepath.Join(t.TempDir(), "unavailable")); !errors.Is(err, context.Canceled) {
+		t.Fatalf("LoadContext error=%v, want context cancellation", err)
+	}
+}
+
 func TestLoadAndCheckPathsRejectInstallationDirectoryPermissionDrift(t *testing.T) {
 	options := validInitOptions(t)
 	installation, err := Init(context.Background(), options, func(context.Context, string, string) (punaropostgres.Principal, error) {

@@ -431,6 +431,36 @@ func Load(directory string) (Installation, error) {
 	return installation, nil
 }
 
+// LoadContext reads a published installation marker while allowing a caller
+// deadline to bound filesystem inspection, including an individual filesystem
+// operation that is blocked on unresponsive mounted storage.
+func LoadContext(ctx context.Context, directory string) (Installation, error) {
+	if ctx == nil {
+		return Installation{}, errors.New("installation load context is missing")
+	}
+	if err := ctx.Err(); err != nil {
+		return Installation{}, err
+	}
+	type result struct {
+		installation Installation
+		err          error
+	}
+	completed := make(chan result, 1)
+	go func() {
+		installation, err := Load(directory)
+		completed <- result{installation: installation, err: err}
+	}()
+	select {
+	case <-ctx.Done():
+		return Installation{}, ctx.Err()
+	case loaded := <-completed:
+		if err := ctx.Err(); err != nil {
+			return Installation{}, err
+		}
+		return loaded.installation, loaded.err
+	}
+}
+
 func readInstallation(path string) (Installation, error) {
 	if err := requireTrustedProtectedFile(path, 64<<10); err != nil {
 		return Installation{}, err
