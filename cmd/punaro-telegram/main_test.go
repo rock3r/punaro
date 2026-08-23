@@ -6,6 +6,7 @@ import (
 	"crypto/ed25519"
 	"crypto/rand"
 	"encoding/base64"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -194,6 +195,27 @@ func TestLoadConfigReadsBotTokenFromPrivateCredentialFile(t *testing.T) {
 	t.Setenv("PUNARO_TELEGRAM_BOT_TOKEN", "also-set")
 	if _, err := loadConfig(); err == nil {
 		t.Fatal("multiple bot-token sources accepted")
+	}
+}
+
+func TestFailedGatewayCycleRecordPreservesCompletedPhaseEvidence(t *testing.T) {
+	t.Parallel()
+	now := time.Date(2026, 8, 23, 12, 0, 0, 0, time.UTC)
+	for _, test := range []struct {
+		phase                     telegram.GatewayCyclePhase
+		poll, relayOK, telegramOK bool
+	}{
+		{phase: telegram.GatewayPhaseInbound, poll: true},
+		{phase: telegram.GatewayPhaseLease, poll: true},
+		{phase: telegram.GatewayPhaseSend, poll: true, relayOK: true},
+		{phase: telegram.GatewayPhaseAck, poll: true, relayOK: true, telegramOK: true},
+	} {
+		t.Run(string(test.phase), func(t *testing.T) {
+			record := failedGatewayCycleRecord(now, 42, &telegram.GatewayCycleError{Phase: test.phase, Err: errors.New("fixture")})
+			if record.At != now || record.Offset != 42 || record.PollOK != test.poll || record.RelayOK != test.relayOK || record.TelegramOK != test.telegramOK {
+				t.Fatalf("record=%#v", record)
+			}
+		})
 	}
 }
 

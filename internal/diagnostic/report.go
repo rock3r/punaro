@@ -175,6 +175,9 @@ func Decode(input io.Reader) (Report, error) {
 	if err != nil || len(body) == 0 || len(body) > MaximumReportBytes {
 		return Report{}, errors.New("diagnostic report is invalid")
 	}
+	if rejectDuplicateJSONFields(body) != nil {
+		return Report{}, errors.New("diagnostic report is invalid")
+	}
 
 	decoder := json.NewDecoder(bytes.NewReader(body))
 	decoder.DisallowUnknownFields()
@@ -192,6 +195,69 @@ func Decode(input io.Reader) (Report, error) {
 		return Report{}, errors.New("diagnostic report is not canonical")
 	}
 	return canonical, nil
+}
+
+func rejectDuplicateJSONFields(body []byte) error {
+	decoder := json.NewDecoder(bytes.NewReader(body))
+	var scanValue func(int) error
+	scanValue = func(depth int) error {
+		if depth > 16 {
+			return errors.New("JSON nesting is too deep")
+		}
+		token, err := decoder.Token()
+		if err != nil {
+			return err
+		}
+		delimiter, ok := token.(json.Delim)
+		if !ok {
+			return nil
+		}
+		switch delimiter {
+		case '{':
+			seen := make(map[string]struct{})
+			for decoder.More() {
+				keyToken, err := decoder.Token()
+				if err != nil {
+					return err
+				}
+				key, ok := keyToken.(string)
+				if !ok {
+					return errors.New("invalid JSON object key")
+				}
+				if _, duplicate := seen[key]; duplicate {
+					return errors.New("duplicate JSON object key")
+				}
+				seen[key] = struct{}{}
+				if err := scanValue(depth + 1); err != nil {
+					return err
+				}
+			}
+			end, err := decoder.Token()
+			if err != nil || end != json.Delim('}') {
+				return errors.New("invalid JSON object")
+			}
+		case '[':
+			for decoder.More() {
+				if err := scanValue(depth + 1); err != nil {
+					return err
+				}
+			}
+			end, err := decoder.Token()
+			if err != nil || end != json.Delim(']') {
+				return errors.New("invalid JSON array")
+			}
+		default:
+			return errors.New("invalid JSON delimiter")
+		}
+		return nil
+	}
+	if err := scanValue(0); err != nil {
+		return err
+	}
+	if _, err := decoder.Token(); !errors.Is(err, io.EOF) {
+		return errors.New("trailing JSON data")
+	}
+	return nil
 }
 
 func validComponent(component Component) bool {

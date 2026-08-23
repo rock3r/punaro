@@ -92,12 +92,16 @@ func TestReportJSONIsDeterministicStrictAndContentFree(t *testing.T) {
 func TestDecodeRejectsForgedOrNonCanonicalReports(t *testing.T) {
 	valid := `{"schema_version":1,"component":"adapter","identity":{},"healthy":false,"checks":[{"code":"mailbox_mcp","status":"fail","required":true,"remediation":"repair_mailbox_mcp"},{"code":"relay_transport","status":"pass","required":true}]}`
 	tests := map[string]string{
-		"missing":          "",
-		"trailing":         valid + `{}`,
-		"forged health":    strings.Replace(valid, `"healthy":false`, `"healthy":true`, 1),
-		"wrong schema":     strings.Replace(valid, `"schema_version":1`, `"schema_version":2`, 1),
-		"unsorted":         strings.Replace(valid, `[{"code":"mailbox_mcp","status":"fail","required":true,"remediation":"repair_mailbox_mcp"},{"code":"relay_transport","status":"pass","required":true}]`, `[{"code":"relay_transport","status":"pass","required":true},{"code":"mailbox_mcp","status":"fail","required":true,"remediation":"repair_mailbox_mcp"}]`, 1),
-		"unknown identity": strings.Replace(valid, `"identity":{}`, `"identity":{"private_path":"/private"}`, 1),
+		"missing":            "",
+		"trailing":           valid + `{}`,
+		"forged health":      strings.Replace(valid, `"healthy":false`, `"healthy":true`, 1),
+		"wrong schema":       strings.Replace(valid, `"schema_version":1`, `"schema_version":2`, 1),
+		"unsorted":           strings.Replace(valid, `[{"code":"mailbox_mcp","status":"fail","required":true,"remediation":"repair_mailbox_mcp"},{"code":"relay_transport","status":"pass","required":true}]`, `[{"code":"relay_transport","status":"pass","required":true},{"code":"mailbox_mcp","status":"fail","required":true,"remediation":"repair_mailbox_mcp"}]`, 1),
+		"unknown identity":   strings.Replace(valid, `"identity":{}`, `"identity":{"private_path":"/private"}`, 1),
+		"duplicate top":      strings.Replace(valid, `"schema_version":1`, `"schema_version":999,"schema_version":1`, 1),
+		"duplicate identity": strings.Replace(valid, `"identity":{}`, `"identity":{"machine_id":"machine-a","machine_id":"machine-a"}`, 1),
+		"duplicate check":    strings.Replace(valid, `"code":"mailbox_mcp"`, `"code":"mailbox_mcp","code":"mailbox_mcp"`, 1),
+		"excessive nesting":  strings.Repeat(`{"x":`, 17) + `null` + strings.Repeat(`}`, 17),
 	}
 	for name, input := range tests {
 		t.Run(name, func(t *testing.T) {

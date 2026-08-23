@@ -207,18 +207,7 @@ func run() error {
 				continue
 			}
 		} else {
-			record := telegram.GatewayCycleRecord{At: time.Now().UTC(), Offset: next, Failure: telegram.ClassifyGatewayCycleFailure(err)}
-			var cycleErr *telegram.GatewayCycleError
-			if errors.As(err, &cycleErr) {
-				switch cycleErr.Phase {
-				case telegram.GatewayPhaseLease:
-					record.PollOK = true
-				case telegram.GatewayPhaseSend:
-					record.PollOK, record.RelayOK = true, true
-				case telegram.GatewayPhaseAck:
-					record.PollOK, record.RelayOK, record.TelegramOK = true, true, true
-				}
-			}
+			record := failedGatewayCycleRecord(time.Now().UTC(), next, err)
 			if recordErr := state.RecordGatewayCycle(record); recordErr != nil {
 				log.Print("telegram event class=gateway_health err=state_unavailable")
 			}
@@ -237,6 +226,22 @@ func run() error {
 		}
 	}
 	return nil
+}
+
+func failedGatewayCycleRecord(at time.Time, offset int64, err error) telegram.GatewayCycleRecord {
+	record := telegram.GatewayCycleRecord{At: at, Offset: offset, Failure: telegram.ClassifyGatewayCycleFailure(err)}
+	var cycleErr *telegram.GatewayCycleError
+	if errors.As(err, &cycleErr) {
+		switch cycleErr.Phase {
+		case telegram.GatewayPhaseInbound, telegram.GatewayPhaseLease:
+			record.PollOK = true
+		case telegram.GatewayPhaseSend:
+			record.PollOK, record.RelayOK = true, true
+		case telegram.GatewayPhaseAck:
+			record.PollOK, record.RelayOK, record.TelegramOK = true, true, true
+		}
+	}
+	return record
 }
 
 func loadConfig() (config, error) {

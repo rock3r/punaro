@@ -3,6 +3,8 @@ package main
 import (
 	"bufio"
 	"context"
+	"crypto/sha256"
+	"encoding/binary"
 	"encoding/json"
 	"errors"
 	"flag"
@@ -26,6 +28,8 @@ const (
 	defaultAdapterDoctorTimeout = 15 * time.Second
 	maximumAdapterDoctorTimeout = 30 * time.Second
 	maximumMailboxDoctorOutput  = 64 << 10
+	maximumMailboxDoctorEntries = 4096
+	maximumMailboxDoctorBytes   = 64 << 20
 )
 
 type serviceDoctorResult struct {
@@ -315,6 +319,10 @@ func probeMailboxMCP(ctx context.Context, config adapterConfig) error {
 	if err != nil {
 		return err
 	}
+	before, err := mailboxDoctorTreeDigest(config.mailboxState)
+	if err != nil {
+		return errors.New("mailbox state cannot be inspected safely")
+	}
 	command := exec.CommandContext(ctx, binary, "--state-dir", config.mailboxState, "mcp") // #nosec G204,G702 -- fixed MCP handshake using installer configuration.
 	stdin, err := command.StdinPipe()
 	if err != nil {
@@ -352,7 +360,72 @@ func probeMailboxMCP(ctx context.Context, config adapterConfig) error {
 	}
 	_ = command.Wait()
 	waited = true
+	after, err := mailboxDoctorTreeDigest(config.mailboxState)
+	if err != nil || before != after {
+		return errors.New("mailbox MCP changed state during doctor")
+	}
 	return nil
+}
+
+func mailboxDoctorTreeDigest(root string) ([sha256.Size]byte, error) {
+	hash := sha256.New()
+	entries := 0
+	var totalBytes int64
+	writeField := func(value []byte) error {
+		if err := binary.Write(hash, binary.BigEndian, uint64(len(value))); err != nil {
+			return err
+		}
+		_, err := hash.Write(value)
+		return err
+	}
+	err := filepath.WalkDir(root, func(path string, entry os.DirEntry, walkErr error) error {
+		if walkErr != nil {
+			return walkErr
+		}
+		entries++
+		if entries > maximumMailboxDoctorEntries {
+			return errors.New("mailbox state has too many entries")
+		}
+		relative, err := filepath.Rel(root, path)
+		if err != nil || relative == ".." || strings.HasPrefix(relative, ".."+string(filepath.Separator)) {
+			return errors.New("mailbox state path is invalid")
+		}
+		info, err := entry.Info()
+		if err != nil || info.Mode()&os.ModeSymlink != 0 {
+			return errors.New("mailbox state entry is unsafe")
+		}
+		if err := writeField([]byte(filepath.ToSlash(relative))); err != nil {
+			return err
+		}
+		if info.IsDir() {
+			return writeField([]byte("directory"))
+		}
+		if !info.Mode().IsRegular() || info.Size() < 0 || totalBytes > maximumMailboxDoctorBytes-info.Size() {
+			return errors.New("mailbox state entry is unsafe")
+		}
+		totalBytes += info.Size()
+		if err := writeField([]byte("file")); err != nil {
+			return err
+		}
+		file, err := openMailboxDoctorSnapshotFile(path, info)
+		if err != nil {
+			return err
+		}
+		_, copyErr := io.CopyN(hash, file, info.Size())
+		var extra [1]byte
+		extraCount, extraErr := file.Read(extra[:])
+		closeErr := file.Close()
+		if copyErr != nil || extraCount != 0 || !errors.Is(extraErr, io.EOF) || closeErr != nil {
+			return errors.New("mailbox state changed during inspection")
+		}
+		return nil
+	})
+	if err != nil {
+		return [sha256.Size]byte{}, err
+	}
+	var digest [sha256.Size]byte
+	copy(digest[:], hash.Sum(nil))
+	return digest, nil
 }
 
 func validateMailboxDoctorConfiguration(config adapterConfig) (string, error) {

@@ -69,8 +69,8 @@ Unsigned draft bytes are a publication candidate. Bootstrap must fail closed
 until both detached signatures are present and verify against a public key
 embedded in that bootstrap.
 
-The `catalog` prerelease is overwritten with the newest unsigned catalog so
-the origin path stays stable. Replacing it does not make the catalog trusted.
+The unsigned workflow never creates or mutates the live `catalog` prerelease.
+Only the offline-signature publisher can make those stable assets visible.
 
 ## Cutting a candidate
 
@@ -86,7 +86,8 @@ the origin path stays stable. Replacing it does not make the catalog trusted.
      -f catalog_sequence=1 \
      -f draft=true
    ```
-3. Wait for the draft release and the `catalog` prerelease to appear.
+3. Wait for the draft release to appear. The live `catalog` prerelease is not
+   touched by the unsigned workflow.
 4. Generate the offline key once, on an air-gapped or owner-only machine, and
    keep the private file `0600` off this repository:
 
@@ -127,8 +128,12 @@ the origin path stays stable. Replacing it does not make the catalog trusted.
      --keys-file /absolute/private/punaro-release.pub
    ```
 
-   The publisher makes the immutable versioned prerelease available first,
-   then replaces the live catalog signature and JSON. The unsigned build
+   The publisher makes the immutable versioned prerelease available first.
+   Initial live-catalog publication stays draft until both signed assets are
+   uploaded. On replacement, the publisher first downloads and verifies the
+   existing pair, retains it until the new pair is remotely re-downloaded and
+   verified, and restores the previous pair (with bounded retries) after any
+   partial upload, signal, or verification failure. The unsigned build
    workflow never touches the live catalog. Pass the public key set to
    `punaro-bootstrap update --keys-file`. Do not embed a production key until
    the first official signed release exists.
