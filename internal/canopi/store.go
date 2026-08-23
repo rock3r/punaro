@@ -150,6 +150,9 @@ func OpenStore(path string, config Config) (*Store, error) {
 	if err := prepareStateDirectory(filepath.Dir(path)); err != nil {
 		return nil, fmt.Errorf("protect Canopi state directory: %w", err)
 	}
+	if err := recoverStateReplacement(path); err != nil {
+		return nil, fmt.Errorf("recover Canopi state replacement: %w", err)
+	}
 	file, err := openPrivateStateFile(path)
 	if errors.Is(err, os.ErrNotExist) {
 		return store, nil
@@ -430,10 +433,10 @@ func persistStore(path string, state persistedStore) error {
 	if err := temporary.Close(); err != nil {
 		return fmt.Errorf("close Canopi state: %w", err)
 	}
-	if err := os.Rename(temporaryName, path); err != nil {
+	if err := replaceStateFile(temporaryName, path); err != nil {
 		return fmt.Errorf("replace Canopi state: %w", err)
 	}
-	return syncStateDirectory(directory)
+	return nil
 }
 
 func stateTemporaryPrefix(path string) string {

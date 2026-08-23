@@ -222,6 +222,19 @@ func TestPersistStoreDoesNotReclaimAnotherStateFilesTemporary(t *testing.T) {
 	}
 }
 
+func TestWindowsStateReplacementContractUsesWriteThroughRecovery(t *testing.T) {
+	payload, err := os.ReadFile("store_sync_windows.go")
+	if err != nil {
+		t.Fatal(err)
+	}
+	source := string(payload)
+	for _, required := range []string{"MOVEFILE_WRITE_THROUGH", "MOVEFILE_REPLACE_EXISTING", "stateReplacementBackup", "recoverStateReplacement", "FlushFileBuffers"} {
+		if !strings.Contains(source, required) {
+			t.Fatalf("Windows state replacement is missing %q", required)
+		}
+	}
+}
+
 func TestApplyPersistenceFailureDoesNotAcknowledgeOrMutate(t *testing.T) {
 	now := time.Date(2026, 8, 23, 12, 0, 0, 0, time.UTC)
 	store := NewStore(DefaultConfig())

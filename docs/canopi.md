@@ -135,7 +135,10 @@ state-file namespace in the same directory. The state path must be absolute and
 clean. Its parent is current-user-owned and owner-only; an existing state file
 must be a stable, singly linked, current-user-owned `0600` regular file. Windows
 uses protected current-user-only DACLs and no-reparse opens for the equivalent
-directory and file checks.
+directory and file checks. Windows replacement creates a durable hard-link
+backup of the prior state, publishes the flushed replacement with write-through
+move semantics, flushes the directory, and recovers the backup on startup if an
+interrupted replacement left the target absent.
 
 In another terminal, generate the selected 3 waiting / 4 done / 12 working
 overflow state:
@@ -168,6 +171,8 @@ are strong hashes of deterministic PNG bytes. A structurally valid batch
 continues after per-event admission failures and returns `207` with an ordered
 status/result entry for every event, so one permanent rejection cannot starve
 later lifecycle updates. Persistence failure still fails the request.
+The batch body must be a JSON array; `null`, trailing JSON, oversized arrays,
+and invalid members fail without false acknowledgement.
 An already-durable duplicate event ID is acknowledged before timestamp-skew
 validation, so an exact retry remains idempotent even after a clock correction.
 

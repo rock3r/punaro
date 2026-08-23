@@ -142,6 +142,10 @@ func (h *Handler) ingestBatch(response http.ResponseWriter, request *http.Reques
 		writeError(response, http.StatusBadRequest, errors.New("invalid batch JSON"))
 		return
 	}
+	if rawEvents == nil {
+		writeError(response, http.StatusBadRequest, errors.New("batch must be a JSON array"))
+		return
+	}
 	var trailing json.RawMessage
 	if err := decoder.Decode(&trailing); !errors.Is(err, io.EOF) {
 		writeError(response, http.StatusBadRequest, errors.New("invalid batch JSON"))

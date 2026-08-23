@@ -21,6 +21,8 @@ memory-client:
 
 canopi-binaries:
 	mkdir -p "$$(dirname "$(CANOPI_OUTPUT)")"
+	mkdir -p "$$(dirname "$(CANOPI_CLAUDE_HOOK_OUTPUT)")"
+	mkdir -p "$$(dirname "$(CANOPI_SIM_OUTPUT)")"
 	go build -trimpath -o "$(CANOPI_OUTPUT)" ./cmd/canopi
 	go build -trimpath -o "$(CANOPI_CLAUDE_HOOK_OUTPUT)" ./cmd/canopi-claude-hook
 	go build -trimpath -o "$(CANOPI_SIM_OUTPUT)" ./cmd/canopi-sim
@@ -30,6 +32,7 @@ release-artifacts:
 
 test:
 	python3 ./scripts/test-agent-plugin.py
+	./scripts/test-canopi-binaries.sh
 	go test -covermode=atomic ./...
 	PUNARO_REMOTE_MCP_E2E_LIVE= PUNARO_REMOTE_MCP_E2E_CONFIG= go test -tags=e2e ./internal/mcphttp
 

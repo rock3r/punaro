@@ -109,6 +109,20 @@ func TestHandlerRejectsTrailingBatchJSON(t *testing.T) {
 	}
 }
 
+func TestHandlerRejectsNullBatchEnvelope(t *testing.T) {
+	handler, err := NewHandler(HandlerConfig{Store: NewStore(DefaultConfig()), Token: "secret", Render: DefaultRenderConfig()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	request := httptest.NewRequestWithContext(context.Background(), http.MethodPost, "/v1/events:batch", bytes.NewBufferString(`null`))
+	request.Header.Set("Authorization", "Bearer secret")
+	response := httptest.NewRecorder()
+	handler.ServeHTTP(response, request)
+	if response.Code != http.StatusBadRequest {
+		t.Fatalf("null batch status = %d, body = %s", response.Code, response.Body.String())
+	}
+}
+
 func TestHandlerRejectsFutureActivityAndLiveRecordOverflow(t *testing.T) {
 	now := time.Date(2026, 8, 23, 12, 0, 0, 0, time.UTC)
 	config := DefaultConfig()

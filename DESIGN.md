@@ -1790,7 +1790,10 @@ The state path is absolute and clean. Its parent must be current-user-owned and
 is made owner-only; existing Unix state files must be stable, singly linked,
 current-user-owned `0600` regular files opened without following symlinks.
 Windows applies equivalent owner, protected-DACL, and no-reparse checks to the
-directory, existing state, and replacement temporary.
+directory, existing state, and replacement temporary. Windows replacement
+hard-links the old target as a recovery copy, flushes that directory entry,
+publishes with `MoveFileEx` replacement plus write-through semantics, flushes
+the directory again, and restores the backup at startup if the target is absent.
 Snapshot and image ETags change only with state revision or rendered response
 content. Snapshot responses use a weak revision validator because their
 generation timestamp changes without a semantic state change; rendered PNGs
@@ -1831,7 +1834,8 @@ and return ordered per-event status records with HTTP 207 when mixed; only a
 shared persistence failure aborts the batch. This prevents one permanently
 rejected identity from starving later updates on every retry. The simulator
 retains only rejected events from a mixed response and retries their stable IDs
-before advancing.
+before advancing. The batch envelope is strictly an array; JSON `null` is not
+an empty batch and is rejected.
 
 The renderer always sorts the complete state set waiting, done, working, then
 recent-first inside each state, before applying configurable capacity. Accepted

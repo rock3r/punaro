@@ -5,6 +5,7 @@ package canopi
 import (
 	"fmt"
 	"os"
+	"path/filepath"
 )
 
 func syncStateDirectory(path string) error {
@@ -17,4 +18,13 @@ func syncStateDirectory(path string) error {
 		return fmt.Errorf("sync Canopi state directory: %w", err)
 	}
 	return nil
+}
+
+func recoverStateReplacement(string) error { return nil }
+
+func replaceStateFile(temporary, target string) error {
+	if err := os.Rename(temporary, target); err != nil {
+		return err
+	}
+	return syncStateDirectory(filepath.Dir(target))
 }

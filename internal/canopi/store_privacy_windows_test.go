@@ -53,3 +53,53 @@ func TestWindowsOpenStoreRejectsSharedStateACL(t *testing.T) {
 		t.Fatal("OpenStore() accepted a state file without an exclusive current-user ACL")
 	}
 }
+
+func TestWindowsOpenStoreRecoversInterruptedStateReplacement(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "state.json")
+	store, err := OpenStore(path, DefaultConfig())
+	if err != nil {
+		t.Fatal(err)
+	}
+	now := time.Date(2026, 8, 23, 12, 0, 0, 0, time.UTC)
+	if _, err := store.Apply(event("event", "agent", protocol.StateWorking, now)); err != nil {
+		t.Fatal(err)
+	}
+	backup := stateReplacementBackup(path)
+	if err := os.Link(path, backup); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Remove(path); err != nil {
+		t.Fatal(err)
+	}
+	recovered, err := OpenStore(path, DefaultConfig())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if agents := recovered.Snapshot(now).Agents; len(agents) != 1 || agents[0].EventID != "event" {
+		t.Fatalf("recovered agents = %#v", agents)
+	}
+}
+
+func TestWindowsStateReplacementSurvivesRestart(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "state.json")
+	store, err := OpenStore(path, DefaultConfig())
+	if err != nil {
+		t.Fatal(err)
+	}
+	now := time.Date(2026, 8, 23, 12, 0, 0, 0, time.UTC)
+	for _, input := range []protocol.Event{
+		event("event-a", "agent-a", protocol.StateWorking, now),
+		event("event-b", "agent-b", protocol.StateDone, now.Add(time.Second)),
+	} {
+		if _, err := store.Apply(input); err != nil {
+			t.Fatal(err)
+		}
+	}
+	reopened, err := OpenStore(path, DefaultConfig())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if agents := reopened.Snapshot(now.Add(time.Second)).Agents; len(agents) != 2 {
+		t.Fatalf("reopened agents = %#v", agents)
+	}
+}
