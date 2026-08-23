@@ -99,6 +99,7 @@ func runAssemble(args []string) error {
 	image := flags.String("image", "", "optional digest-pinned gateway image")
 	minSafe := flags.Int64("minimum-safe-sequence", 0, "lowest sequence still safe for automatic updates")
 	minBootstrap := flags.String("minimum-bootstrap-release", "", "oldest bootstrap that may install this release")
+	previousCatalogFile := flags.String("previous-catalog", "", "verified live catalog whose eligible releases must be retained")
 	if err := flags.Parse(args); err != nil {
 		return errors.New("release assembly is invalid")
 	}
@@ -110,9 +111,24 @@ func runAssemble(args []string) error {
 		return err
 	}
 	schema := currentSchemaRange()
+	var previousCatalog *punarorelease.Catalog
+	if *previousCatalogFile != "" {
+		body, readErr := os.ReadFile(*previousCatalogFile) // #nosec G304 -- explicit operator-supplied prior catalog.
+		if readErr != nil || len(body) > punarorelease.MaximumManifestBytes {
+			return errors.New("release assembly is invalid")
+		}
+		parsed, parseErr := punarorelease.ParseCatalog(body)
+		if parseErr != nil {
+			return errors.New("release assembly is invalid")
+		}
+		previousCatalog = &parsed
+	}
 	minimumSafe := *minSafe
 	if minimumSafe == 0 {
 		minimumSafe = *sequence
+		if previousCatalog != nil {
+			minimumSafe = previousCatalog.MinimumSafeSequence
+		}
 	}
 	bootstrapRelease := *minBootstrap
 	if bootstrapRelease == "" {
@@ -135,6 +151,7 @@ func runAssemble(args []string) error {
 		ClientProtocol:          punarorelease.ProtocolRange{Min: 1, Max: 1},
 		MinimumRecoveryProtocol: 1,
 		MinimumBootstrapRelease: bootstrapRelease,
+		PreviousCatalog:         previousCatalog,
 	})
 	return err
 }
@@ -230,8 +247,37 @@ func validatePublicationCatalog(candidate punarorelease.Catalog, previous *punar
 	if !candidate.Fresh(now) {
 		return errors.New("candidate release catalog is not currently fresh")
 	}
-	if previous != nil && candidate.Sequence <= previous.Sequence {
-		return errors.New("candidate release catalog sequence does not advance the live catalog")
+	if previous != nil {
+		if candidate.Sequence <= previous.Sequence {
+			return errors.New("candidate release catalog sequence does not advance the live catalog")
+		}
+		if candidate.MinimumSafeSequence < previous.MinimumSafeSequence {
+			return errors.New("candidate release catalog lowers the live safety floor")
+		}
+		blocked := map[int64]bool{}
+		for _, sequence := range candidate.CriticalBlocks {
+			blocked[sequence] = true
+		}
+		for _, priorBlock := range previous.CriticalBlocks {
+			if !blocked[priorBlock] {
+				return errors.New("candidate release catalog removes a live critical block")
+			}
+		}
+		for _, prior := range previous.Releases {
+			if prior.Sequence < candidate.MinimumSafeSequence || blocked[prior.Sequence] {
+				continue
+			}
+			retained := false
+			for _, entry := range candidate.Releases {
+				if entry == prior {
+					retained = true
+					break
+				}
+			}
+			if !retained {
+				return errors.New("candidate release catalog drops an eligible live release")
+			}
+		}
 	}
 	return nil
 }

@@ -33,6 +33,7 @@ type AssembleRequest struct {
 	SupportedFrom           []string
 	SteppingStones          []string
 	CriticalBlocks          []int64
+	PreviousCatalog         *Catalog
 }
 
 // Assembled is the unsigned catalog/manifest pair written next to the artifacts.
@@ -89,21 +90,26 @@ func Assemble(request AssembleRequest) (Assembled, error) {
 		return Assembled{}, err
 	}
 	sum := sha256.Sum256(manifestJSON)
+	minimumSafe := request.MinimumSafeSequence
+	if minimumSafe == 0 {
+		minimumSafe = request.Sequence
+		if request.PreviousCatalog != nil {
+			minimumSafe = request.PreviousCatalog.MinimumSafeSequence
+		}
+	}
+	criticalBlocks, releases, err := replacementCatalogEntries(request.PreviousCatalog, request.Release, request.Sequence, request.CatalogSequence, minimumSafe, request.CriticalBlocks, int64(len(manifestJSON)), hex.EncodeToString(sum[:]))
+	if err != nil {
+		return Assembled{}, errors.New("release assembly is invalid")
+	}
 	catalog := Catalog{
 		Schema:              releaseDocumentSchema,
 		Sequence:            request.CatalogSequence,
 		PublishedAt:         publishedAt,
 		ExpiresAt:           expiresAt,
 		CurrentRelease:      request.Release,
-		MinimumSafeSequence: request.MinimumSafeSequence,
-		Releases: []CatalogRelease{{
-			Release:        request.Release,
-			Sequence:       request.Sequence,
-			ManifestPath:   request.Release + "/" + ReleaseManifestFile,
-			ManifestLength: int64(len(manifestJSON)),
-			ManifestSHA256: hex.EncodeToString(sum[:]),
-		}},
-		CriticalBlocks: nonNilInt64s(request.CriticalBlocks),
+		MinimumSafeSequence: minimumSafe,
+		Releases:            releases,
+		CriticalBlocks:      criticalBlocks,
 	}
 	if err := catalog.validate(); err != nil {
 		return Assembled{}, errors.New("release assembly is invalid")
@@ -121,6 +127,47 @@ func Assemble(request AssembleRequest) (Assembled, error) {
 		return Assembled{}, err
 	}
 	return Assembled{Manifest: manifest, ManifestJSON: manifestJSON, Catalog: catalog, CatalogJSON: catalogJSON}, nil
+}
+
+func replacementCatalogEntries(previous *Catalog, release string, sequence, catalogSequence, minimumSafe int64, requestedBlocks []int64, manifestLength int64, manifestSHA256 string) ([]int64, []CatalogRelease, error) {
+	blocks := make([]int64, 0, len(requestedBlocks)+maxCatalogReleases)
+	blocked := map[int64]bool{}
+	for _, value := range requestedBlocks {
+		if value < 1 || blocked[value] {
+			return nil, nil, errors.New("invalid critical blocks")
+		}
+		blocked[value] = true
+		blocks = append(blocks, value)
+	}
+	if previous != nil {
+		if previous.validate() != nil || catalogSequence <= previous.Sequence || minimumSafe < previous.MinimumSafeSequence {
+			return nil, nil, errors.New("invalid previous catalog")
+		}
+		for _, value := range previous.CriticalBlocks {
+			if !blocked[value] {
+				blocked[value] = true
+				blocks = append(blocks, value)
+			}
+		}
+	}
+	releases := make([]CatalogRelease, 0, maxCatalogReleases)
+	if previous != nil {
+		for _, entry := range previous.Releases {
+			if sequence <= entry.Sequence || entry.Release == release {
+				return nil, nil, errors.New("release sequence does not advance")
+			}
+			if entry.Sequence >= minimumSafe && !blocked[entry.Sequence] {
+				releases = append(releases, entry)
+			}
+		}
+	}
+	releases = append(releases, CatalogRelease{Release: release, Sequence: sequence, ManifestPath: release + "/" + ReleaseManifestFile, ManifestLength: manifestLength, ManifestSHA256: manifestSHA256})
+	if len(releases) > maxCatalogReleases {
+		return nil, nil, errors.New("too many retained releases")
+	}
+	sort.Slice(releases, func(i, j int) bool { return releases[i].Sequence < releases[j].Sequence })
+	sort.Slice(blocks, func(i, j int) bool { return blocks[i] < blocks[j] })
+	return blocks, releases, nil
 }
 
 func scanArtifacts(directory, release string) ([]Artifact, error) {
@@ -185,13 +232,6 @@ func hashRegularFile(path string) (int64, string, error) {
 func nonNilStrings(values []string) []string {
 	if values == nil {
 		return []string{}
-	}
-	return values
-}
-
-func nonNilInt64s(values []int64) []int64 {
-	if values == nil {
-		return []int64{}
 	}
 	return values
 }

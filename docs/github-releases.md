@@ -6,8 +6,9 @@ never supplies a download URL, installer script, or unsigned `latest` pointer.
 
 This is the release-trust slice of
 [`client-lifecycle-compatibility-recovery-rfc.md`](client-lifecycle-compatibility-recovery-rfc.md).
-The workflow produces a draft unsigned candidate; an operator publishes it
-only after the offline signatures and release evidence are attached. Enrollment
+The workflow produces a draft unsigned candidate; when a live catalog exists,
+the replacement candidate retains every prior release still eligible for
+rollback. An operator publishes it only after the offline signatures and release evidence are attached. Enrollment
 and host-local update recovery remain separate from release publication.
 
 ## Fixed origin
@@ -136,7 +137,9 @@ Only the offline-signature publisher can make those stable assets visible.
 
    The publisher rejects a catalog outside its signed lifetime and requires a
    candidate sequence strictly above the verified live catalog before changing
-   either release. It makes the immutable versioned prerelease available first.
+   either release. It also rejects a replacement that drops an eligible live
+   release, lowers the safety floor, or removes a critical block. It makes the
+   immutable versioned prerelease available first.
    Initial live-catalog publication stays draft until both signed assets are
    uploaded. On replacement, the publisher first downloads and verifies the
    existing pair, retains it until the new pair is remotely re-downloaded and
@@ -172,6 +175,14 @@ go run ./cmd/punaro-release assemble \
   --image ghcr.io/rock3r/punaro@sha256:IMAGE_DIGEST
 go run ./cmd/punaro-release validate --dir ./dist
 ```
+
+For every release after the first, pass the verified live catalog with
+`--previous-catalog ./punaro-catalog.json`. The assembler retains its eligible
+rollback entries and safety floor; releases leave the replacement only through
+an explicit higher `--minimum-safe-sequence` or critical block. The GitHub
+workflow downloads the live catalog and supplies this argument automatically,
+while the offline publisher verifies the signed replacement against the
+independently verified live pair before mutation.
 
 `assemble` hashes the exact generated `compose.operator.yaml` template installed
 by `punaro init` and staged by `punaro update`, plus the embedded migration

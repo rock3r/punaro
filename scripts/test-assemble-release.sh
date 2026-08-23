@@ -53,6 +53,10 @@ if grep -Fq 'gh release upload catalog dist/punaro-catalog.json' "$repo_dir/.git
 	printf '%s\n' 'unsigned workflow still mutates the live catalog' >&2
 	exit 1
 fi
+if ! grep -Fq -- '--previous-catalog' "$repo_dir/.github/workflows/release.yml"; then
+	printf '%s\n' 'release workflow does not retain eligible live catalog releases' >&2
+	exit 1
+fi
 if grep -Eq 'inputs\.draft|DRAFT:' "$repo_dir/.github/workflows/release.yml" ||
 	! grep -Fq 'gh release create "$RELEASE" --target "$GITHUB_SHA" --draft' "$repo_dir/.github/workflows/release.yml"; then
 	printf '%s\n' 'unsigned workflow can publish a non-draft candidate' >&2

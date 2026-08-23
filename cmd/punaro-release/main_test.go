@@ -5,6 +5,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"strings"
 	"testing"
 	"time"
 
@@ -134,6 +135,21 @@ func TestPublicationCatalogMustBeFreshAndAdvance(t *testing.T) {
 		if err := validatePublicationCatalog(downgrade, &previous, now); err == nil {
 			t.Fatalf("catalog sequence %d accepted after %d", sequence, previous.Sequence)
 		}
+	}
+}
+
+func TestPublicationCatalogMustRetainEligibleLiveReleases(t *testing.T) {
+	now := time.Date(2026, 8, 23, 16, 0, 0, 0, time.UTC)
+	priorEntry := punarorelease.CatalogRelease{Release: "v0.1.0-alpha.1", Sequence: 1, ManifestPath: "v0.1.0-alpha.1/punaro-release.json", ManifestLength: 100, ManifestSHA256: strings.Repeat("a", 64)}
+	currentEntry := punarorelease.CatalogRelease{Release: "v0.1.0-alpha.2", Sequence: 2, ManifestPath: "v0.1.0-alpha.2/punaro-release.json", ManifestLength: 100, ManifestSHA256: strings.Repeat("b", 64)}
+	previous := punarorelease.Catalog{Sequence: 1, MinimumSafeSequence: 1, Releases: []punarorelease.CatalogRelease{priorEntry}}
+	candidate := punarorelease.Catalog{Sequence: 2, PublishedAt: now.Add(-time.Hour).Format(time.RFC3339), ExpiresAt: now.Add(time.Hour).Format(time.RFC3339), MinimumSafeSequence: 1, Releases: []punarorelease.CatalogRelease{currentEntry}}
+	if err := validatePublicationCatalog(candidate, &previous, now); err == nil {
+		t.Fatal("replacement catalog dropped an eligible rollback release")
+	}
+	candidate.CriticalBlocks = []int64{1}
+	if err := validatePublicationCatalog(candidate, &previous, now); err != nil {
+		t.Fatalf("explicitly blocked prior release was required: %v", err)
 	}
 }
 

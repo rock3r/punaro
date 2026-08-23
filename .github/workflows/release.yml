@@ -174,14 +174,24 @@ jobs:
           RELEASE: ${{ steps.identity.outputs.release }}
           SEQUENCE: ${{ steps.identity.outputs.sequence }}
           CATALOG_SEQUENCE: ${{ steps.identity.outputs.catalog_sequence }}
+          GH_TOKEN: ${{ github.token }}
         run: |
           set -eu
+          previous_args=()
+          if catalog_state=$(gh release view catalog --json isDraft 2>/dev/null) &&
+             [ "$(printf '%s\n' "$catalog_state" | jq -er .isDraft)" = false ]; then
+            previous_dir="$RUNNER_TEMP/previous-catalog"
+            mkdir "$previous_dir"
+            gh release download catalog --pattern punaro-catalog.json --dir "$previous_dir"
+            previous_args=(--previous-catalog "$previous_dir/punaro-catalog.json")
+          fi
           go run ./cmd/punaro-release assemble \
             --dir dist \
             --release "$RELEASE" \
             --sequence "$SEQUENCE" \
             --catalog-sequence "$CATALOG_SEQUENCE" \
-            --image "${{ needs.image.outputs.image }}"
+            --image "${{ needs.image.outputs.image }}" \
+            "${previous_args[@]}"
           go run ./cmd/punaro-release validate --dir dist
           if grep -Eq 'https?://' dist/punaro-release.json dist/punaro-catalog.json; then
             printf '%s\n' 'assembled documents contain a URL' >&2

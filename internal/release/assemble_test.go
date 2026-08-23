@@ -69,6 +69,43 @@ func TestAssembleWritesCatalogAndManifestForScannedArtifacts(t *testing.T) {
 	}
 }
 
+func TestAssembleRetainsEligiblePriorReleasesForRollback(t *testing.T) {
+	firstDir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(firstDir, "punaro-adapter-linux-amd64"), []byte("first"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	first, err := Assemble(AssembleRequest{
+		Directory: firstDir, Release: "v0.1.0-alpha.1", Sequence: 1, CatalogSequence: 1,
+		PublishedAt: time.Date(2026, 8, 16, 12, 0, 0, 0, time.UTC), ExpiresAt: time.Date(2026, 8, 23, 12, 0, 0, 0, time.UTC),
+		MinimumSafeSequence: 1, ComposeSHA256: testComposeDigest, MigrationManifestSHA256: testMigrateDigest,
+		Database: SchemaRange{Min: 10, Max: 44, Target: 44, RollbackFloor: 10}, PostgreSQLMajor: 18,
+		GatewayProtocol: ProtocolRange{Min: 1, Max: 1}, ClientProtocol: ProtocolRange{Min: 1, Max: 1},
+		MinimumRecoveryProtocol: 1, MinimumBootstrapRelease: "v0.1.0-alpha.1",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	secondDir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(secondDir, "punaro-adapter-linux-amd64"), []byte("second"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	second, err := Assemble(AssembleRequest{
+		Directory: secondDir, Release: "v0.1.0-alpha.2", Sequence: 2, CatalogSequence: 2, PreviousCatalog: &first.Catalog,
+		PublishedAt: time.Date(2026, 8, 17, 12, 0, 0, 0, time.UTC), ExpiresAt: time.Date(2026, 8, 24, 12, 0, 0, 0, time.UTC),
+		ComposeSHA256: testComposeDigest, MigrationManifestSHA256: testMigrateDigest,
+		Database: SchemaRange{Min: 10, Max: 44, Target: 44, RollbackFloor: 10}, PostgreSQLMajor: 18,
+		GatewayProtocol: ProtocolRange{Min: 1, Max: 1}, ClientProtocol: ProtocolRange{Min: 1, Max: 1},
+		MinimumRecoveryProtocol: 1, MinimumBootstrapRelease: "v0.1.0-alpha.1",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	prior := first.Catalog.Releases[0]
+	if len(second.Catalog.Releases) != 2 || second.Catalog.MinimumSafeSequence != 1 || !second.Catalog.Allows(prior.Release, prior.Sequence, prior.ManifestSHA256) {
+		t.Fatalf("replacement catalog lost rollback release: %#v", second.Catalog)
+	}
+}
+
 func TestAssembleRejectsUnexpectedFilenamesAndAbsoluteArtifactPaths(t *testing.T) {
 	dir := t.TempDir()
 	if err := os.WriteFile(filepath.Join(dir, "latest"), []byte("nope"), 0o600); err != nil {
