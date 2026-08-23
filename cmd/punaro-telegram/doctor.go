@@ -70,6 +70,7 @@ func (output *boundedTelegramOutput) Write(value []byte) (int, error) {
 }
 
 var (
+	telegramDoctorConfigLoad = loadConfig
 	telegramDoctorNow        = time.Now
 	telegramDoctorRelayProbe = func(ctx context.Context, cfg config) (adapter.DoctorProbeResult, error) {
 		client, err := adapter.NewHTTPRelayClientWithPolicy(cfg.relayURL, cfg.machineID, cfg.privateKey, nil, cfg.accessToken, cfg.transportPolicy)
@@ -104,7 +105,7 @@ func runTelegramDoctor(args []string, stdout, stderr io.Writer) int {
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), *timeout)
 	defer cancel()
-	cfg, err := loadConfig()
+	cfg, err := loadTelegramDoctorConfig(ctx)
 	if err != nil {
 		report, reportErr := punarodiagnostic.New(punarodiagnostic.ComponentTelegram, punarodiagnostic.Identity{Platform: runtime.GOOS + "-" + runtime.GOARCH}, telegramUnavailableChecks())
 		return writeTelegramDoctorReport(stdout, stderr, report, reportErr)
@@ -176,6 +177,24 @@ func runTelegramDoctor(args []string, stdout, stderr io.Writer) int {
 	identity := punarodiagnostic.Identity{MachineID: cfg.machineID, Release: telegramBuildRelease, ReleaseSequence: releaseSequence, CatalogSequence: catalogSequence, Protocol: relay.ProtocolVersion, Platform: runtime.GOOS + "-" + runtime.GOARCH}
 	report, reportErr := punarodiagnostic.New(punarodiagnostic.ComponentTelegram, identity, checks)
 	return writeTelegramDoctorReport(stdout, stderr, report, reportErr)
+}
+
+func loadTelegramDoctorConfig(ctx context.Context) (config, error) {
+	type result struct {
+		config config
+		err    error
+	}
+	loaded := make(chan result, 1)
+	go func() {
+		cfg, err := telegramDoctorConfigLoad()
+		loaded <- result{config: cfg, err: err}
+	}()
+	select {
+	case value := <-loaded:
+		return value.config, value.err
+	case <-ctx.Done():
+		return config{}, fmt.Errorf("telegram configuration diagnostic deadline exceeded: %w", ctx.Err())
+	}
 }
 
 func telegramUnavailableChecks() []punarodiagnostic.Check {

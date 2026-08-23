@@ -77,6 +77,7 @@ func (output *boundedDoctorOutput) Write(value []byte) (int, error) {
 var adapterBuildRelease string
 
 var (
+	adapterDoctorConfigLoad = loadConfig
 	adapterDoctorRelayProbe = func(ctx context.Context, config adapterConfig) (adapter.DoctorProbeResult, error) {
 		client, err := adapter.NewHTTPRelayClientWithPolicy(config.relayURL, config.machineID, config.privateKey, nil, config.accessToken, config.transportPolicy)
 		if err != nil {
@@ -114,7 +115,7 @@ func runAdapterDoctor(args []string, stdout, stderr io.Writer) int {
 	ctx, cancel := context.WithTimeout(context.Background(), *timeout)
 	defer cancel()
 
-	config, err := loadConfig()
+	config, err := loadAdapterDoctorConfig(ctx)
 	if err != nil {
 		checks := []punarodiagnostic.Check{
 			punarodiagnostic.Fail("adapter_configuration", "repair_adapter_configuration"),
@@ -242,6 +243,24 @@ func runAdapterDoctor(args []string, stdout, stderr io.Writer) int {
 	}
 	report, reportErr := punarodiagnostic.New(punarodiagnostic.ComponentAdapter, identity, checks)
 	return writeAdapterDoctorReport(stdout, stderr, report, reportErr)
+}
+
+func loadAdapterDoctorConfig(ctx context.Context) (adapterConfig, error) {
+	type result struct {
+		config adapterConfig
+		err    error
+	}
+	loaded := make(chan result, 1)
+	go func() {
+		config, err := adapterDoctorConfigLoad()
+		loaded <- result{config: config, err: err}
+	}()
+	select {
+	case value := <-loaded:
+		return value.config, value.err
+	case <-ctx.Done():
+		return adapterConfig{}, fmt.Errorf("adapter configuration diagnostic deadline exceeded: %w", ctx.Err())
+	}
 }
 
 func retiredBindingDoctorCheck(count int, code, remediation string) punarodiagnostic.Check {

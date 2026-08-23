@@ -339,6 +339,28 @@ func TestTelegramDoctorProducesStrictHealthyContentFreeReport(t *testing.T) {
 	}
 }
 
+func TestTelegramDoctorConfigurationLoadHonorsDeadline(t *testing.T) {
+	original := telegramDoctorConfigLoad
+	t.Cleanup(func() { telegramDoctorConfigLoad = original })
+	started := make(chan struct{})
+	blocked := make(chan struct{})
+	t.Cleanup(func() { close(blocked) })
+	telegramDoctorConfigLoad = func() (config, error) {
+		close(started)
+		<-blocked
+		return config{}, nil
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go func() {
+		<-started
+		cancel()
+	}()
+	if _, err := loadTelegramDoctorConfig(ctx); !errors.Is(err, context.Canceled) {
+		t.Fatalf("configuration load error=%v", err)
+	}
+}
+
 func TestTelegramDoctorSeparatesRelayBotAndDurableFailureClasses(t *testing.T) {
 	directory := configureTelegramDoctorTest(t)
 	now := time.Date(2026, 8, 23, 12, 0, 0, 0, time.UTC)

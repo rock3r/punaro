@@ -344,6 +344,27 @@ func TestAdapterDoctorEmitsStrictHealthyReport(t *testing.T) {
 	}
 }
 
+func TestAdapterDoctorConfigurationLoadHonorsDeadline(t *testing.T) {
+	preserveAdapterDoctorDependencies(t)
+	started := make(chan struct{})
+	blocked := make(chan struct{})
+	t.Cleanup(func() { close(blocked) })
+	adapterDoctorConfigLoad = func() (adapterConfig, error) {
+		close(started)
+		<-blocked
+		return adapterConfig{}, nil
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go func() {
+		<-started
+		cancel()
+	}()
+	if _, err := loadAdapterDoctorConfig(ctx); !errors.Is(err, context.Canceled) {
+		t.Fatalf("configuration load error=%v", err)
+	}
+}
+
 func TestAdapterDoctorReportsIndependentRelayFailures(t *testing.T) {
 	clearAdapterEnvironment(t)
 	preserveAdapterDoctorDependencies(t)
@@ -586,11 +607,13 @@ func checkStatus(report punarodiagnostic.Report, code string) punarodiagnostic.S
 
 func preserveAdapterDoctorDependencies(t *testing.T) {
 	t.Helper()
+	configLoad := adapterDoctorConfigLoad
 	relayProbe, notificationProbe := adapterDoctorRelayProbe, adapterDoctorNotificationProbe
 	mailboxProbe, serviceProbe := adapterDoctorMailboxProbe, adapterDoctorServiceProbe
 	bootstrapReleaseProbe, bootstrapProbe, pluginProbe := adapterDoctorBootstrapReleaseProbe, adapterDoctorBootstrapProbe, adapterDoctorPluginProbe
 	buildRelease := adapterBuildRelease
 	t.Cleanup(func() {
+		adapterDoctorConfigLoad = configLoad
 		adapterDoctorRelayProbe, adapterDoctorNotificationProbe = relayProbe, notificationProbe
 		adapterDoctorMailboxProbe, adapterDoctorServiceProbe = mailboxProbe, serviceProbe
 		adapterDoctorBootstrapReleaseProbe, adapterDoctorBootstrapProbe, adapterDoctorPluginProbe = bootstrapReleaseProbe, bootstrapProbe, pluginProbe
