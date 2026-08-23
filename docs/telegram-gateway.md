@@ -289,10 +289,12 @@ to multiple topics. There is no main-chat fallback.
 Incoming questions use the Telegram update ID as the durable relay idempotency
 key and are submitted on `telegram-inbound` as `user-telegram`. Network, 5xx,
 and other retryable submission failures leave the update pending; a crash after
-submission is safely deduplicated by the relay. A signed relay 403 or 404 is a
-terminal pre-append rejection, so the gateway records the update as processed,
-emits only a content-free `telegram_update_dropped` event, and continues the
-page. Unauthorized, unsupported or non-text, and unbound-topic updates are also
+submission is safely deduplicated by the relay. A relay 403 or 404 that echoes
+the signed request nonce is a terminal pre-append rejection, so the gateway
+records the update as processed, emits only a content-free
+`telegram_update_dropped` event, and continues the page. An intermediary 403 or
+404 without that relay proof stays pending for retry. Unauthorized, unsupported
+or non-text, and unbound-topic updates are also
 durably skipped, including message-less update IDs returned by Telegram, so
 none can stall the polling offset after a restart. They are never routed by
 inference. Replies resolve `reply_to_message` through a local 10,000-row
@@ -302,12 +304,12 @@ delivers the text without `in_reply_to_*`.
 Outgoing agent replies are sent using Telegram's `sendRichMessage` to that
 exact `message_thread_id` from `topic_routes`. `SendDelivery` stays route-based
 through adopt soak. A malformed delivery, missing route, route for another
-chat, or completed Telegram 4xx response other than 429 is terminal: the
+chat, or completed Telegram 4xx response other than 401 and 429 is terminal: the
 bridge emits only a content-free `telegram_send_dropped` event, acknowledges
 that poison delivery, and continues later deliveries. A deleted Telegram
 thread therefore fails closed and is dropped; repair the explicit route rather
-than recreating a thread automatically. Telegram 429, 5xx, and network failures
-leave the delivery unacknowledged for retry. The returned `message_id` is
+than recreating a thread automatically. Telegram 401, 429, 5xx, and network
+failures leave the delivery unacknowledged for retry. The returned `message_id` is
 stored in the outbound map. The bridge renders opaque agent content as escaped
 HTML, disables automatic entity detection, and asks Telegram to protect
 content. Telegram has no send-idempotency key, therefore this external boundary

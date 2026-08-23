@@ -19,8 +19,8 @@ const maxBotResponseBytes = 1 << 20
 const maxRichMessageBytes = 32 << 10
 
 // BotAPIStatusError is a completed Telegram HTTP response. Client errors other
-// than rate limiting are terminal because retrying the same request cannot
-// change the rejected payload or target.
+// than authentication failure and rate limiting are terminal because retrying
+// the same request cannot change the rejected payload or target.
 type BotAPIStatusError struct {
 	Method string
 	Status int

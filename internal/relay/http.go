@@ -25,7 +25,8 @@ const (
 	// handshake probe. It never registers for or emits wake events.
 	DoctorNotificationsPath = "/v1/doctor/notifications"
 	// ResponseNonceHeader confirms that a response came from the authenticated
-	// Punaro route rather than an intermediary which rejected the request.
+	// Punaro route rather than an Access or reverse-proxy intermediary which
+	// rejected the request without echoing the signed per-request nonce.
 	ResponseNonceHeader = "X-Punaro-Response-Nonce"
 	// ProtocolHeader carries the bounded relay protocol identity.
 	ProtocolHeader = "X-Punaro-Protocol"
@@ -97,6 +98,9 @@ type handler struct {
 }
 
 func (h *handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	if nonce := r.Header.Get("X-Punaro-Nonce"); nonce != "" {
+		w.Header().Set(ResponseNonceHeader, nonce)
+	}
 	h.serveHTTP(w, r)
 }
 

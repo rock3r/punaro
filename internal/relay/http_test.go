@@ -46,7 +46,10 @@ func TestHTTPDurableMessageFlowRequiresSignedMachineRequests(t *testing.T) {
 	t.Cleanup(targetNotifications.Close)
 	handler := NewHandler(store, auth, HandlerOptions{Now: func() time.Time { return clock }, EndpointLeaseTTL: time.Minute, DeliveryLeaseTTL: time.Minute, Notifier: notifier})
 
-	serveSigned(t, handler, privateA, "machine-a", http.MethodPut, "/v1/machines/me/endpoints", `{"endpoints":["agent/a/session"]}`, "advertise-a", "")
+	advertiseA := serveSigned(t, handler, privateA, "machine-a", http.MethodPut, "/v1/machines/me/endpoints", `{"endpoints":["agent/a/session"]}`, "advertise-a", "")
+	if advertiseA.Header().Get(ResponseNonceHeader) != "advertise-a" {
+		t.Fatalf("relay response nonce=%q", advertiseA.Header().Get(ResponseNonceHeader))
+	}
 	serveSigned(t, handler, privateB, "machine-b", http.MethodPut, "/v1/machines/me/endpoints", `{"endpoints":["agent/b/session"]}`, "advertise-b", "")
 	create := serveSigned(t, handler, privateA, "machine-a", http.MethodPost, "/v1/conversations", `{"creator_endpoint":"agent/a/session","members":[{"endpoint":"agent/a/session","capabilities":["send","receive","admin"]},{"endpoint":"agent/b/session","capabilities":["receive"]}]}`, "create", "create-1")
 	if create.Code != http.StatusCreated {
