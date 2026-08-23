@@ -167,6 +167,8 @@ func TestReleaseAtLeastUsesSemverPrereleaseOrdering(t *testing.T) {
 		want    bool
 	}{
 		"same alpha":                {"v0.1.0-alpha.1", "v0.1.0-alpha.1", true},
+		"same schema identity":      {"v1x.2y.3z", "v1x.2y.3z", true},
+		"same invalid identity":     {"latest", "latest", false},
 		"next alpha":                {"v0.1.0-alpha.2", "v0.1.0-alpha.1", true},
 		"numeric identifiers":       {"v0.1.0-alpha.10", "v0.1.0-alpha.2", true},
 		"numeric before text":       {"v0.1.0-1", "v0.1.0-alpha", false},

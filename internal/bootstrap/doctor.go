@@ -426,6 +426,9 @@ func catalogSequenceBlocked(catalog punarorelease.Catalog, sequence int64) bool 
 }
 
 func releaseAtLeast(current, minimum string) bool {
+	if current == minimum && punarorelease.ValidProductReleaseName(current) {
+		return true
+	}
 	currentVersion, currentPre, ok := parseDoctorRelease(current)
 	if !ok {
 		return false
