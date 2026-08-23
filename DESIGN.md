@@ -1759,6 +1759,40 @@ This generated-stack contract covers the single configured `punarod` writer and
 externally provisioned PostgreSQL; the production PostgreSQL/profile bundle is
 still M-23.
 
+## Canopi lifecycle dashboard boundary
+
+Canopi is Punaro's independently deployable coding-agent status surface. Its
+versioned protocol is intentionally outside the Punaro relay/mail contract:
+provider adapters normalize lifecycle signals into strict events without
+knowing whether direct HTTP, a local spool, or a future Punaro bridge transports
+them. Punaro message content is never interpreted as Canopi control data.
+
+The MVP collector uses a separate bearer-authenticated HTTP listener, a bounded
+durable state snapshot, and at-least-once event IDs. Duplicate IDs are harmless.
+For one card, `activity_at` and then `event_id` fence delayed/out-of-order
+updates. Non-terminal TTL expiry archives/hides abandoned work and never
+converts it to success; done retention is independent. Snapshot and image ETags
+change only with state revision or the configured relative-time bucket.
+
+Prompts, transcripts, assistant messages, tool inputs, and tool outputs are not
+part of the protocol and are rejected from metadata. A provider adapter may use
+final text locally for deterministic waiting/done classification but does not
+forward it. Claude retry IDs use a secret-keyed HMAC, never an unkeyed content
+digest. Adapter delivery is detached, bounded, and incapable of blocking or
+controlling the coding agent.
+
+The renderer always sorts the complete state set waiting, done, working, then
+recent-first inside each state, before applying configurable capacity. The last
+slot becomes an omitted-tail per-state count when overflowing. Its output is an
+exact 800x480 two-color PNG; the panel performs a full e-paper refresh only
+after a changed ETag, bounded PNG download, successful decode, and exact
+dimension validation.
+
+Canopi's first listener is loopback by default. A concrete private/link-local
+listener requires explicit LAN opt-in; wildcard and public binds fail closed.
+This shared-token LAN MVP is not yet Punaro device-authenticated and must not be
+mounted on the public Punaro origin.
+
 ## Required adversarial acceptance tests
 
 The implementation is not internet-exposure-ready until these cases pass:

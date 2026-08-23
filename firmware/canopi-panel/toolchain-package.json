@@ -1,0 +1,9 @@
+{
+  "name": "toolchain-riscv32-esp",
+  "version": "8.4.0+2021r2-patch5",
+  "description": "Espressif GCC toolchain for 32-bit RISC-V MCUs",
+  "license": "GPL-2.0-or-later",
+  "system": [
+    "darwin_arm64"
+  ]
+}

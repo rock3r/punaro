@@ -1,0 +1,98 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/rock3r/punaro/raw/main/canopi/protocol/agent-event.schema.json",
+  "title": "Canopi Coding Agent Lifecycle Event",
+  "description": "Normalized, transport-neutral coding-agent lifecycle event.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "spec_version",
+    "event_id",
+    "source",
+    "machine",
+    "session_id",
+    "agent_instance_id",
+    "state",
+    "activity_at",
+    "emitted_at",
+    "task"
+  ],
+  "properties": {
+    "spec_version": { "const": 1 },
+    "event_id": { "type": "string", "minLength": 1, "maxLength": 200 },
+    "source": {
+      "type": "string",
+      "enum": ["pi", "claude_code", "codex", "grok_build", "other"]
+    },
+    "machine": { "$ref": "#/$defs/machine" },
+    "session_id": { "type": "string", "minLength": 1, "maxLength": 300 },
+    "agent_instance_id": { "type": "string", "minLength": 1, "maxLength": 300 },
+    "parent_agent_instance_id": {
+      "type": ["string", "null"],
+      "minLength": 1,
+      "maxLength": 300,
+      "default": null
+    },
+    "state": {
+      "type": "string",
+      "enum": ["working", "waiting_for_user", "done"]
+    },
+    "waiting_reason": {
+      "type": ["string", "null"],
+      "enum": ["permission", "question", "elicitation", "approval", "other", null],
+      "default": null
+    },
+    "activity_at": { "type": "string", "format": "date-time" },
+    "emitted_at": { "type": "string", "format": "date-time" },
+    "task": { "$ref": "#/$defs/task" },
+    "metadata": {
+      "type": "object",
+      "description": "Provider-specific primitive metadata. Prompt, transcript, message, tool input and tool output fields are forbidden.",
+      "propertyNames": {
+        "not": {
+          "enum": [
+            "content",
+            "last_assistant_message",
+            "message",
+            "prompt",
+            "tool_input",
+            "tool_output",
+            "tool_response",
+            "transcript",
+            "transcript_path"
+          ]
+        }
+      },
+      "additionalProperties": {
+        "type": ["string", "number", "integer", "boolean", "null"]
+      },
+      "default": {}
+    }
+  },
+  "$defs": {
+    "machine": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "label"],
+      "properties": {
+        "id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 100,
+          "pattern": "^[A-Za-z0-9._-]+$"
+        },
+        "label": { "type": "string", "minLength": 1, "maxLength": 40 }
+      }
+    },
+    "task": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["title"],
+      "properties": {
+        "title": { "type": "string", "minLength": 1, "maxLength": 80 },
+        "repository": { "type": ["string", "null"], "maxLength": 300, "default": null },
+        "working_directory": { "type": ["string", "null"], "maxLength": 1000, "default": null }
+      }
+    }
+  }
+}

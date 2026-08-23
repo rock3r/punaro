@@ -1,8 +1,11 @@
-.PHONY: test test-race test-postgres remote-mcp-e2e memory-onboarding-e2e complete-product-e2e test-real-relay-e2e plugin-validate vet staticcheck golangci windows-build vuln gosec secrets lint security ci fmt dockerfile-lint workflow-lint deployment-lint release-gates fuzz operator-binary trusted-attachment-client memory-client release-artifacts
+.PHONY: test test-race test-postgres remote-mcp-e2e memory-onboarding-e2e complete-product-e2e test-real-relay-e2e plugin-validate vet staticcheck golangci windows-build vuln gosec secrets lint security ci fmt dockerfile-lint workflow-lint deployment-lint release-gates fuzz operator-binary trusted-attachment-client memory-client canopi-binaries release-artifacts
 
 PUNARO_OPERATOR_OUTPUT ?= ./bin/punaro
 PUNARO_TRUSTED_ATTACHMENT_OUTPUT ?= ./bin/punaro-trusted-attachment
 PUNARO_MEMORY_OUTPUT ?= ./bin/punaro-memory
+CANOPI_OUTPUT ?= ./bin/canopi
+CANOPI_CLAUDE_HOOK_OUTPUT ?= ./bin/canopi-claude-hook
+CANOPI_SIM_OUTPUT ?= ./bin/canopi-sim
 
 operator-binary:
 	mkdir -p "$$(dirname "$(PUNARO_OPERATOR_OUTPUT)")"
@@ -15,6 +18,12 @@ trusted-attachment-client:
 memory-client:
 	mkdir -p "$$(dirname "$(PUNARO_MEMORY_OUTPUT)")"
 	go build -trimpath -o "$(PUNARO_MEMORY_OUTPUT)" ./cmd/punaro-memory
+
+canopi-binaries:
+	mkdir -p "$$(dirname "$(CANOPI_OUTPUT)")"
+	go build -trimpath -o "$(CANOPI_OUTPUT)" ./cmd/canopi
+	go build -trimpath -o "$(CANOPI_CLAUDE_HOOK_OUTPUT)" ./cmd/canopi-claude-hook
+	go build -trimpath -o "$(CANOPI_SIM_OUTPUT)" ./cmd/canopi-sim
 
 release-artifacts:
 	./scripts/build-release-artifacts.sh --output-dir ./dist --release "$(RELEASE)" --sequence "$(SEQUENCE)" --catalog-sequence "$(CATALOG_SEQUENCE)" --image "$(IMAGE)"
