@@ -6,8 +6,9 @@ import (
 )
 
 const (
-	maxCatalogReleases = 32
-	maxCatalogLifetime = 30 * 24 * time.Hour
+	maxCatalogReleases       = 32
+	maxCatalogCriticalBlocks = 32
+	maxCatalogLifetime       = 30 * 24 * time.Hour
 )
 
 // Catalog is the short-lived signed list of currently allowed releases.
@@ -60,6 +61,7 @@ func (catalog Catalog) validate() error {
 	seenSequence := map[int64]struct{}{}
 	lowest := catalog.Releases[0].Sequence
 	foundCurrent := false
+	currentSequence := int64(0)
 	for _, entry := range catalog.Releases {
 		if err := entry.validate(); err != nil {
 			return err
@@ -77,14 +79,18 @@ func (catalog Catalog) validate() error {
 		}
 		if entry.Release == catalog.CurrentRelease {
 			foundCurrent = true
+			currentSequence = entry.Sequence
 		}
 	}
 	if !foundCurrent || catalog.MinimumSafeSequence > lowest {
 		return errors.New("invalid catalog coverage")
 	}
+	if len(catalog.CriticalBlocks) > maxCatalogCriticalBlocks {
+		return errors.New("invalid critical blocks")
+	}
 	seenBlock := map[int64]struct{}{}
 	for _, sequence := range catalog.CriticalBlocks {
-		if sequence < 1 {
+		if sequence < 1 || sequence == currentSequence {
 			return errors.New("invalid critical block")
 		}
 		if _, exists := seenBlock[sequence]; exists {

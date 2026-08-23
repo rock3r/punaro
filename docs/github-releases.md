@@ -99,7 +99,9 @@ Only the offline-signature publisher can make those stable assets visible.
    unsafe sequences. The workflow validates both before assembly. Use the
    safety floor only when every older rollback is intentionally retired; use a
    critical block to revoke one release while keeping older safe rollback
-   entries. Set `supported_from` to the comma-separated installed releases that
+   entries. A critical block must name an older sequence, never the current
+   release being published; blocks below a raised safety floor are retired.
+   Set `supported_from` to the comma-separated installed releases that
    may upgrade directly to this release; this is required for rolling fleet
    transitions after the first release.
 3. Wait for the draft release to appear. The live `catalog` prerelease is not

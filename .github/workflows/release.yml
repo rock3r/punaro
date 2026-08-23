@@ -203,8 +203,8 @@ jobs:
               case "$block" in
                 ''|*[!0-9]*) printf '%s\n' 'critical blocks must be comma-separated positive integers' >&2; exit 2 ;;
               esac
-              if [ "$block" -lt 1 ] || [ "$block" -gt "$sequence" ]; then
-                printf '%s\n' 'critical block exceeds the release sequence' >&2
+              if [ "$block" -lt 1 ] || [ "$block" -ge "$sequence" ]; then
+                printf '%s\n' 'critical block must be lower than the release sequence' >&2
                 exit 2
               fi
             done

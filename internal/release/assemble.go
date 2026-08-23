@@ -133,10 +133,13 @@ func replacementCatalogEntries(previous *Catalog, release string, sequence, cata
 	blocks := make([]int64, 0, len(requestedBlocks)+maxCatalogReleases)
 	blocked := map[int64]bool{}
 	for _, value := range requestedBlocks {
-		if value < 1 || blocked[value] {
+		if value < 1 || value == sequence || blocked[value] {
 			return nil, nil, errors.New("invalid critical blocks")
 		}
 		blocked[value] = true
+		if value < minimumSafe {
+			continue
+		}
 		blocks = append(blocks, value)
 	}
 	if previous != nil {
@@ -144,11 +147,20 @@ func replacementCatalogEntries(previous *Catalog, release string, sequence, cata
 			return nil, nil, errors.New("invalid previous catalog")
 		}
 		for _, value := range previous.CriticalBlocks {
+			if value == sequence {
+				return nil, nil, errors.New("current release is critically blocked")
+			}
+			if value < minimumSafe {
+				continue
+			}
 			if !blocked[value] {
 				blocked[value] = true
 				blocks = append(blocks, value)
 			}
 		}
+	}
+	if len(blocks) > maxCatalogCriticalBlocks {
+		return nil, nil, errors.New("too many critical blocks")
 	}
 	releases := make([]CatalogRelease, 0, maxCatalogReleases)
 	if previous != nil {

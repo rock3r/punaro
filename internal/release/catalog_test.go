@@ -1,6 +1,7 @@
 package release
 
 import (
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -93,13 +94,28 @@ func TestParseCatalogRejectsMalformedAndNonCanonicalDocuments(t *testing.T) {
 	}
 }
 
-func TestCatalogAllowsRejectsCriticallyBlockedRelease(t *testing.T) {
+func TestParseCatalogRejectsCriticallyBlockedCurrentRelease(t *testing.T) {
 	body := strings.Replace(validCatalogJSON(), `"critical_blocks": []`, `"critical_blocks": [1]`, 1)
-	catalog, err := ParseCatalog([]byte(body))
+	if _, err := ParseCatalog([]byte(body)); err == nil {
+		t.Fatal("catalog accepted a critically blocked current release")
+	}
+	catalog, err := ParseCatalog([]byte(validCatalogJSON()))
 	if err != nil {
 		t.Fatal(err)
 	}
+	catalog.CriticalBlocks = []int64{1}
 	if catalog.Allows("v0.1.0", 1, testManifestDigest) {
 		t.Fatal("critically blocked release remained allowed")
+	}
+}
+
+func TestParseCatalogRejectsTooManyCriticalBlocks(t *testing.T) {
+	blocks := make([]string, maxCatalogCriticalBlocks+1)
+	for index := range blocks {
+		blocks[index] = strconv.Itoa(index + 2)
+	}
+	body := strings.Replace(validCatalogJSON(), `"critical_blocks": []`, `"critical_blocks": [`+strings.Join(blocks, ",")+`]`, 1)
+	if _, err := ParseCatalog([]byte(body)); err == nil {
+		t.Fatal("catalog accepted too many critical blocks")
 	}
 }
