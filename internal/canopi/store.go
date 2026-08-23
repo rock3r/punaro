@@ -2,6 +2,7 @@
 package canopi
 
 import (
+	"bytes"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
@@ -137,8 +138,8 @@ func NewStore(config Config) *Store {
 
 // OpenStore opens or creates an atomically persisted state store.
 func OpenStore(path string, config Config) (*Store, error) {
-	if path == "" {
-		return nil, errors.New("state path is required")
+	if !filepath.IsAbs(path) || filepath.Clean(path) != path {
+		return nil, errors.New("state path must be absolute and clean")
 	}
 	normalized, err := config.normalized()
 	if err != nil {
@@ -146,7 +147,10 @@ func OpenStore(path string, config Config) (*Store, error) {
 	}
 	store := NewStore(normalized)
 	store.persist = func(state persistedStore) error { return persistStore(path, state) }
-	file, err := os.Open(path) // #nosec G304 -- the operator explicitly selects this private state file.
+	if err := prepareStateDirectory(filepath.Dir(path)); err != nil {
+		return nil, fmt.Errorf("protect Canopi state directory: %w", err)
+	}
+	file, err := openPrivateStateFile(path)
 	if errors.Is(err, os.ErrNotExist) {
 		return store, nil
 	}
@@ -170,8 +174,15 @@ func OpenStore(path string, config Config) (*Store, error) {
 		return nil, errors.New("persisted Canopi state exceeds limit")
 	}
 	var persisted persistedStore
-	if err := json.Unmarshal(payload, &persisted); err != nil {
+	decoder := json.NewDecoder(bytes.NewReader(payload))
+	decoder.DisallowUnknownFields()
+	decoder.UseNumber()
+	if err := decoder.Decode(&persisted); err != nil {
 		return nil, fmt.Errorf("decode Canopi state: %w", err)
+	}
+	var trailing any
+	if err := decoder.Decode(&trailing); !errors.Is(err, io.EOF) {
+		return nil, errors.New("persisted Canopi state must contain exactly one JSON object")
 	}
 	if len(persisted.SeenOrder) > maxRememberedEventIDs {
 		return nil, errors.New("persisted Canopi dedupe set exceeds limit")
@@ -387,8 +398,8 @@ func persistedState(revision uint64, records map[string]protocol.Event, seenOrde
 
 func persistStore(path string, state persistedStore) error {
 	directory := filepath.Dir(path)
-	if err := os.MkdirAll(directory, 0o700); err != nil {
-		return fmt.Errorf("create Canopi state directory: %w", err)
+	if err := prepareStateDirectory(directory); err != nil {
+		return fmt.Errorf("protect Canopi state directory: %w", err)
 	}
 	temporaryPrefix := stateTemporaryPrefix(path)
 	if err := removeStateTemporaries(directory, filepath.Base(path), temporaryPrefix); err != nil {
@@ -404,7 +415,7 @@ func persistStore(path string, state persistedStore) error {
 	}
 	temporaryName := temporary.Name()
 	defer func() { _ = os.Remove(temporaryName) }()
-	if err := temporary.Chmod(0o600); err != nil {
+	if err := protectStateFile(temporaryName, temporary); err != nil {
 		_ = temporary.Close()
 		return fmt.Errorf("protect Canopi state file: %w", err)
 	}

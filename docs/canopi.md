@@ -131,7 +131,11 @@ checks a configured maximum state-file representation before allocating or
 decoding it; the calculation includes worst-case JSON escaping. Each serialized
 state update also reclaims crash-left snapshots in a namespace derived from that
 state file before writing a new temporary, without touching another collector's
-state-file namespace in the same directory.
+state-file namespace in the same directory. The state path must be absolute and
+clean. Its parent is current-user-owned and owner-only; an existing state file
+must be a stable, singly linked, current-user-owned `0600` regular file. Windows
+uses protected current-user-only DACLs and no-reparse opens for the equivalent
+directory and file checks.
 
 In another terminal, generate the selected 3 waiting / 4 done / 12 working
 overflow state:

@@ -1,6 +1,7 @@
 package canopi
 
 import (
+	"encoding/json"
 	"errors"
 	"os"
 	"path/filepath"
@@ -138,6 +139,31 @@ func TestPersistentStoreSurvivesRestartAndKeepsDedupe(t *testing.T) {
 	}
 	if result, err := reopened.Apply(input); err != nil || !result.Duplicate {
 		t.Fatalf("Apply() after restart = %+v, %v", result, err)
+	}
+}
+
+func TestPersistentStorePreservesLargeNumericMetadata(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "state.json")
+	now := time.Date(2026, 8, 23, 12, 0, 0, 0, time.UTC)
+	store, err := OpenStore(path, DefaultConfig())
+	if err != nil {
+		t.Fatal(err)
+	}
+	input := event("large-number", "agent", protocol.StateWorking, now)
+	input.Metadata = map[string]any{"simulated": json.Number("9007199254740993")}
+	if _, err := store.Apply(input); err != nil {
+		t.Fatal(err)
+	}
+	reopened, err := OpenStore(path, DefaultConfig())
+	if err != nil {
+		t.Fatal(err)
+	}
+	payload, err := json.Marshal(reopened.Snapshot(now).Agents[0].Metadata)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got, want := string(payload), `{"simulated":9007199254740993}`; got != want {
+		t.Fatalf("reopened metadata = %s, want %s", got, want)
 	}
 }
 

@@ -1786,6 +1786,11 @@ per-event, worst-case JSON-encoding, and durable-dedupe ceilings before
 allocating or decoding its body. Serialized updates reclaim crash-left state
 temporaries in per-target namespaces and bounded directory batches before
 creating a replacement, without racing another state file in the same parent.
+The state path is absolute and clean. Its parent must be current-user-owned and
+is made owner-only; existing Unix state files must be stable, singly linked,
+current-user-owned `0600` regular files opened without following symlinks.
+Windows applies equivalent owner, protected-DACL, and no-reparse checks to the
+directory, existing state, and replacement temporary.
 Snapshot and image ETags change only with state revision or rendered response
 content. Snapshot responses use a weak revision validator because their
 generation timestamp changes without a semantic state change; rendered PNGs
@@ -1795,7 +1800,8 @@ relative-time rendering and its image cache key use the configured bucket.
 Prompts, transcripts, assistant messages, credentials, tool inputs, and tool
 outputs are not part of the protocol. Metadata is default-deny: the schema and
 Go validator expose only `hook`, `simulated`, and `agent_type`, with matching
-per-key types. Only explicit, trusted hook fields drive lifecycle state;
+per-key types. Wire and persisted decoding retain numeric metadata as exact JSON
+numbers instead of converting through `float64`. Only explicit, trusted hook fields drive lifecycle state;
 assistant text is neither inspected for classification nor forwarded. Claude
 invocation IDs use a fixed-length, secret-keyed HMAC over machine identity,
 provider payload, and local invocation time, never an unkeyed content digest.

@@ -77,3 +77,24 @@ func TestDecodeEventIsStrictAndBounded(t *testing.T) {
 		t.Fatal("DecodeEvent() accepted an oversized body")
 	}
 }
+
+func TestDecodeEventPreservesLargeIntegerMetadataExactly(t *testing.T) {
+	event := validEvent()
+	event.Metadata = nil
+	payload, err := json.Marshal(event)
+	if err != nil {
+		t.Fatal(err)
+	}
+	payload = bytes.Replace(payload, []byte(`"task":`), []byte(`"metadata":{"simulated":9007199254740993},"task":`), 1)
+	decoded, err := DecodeEvent(bytes.NewReader(payload), int64(len(payload)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	metadata, err := json.Marshal(decoded.Metadata)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got, want := string(metadata), `{"simulated":9007199254740993}`; got != want {
+		t.Fatalf("decoded metadata = %s, want %s", got, want)
+	}
+}

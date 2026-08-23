@@ -171,9 +171,12 @@ func (e Event) Validate() error {
 }
 
 func isPrimitiveMetadata(value any) bool {
-	switch value.(type) {
+	switch typed := value.(type) {
 	case nil, string, float64, float32, int, int8, int16, int32, int64, uint, uint8, uint16, uint32, uint64, bool:
 		return true
+	case json.Number:
+		_, err := json.Marshal(typed)
+		return err == nil
 	default:
 		return false
 	}
@@ -193,6 +196,7 @@ func DecodeEvent(reader io.Reader, maxBytes int64) (Event, error) {
 	}
 	decoder := json.NewDecoder(bytes.NewReader(payload))
 	decoder.DisallowUnknownFields()
+	decoder.UseNumber()
 	var event Event
 	if err := decoder.Decode(&event); err != nil {
 		return Event{}, fmt.Errorf("decode event: %w", err)
