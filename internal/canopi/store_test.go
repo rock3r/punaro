@@ -167,16 +167,32 @@ func TestMaxStateFileBytesAccountsForWorstCaseJSONEscaping(t *testing.T) {
 
 func TestPersistStoreReclaimsCrashLeftTemporary(t *testing.T) {
 	directory := t.TempDir()
-	orphan := filepath.Join(directory, ".canopi-state-crashed")
+	path := filepath.Join(directory, "state.json")
+	orphan := filepath.Join(directory, stateTemporaryPrefix(path)+"crashed")
 	if err := os.WriteFile(orphan, []byte("partial"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	path := filepath.Join(directory, "state.json")
 	if err := persistStore(path, persistedStore{}); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := os.Lstat(orphan); !errors.Is(err, os.ErrNotExist) {
 		t.Fatalf("crash-left state temporary still exists: %v", err)
+	}
+}
+
+func TestPersistStoreDoesNotReclaimAnotherStateFilesTemporary(t *testing.T) {
+	directory := t.TempDir()
+	firstPath := filepath.Join(directory, "first.json")
+	secondPath := filepath.Join(directory, "second.json")
+	secondTemporary := filepath.Join(directory, stateTemporaryPrefix(secondPath)+"active")
+	if err := os.WriteFile(secondTemporary, []byte("in progress"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := persistStore(firstPath, persistedStore{}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Lstat(secondTemporary); err != nil {
+		t.Fatalf("another state file's active temporary was removed: %v", err)
 	}
 }
 

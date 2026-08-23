@@ -160,7 +160,7 @@ func Deliver(ctx context.Context, client *http.Client, endpoint, token string, e
 	}
 	request.Header.Set("Authorization", "Bearer "+token)
 	request.Header.Set("Content-Type", "application/json")
-	response, err := client.Do(request)
+	response, err := canopitransport.DoWithoutRedirects(client, request)
 	if err != nil {
 		return err
 	}

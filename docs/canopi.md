@@ -90,7 +90,8 @@ current-user-owned regular file
 with owner-only access (or an equivalent protected current-user ACL on Windows);
 symlinks and files replaced during open are rejected. The collector, Claude
 adapter, and simulator all use this same protected loader. Adapter and simulator
-origins likewise require HTTPS except for HTTP to a literal loopback address.
+origins likewise require HTTPS except for HTTP to a literal loopback address,
+and bearer-authenticated requests never follow redirects.
 
 ## Run the vertical slice
 
@@ -128,8 +129,9 @@ stuck at its ceiling. Expiry is transactional: if its state-file update fails,
 the acknowledged record remains visible under the unchanged revision. Startup
 checks a configured maximum state-file representation before allocating or
 decoding it; the calculation includes worst-case JSON escaping. Each serialized
-state update also reclaims crash-left `.canopi-state-*` snapshots before writing
-a new temporary file.
+state update also reclaims crash-left snapshots in a namespace derived from that
+state file before writing a new temporary, without touching another collector's
+state-file namespace in the same directory.
 
 In another terminal, generate the selected 3 waiting / 4 done / 12 working
 overflow state:

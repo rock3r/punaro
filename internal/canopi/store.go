@@ -2,6 +2,8 @@
 package canopi
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -388,14 +390,15 @@ func persistStore(path string, state persistedStore) error {
 	if err := os.MkdirAll(directory, 0o700); err != nil {
 		return fmt.Errorf("create Canopi state directory: %w", err)
 	}
-	if err := removeStateTemporaries(directory, filepath.Base(path)); err != nil {
+	temporaryPrefix := stateTemporaryPrefix(path)
+	if err := removeStateTemporaries(directory, filepath.Base(path), temporaryPrefix); err != nil {
 		return fmt.Errorf("reclaim Canopi state temporaries: %w", err)
 	}
 	payload, err := json.Marshal(state)
 	if err != nil {
 		return fmt.Errorf("encode Canopi state: %w", err)
 	}
-	temporary, err := os.CreateTemp(directory, ".canopi-state-*")
+	temporary, err := os.CreateTemp(directory, temporaryPrefix+"*")
 	if err != nil {
 		return fmt.Errorf("create Canopi state file: %w", err)
 	}
@@ -422,7 +425,12 @@ func persistStore(path string, state persistedStore) error {
 	return syncStateDirectory(directory)
 }
 
-func removeStateTemporaries(directory, targetName string) error {
+func stateTemporaryPrefix(path string) string {
+	digest := sha256.Sum256([]byte(filepath.Base(path)))
+	return ".canopi-state-" + hex.EncodeToString(digest[:8]) + "-"
+}
+
+func removeStateTemporaries(directory, targetName, temporaryPrefix string) error {
 	directoryHandle, err := os.Open(directory) // #nosec G304 -- directory is the selected state file's parent.
 	if err != nil {
 		return err
@@ -432,7 +440,7 @@ func removeStateTemporaries(directory, targetName string) error {
 	for {
 		names, readErr := directoryHandle.Readdirnames(128)
 		for _, name := range names {
-			if name == targetName || !strings.HasPrefix(name, ".canopi-state-") {
+			if name == targetName || !strings.HasPrefix(name, temporaryPrefix) {
 				continue
 			}
 			candidate := filepath.Join(directory, name)

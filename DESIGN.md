@@ -1784,7 +1784,8 @@ write leaves the acknowledged record visible under the unchanged revision.
 Startup rejects a state file beyond a bound derived from configured live-record,
 per-event, worst-case JSON-encoding, and durable-dedupe ceilings before
 allocating or decoding its body. Serialized updates reclaim crash-left state
-temporaries in bounded directory batches before creating a replacement.
+temporaries in per-target namespaces and bounded directory batches before
+creating a replacement, without racing another state file in the same parent.
 Snapshot and image ETags change only with state revision or rendered response
 content. Snapshot responses use a weak revision validator because their
 generation timestamp changes without a semantic state change; rendered PNGs
@@ -1839,7 +1840,8 @@ listener requires explicit LAN opt-in and an absolute TLS certificate/key pair;
 wildcard, public, and plaintext LAN binds fail closed. The panel accepts only an
 HTTPS render URL and validates the collector certificate against its configured
 CA. Adapter and simulator origins use the same HTTPS-except-literal-loopback
-policy, so no reusable bearer is sent over plaintext LAN traffic.
+policy and refuse redirects, so no reusable bearer is sent to an unvalidated
+target or over plaintext LAN traffic.
 This shared-token LAN MVP is not yet Punaro device-authenticated and must not be
 mounted on the public Punaro origin. Its bearer token must be a protected,
 current-user-owned regular file (or equivalent current-user-only Windows ACL),

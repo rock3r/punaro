@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"net/http"
+	"net/http/httptest"
 	"strings"
 	"testing"
 	"time"
@@ -18,6 +19,22 @@ func TestDeliverRejectsPlaintextNonLoopbackEndpoint(t *testing.T) {
 	})}
 	if err := Deliver(context.Background(), client, "http://192.0.2.40:8090", "token", spoolEvent("event-1")); err == nil {
 		t.Fatal("Deliver() accepted a plaintext non-loopback endpoint")
+	}
+}
+
+func TestDeliverDoesNotForwardBearerAcrossRedirect(t *testing.T) {
+	target := httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {
+		t.Fatal("redirect target received the bearer-authenticated request")
+	}))
+	defer target.Close()
+	origin := httptest.NewTLSServer(http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {
+		http.Redirect(response, request, target.URL, http.StatusTemporaryRedirect)
+	}))
+	defer origin.Close()
+
+	err := Deliver(context.Background(), origin.Client(), origin.URL, "token", spoolEvent("event-redirect"))
+	if err == nil || !strings.Contains(err.Error(), "HTTP 307") {
+		t.Fatalf("Deliver() redirect error = %v, want rejected HTTP 307", err)
 	}
 }
 
