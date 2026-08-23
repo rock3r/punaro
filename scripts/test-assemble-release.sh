@@ -43,7 +43,9 @@ if ! grep -Fq -- '--provenance mode=max' "$repo_dir/.github/workflows/release.ym
 	exit 1
 fi
 if ! grep -Fq 'ARG PUNARO_RELEASE' "$repo_dir/Dockerfile" ||
-	! grep -Fq 'main.serverBuildRelease=${PUNARO_RELEASE}' "$repo_dir/Dockerfile"; then
+	! grep -Fq 'main.serverBuildRelease=${PUNARO_RELEASE}' "$repo_dir/Dockerfile" ||
+	! grep -Fq 'main.telegramBuildSequence=${PUNARO_SEQUENCE}' "$repo_dir/Dockerfile" ||
+	! grep -Fq 'main.telegramBuildCatalogSequence=${PUNARO_CATALOG_SEQUENCE}' "$repo_dir/Dockerfile"; then
 	printf '%s\n' 'release image does not embed its build identity' >&2
 	exit 1
 fi

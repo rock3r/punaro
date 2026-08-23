@@ -24,7 +24,7 @@ RUN CGO_ENABLED=0 go build -trimpath -ldflags="-s -w -X main.serverBuildRelease=
  && CGO_ENABLED=0 go build -trimpath -ldflags='-s -w' -o /out/punaro-migrate ./cmd/punaro-migrate \
  && CGO_ENABLED=0 go build -trimpath -ldflags='-s -w' -o /out/punaro-admin ./cmd/punaro-admin \
  && CGO_ENABLED=0 go build -trimpath -ldflags="-s -w -X main.adapterBuildRelease=${PUNARO_RELEASE} -X main.adapterExpectedSkillSetDigest=${PUNARO_SKILL_SET_SHA256}" -o /out/punaro-adapter ./cmd/punaro-adapter \
- && CGO_ENABLED=0 go build -trimpath -ldflags="-s -w -X main.telegramBuildRelease=${PUNARO_RELEASE}" -o /out/punaro-telegram ./cmd/punaro-telegram \
+ && CGO_ENABLED=0 go build -trimpath -ldflags="-s -w -X main.telegramBuildRelease=${PUNARO_RELEASE} -X main.telegramBuildSequence=${PUNARO_SEQUENCE} -X main.telegramBuildCatalogSequence=${PUNARO_CATALOG_SEQUENCE}" -o /out/punaro-telegram ./cmd/punaro-telegram \
  && CGO_ENABLED=0 go build -trimpath -ldflags='-s -w' -o /out/punaro-trusted-attachment ./cmd/punaro-trusted-attachment \
  && CGO_ENABLED=0 go build -trimpath -ldflags='-s -w' -o /out/punaro-relay-adopt-prepare ./cmd/punaro-relay-adopt-prepare
 
