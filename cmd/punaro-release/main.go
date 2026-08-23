@@ -7,6 +7,7 @@ import (
 	"crypto/rand"
 	"crypto/sha256"
 	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"flag"
 	"fmt"
@@ -15,6 +16,7 @@ import (
 	"path/filepath"
 	"time"
 
+	"github.com/rock3r/punaro/internal/plugindiagnostic"
 	punaropostgres "github.com/rock3r/punaro/internal/postgres"
 	punarorelease "github.com/rock3r/punaro/internal/release"
 )
@@ -30,11 +32,17 @@ func main() {
 
 func run(args []string) error {
 	if len(args) == 0 {
-		return errors.New("usage: punaro-release assemble|validate|keygen|sign|verify")
+		return errors.New("usage: punaro-release assemble|build-facts|validate|keygen|sign|verify")
 	}
 	switch args[0] {
 	case "assemble":
 		return runAssemble(args[1:])
+	case "build-facts":
+		facts, err := buildFacts(args[1:])
+		if err != nil {
+			return err
+		}
+		return json.NewEncoder(os.Stdout).Encode(facts)
 	case "validate":
 		return runValidate(args[1:])
 	case "keygen":
@@ -44,8 +52,39 @@ func run(args []string) error {
 	case "verify":
 		return runVerify(args[1:])
 	default:
-		return errors.New("usage: punaro-release assemble|validate|keygen|sign|verify")
+		return errors.New("usage: punaro-release assemble|build-facts|validate|keygen|sign|verify")
 	}
+}
+
+type releaseBuildFacts struct {
+	Release                 string `json:"release"`
+	ComposeSHA256           string `json:"compose_sha256"`
+	MigrationManifestSHA256 string `json:"migration_manifest_sha256"`
+	SkillSetSHA256          string `json:"skill_set_sha256"`
+}
+
+func buildFacts(args []string) (releaseBuildFacts, error) {
+	flags := flag.NewFlagSet("punaro-release build-facts", flag.ContinueOnError)
+	flags.SetOutput(io.Discard)
+	releaseName := flags.String("release", "", "product release name")
+	composeFile := flags.String("compose-file", "", "production compose source")
+	pluginRoot := flags.String("plugin-root", "", "portable Punaro plugin root")
+	if flags.Parse(args) != nil || flags.NArg() != 0 || *releaseName == "" || *composeFile == "" || *pluginRoot == "" {
+		return releaseBuildFacts{}, errors.New("release build facts are invalid")
+	}
+	version, err := plugindiagnostic.Version(*pluginRoot)
+	if err != nil || *releaseName != "v"+version {
+		return releaseBuildFacts{}, errors.New("release build facts are invalid")
+	}
+	composeDigest, err := hashFile(*composeFile)
+	if err != nil {
+		return releaseBuildFacts{}, errors.New("release build facts are invalid")
+	}
+	skillDigest, err := plugindiagnostic.SkillSetDigest(filepath.Join(*pluginRoot, "skills"))
+	if err != nil {
+		return releaseBuildFacts{}, errors.New("release build facts are invalid")
+	}
+	return releaseBuildFacts{Release: *releaseName, ComposeSHA256: composeDigest, MigrationManifestSHA256: punaropostgres.MigrationManifestSHA256(), SkillSetSHA256: skillDigest}, nil
 }
 
 func runAssemble(args []string) error {
@@ -109,6 +148,7 @@ func runValidate(args []string) error {
 	flags := flag.NewFlagSet("punaro-release validate", flag.ContinueOnError)
 	flags.SetOutput(io.Discard)
 	dir := flags.String("dir", "", "directory containing assembled documents")
+	releaseName := flags.String("release", "", "expected product release name")
 	if err := flags.Parse(args); err != nil {
 		return errors.New("release validation is invalid")
 	}
@@ -126,6 +166,9 @@ func runValidate(args []string) error {
 	manifest, err := punarorelease.ParseReleaseManifest(manifestBody)
 	if err != nil {
 		return err
+	}
+	if *releaseName != "" && manifest.Release != *releaseName {
+		return errors.New("release validation is invalid")
 	}
 	catalog, err := punarorelease.ParseCatalog(catalogBody)
 	if err != nil {

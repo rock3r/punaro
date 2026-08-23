@@ -1135,3 +1135,59 @@ func TestHTTPDoesNotExposeTerminalInventory(t *testing.T) {
 		}
 	}
 }
+
+func TestHTTPDoctorProbeAuthenticatesWithoutDurableMutation(t *testing.T) {
+	public, private, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	store, err := Open(filepath.Join(t.TempDir(), "relay.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+	auth, err := NewAuthenticator(store, []Machine{{ID: "machine-a", PublicKey: public, EndpointPrefixes: []string{"agent/a/"}}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	handler := NewHandler(store, auth, HandlerOptions{Now: func() time.Time {
+		return time.Date(2026, time.July, 13, 12, 0, 0, 0, time.UTC)
+	}})
+	for range 2 {
+		response := serveSigned(t, handler, private, "machine-a", http.MethodHead, DoctorPath, "", "reusable-doctor-probe", "")
+		if response.Code != http.StatusNoContent || response.Body.Len() != 0 || response.Header().Get(ResponseNonceHeader) != "reusable-doctor-probe" || response.Header().Get(ProtocolHeader) != "1" {
+			t.Fatalf("status=%d headers=%v body=%q", response.Code, response.Header(), response.Body.String())
+		}
+	}
+	var nonces int
+	if err := store.db.QueryRowContext(t.Context(), `SELECT count(*) FROM request_nonces`).Scan(&nonces); err != nil || nonces != 0 {
+		t.Fatalf("durable nonces=%d err=%v", nonces, err)
+	}
+	unsigned := httptest.NewRequestWithContext(t.Context(), http.MethodHead, DoctorPath, nil)
+	rejected := httptest.NewRecorder()
+	handler.ServeHTTP(rejected, unsigned)
+	if rejected.Code != http.StatusUnauthorized || rejected.Header().Get(ResponseNonceHeader) != "" {
+		t.Fatalf("unsigned status=%d headers=%v", rejected.Code, rejected.Header())
+	}
+	server := httptest.NewServer(handler)
+	t.Cleanup(server.Close)
+	signed := signRequest(private, "machine-a", http.MethodGet, DoctorNotificationsPath, nil, time.Date(2026, time.July, 13, 12, 0, 0, 0, time.UTC), "reusable-notification-doctor")
+	headers := http.Header{}
+	headers.Set("X-Punaro-Machine", signed.MachineID)
+	headers.Set("X-Punaro-Timestamp", signed.Timestamp.Format(time.RFC3339Nano))
+	headers.Set("X-Punaro-Nonce", signed.Nonce)
+	headers.Set("X-Punaro-Signature", base64.RawURLEncoding.EncodeToString(signed.Signature))
+	for range 2 {
+		connection, response, dialErr := websocket.Dial(t.Context(), "ws"+strings.TrimPrefix(server.URL, "http")+DoctorNotificationsPath, &websocket.DialOptions{HTTPHeader: headers})
+		if dialErr != nil || response == nil || response.Header.Get(ResponseNonceHeader) != signed.Nonce || response.Header.Get(ProtocolHeader) != "1" {
+			t.Fatalf("response=%v err=%v", response, dialErr)
+		}
+		_ = connection.Close(websocket.StatusNormalClosure, "")
+		if response.Body != nil {
+			_ = response.Body.Close()
+		}
+	}
+	if err := store.db.QueryRowContext(t.Context(), `SELECT count(*) FROM request_nonces`).Scan(&nonces); err != nil || nonces != 0 {
+		t.Fatalf("durable nonces after notification probe=%d err=%v", nonces, err)
+	}
+}

@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -22,10 +23,42 @@ const maxRichMessageBytes = 32 << 10
 type BotAPIStatusError struct {
 	Method string
 	Status int
+	Kind   BotAPIErrorKind
 }
 
 func (e BotAPIStatusError) Error() string {
 	return fmt.Sprintf("telegram %s returned HTTP %d", e.Method, e.Status)
+}
+
+// BotAPIErrorKind is a closed classification derived from a bounded response;
+// provider text itself is never retained or returned.
+type BotAPIErrorKind string
+
+// Stable Bot API error classifications.
+const (
+	BotAPIErrorUnknown      BotAPIErrorKind = ""
+	BotAPIErrorDeletedTopic BotAPIErrorKind = "deleted_topic"
+)
+
+// PermanentBotAPIFailure recognizes terminal request outcomes while keeping
+// 401 retryable because Access/proxy/token recovery may restore it.
+func PermanentBotAPIFailure(err error) bool {
+	var status BotAPIStatusError
+	if !errors.As(err, &status) {
+		return false
+	}
+	switch status.Status {
+	case http.StatusBadRequest, http.StatusForbidden, http.StatusNotFound, http.StatusMethodNotAllowed, http.StatusGone, http.StatusUnprocessableEntity:
+		return true
+	default:
+		return false
+	}
+}
+
+// DeletedTopicFailure reports the whitelisted Bot API missing-topic class.
+func DeletedTopicFailure(err error) bool {
+	var status BotAPIStatusError
+	return errors.As(err, &status) && status.Kind == BotAPIErrorDeletedTopic
 }
 
 // Client is a narrow Telegram Bot API long-poll client. Its token is retained
@@ -70,6 +103,25 @@ func DefaultBotCommands() []BotCommand {
 	}
 }
 
+// Doctor verifies the configured Bot API identity with Telegram's read-only
+// getMe method. Provider response fields are deliberately discarded so they
+// cannot cross the diagnostic boundary.
+func (c *Client) Doctor(ctx context.Context) error {
+	var decoded struct {
+		OK     bool `json:"ok"`
+		Result struct {
+			ID int64 `json:"id"`
+		} `json:"result"`
+	}
+	if err := c.postJSON(ctx, "getMe", []byte(`{}`), &decoded); err != nil {
+		return fmt.Errorf("telegram doctor failed")
+	}
+	if !decoded.OK || decoded.Result.ID == 0 {
+		return fmt.Errorf("telegram doctor failed")
+	}
+	return nil
+}
+
 // Updates returns text messages, bot_command metadata, and callback queries.
 // Unknown Bot API fields are intentionally ignored; bodies remain opaque text.
 func (c *Client) Updates(ctx context.Context, offset int64) ([]Update, error) {
@@ -90,7 +142,7 @@ func (c *Client) Updates(ctx context.Context, offset int64) ([]Update, error) {
 	}
 	defer func() { _ = response.Body.Close() }()
 	if response.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("telegram poll returned HTTP %d", response.StatusCode)
+		return nil, readBotAPIStatus(response, "getUpdates")
 	}
 	body, err := io.ReadAll(io.LimitReader(response.Body, maxBotResponseBytes+1))
 	if err != nil || len(body) > maxBotResponseBytes {
@@ -371,10 +423,30 @@ func (c *Client) postJSON(ctx context.Context, methodName string, body []byte, d
 	}
 	defer func() { _ = response.Body.Close() }()
 	if response.StatusCode != http.StatusOK {
-		return BotAPIStatusError{Method: methodName, Status: response.StatusCode}
+		return readBotAPIStatus(response, methodName)
 	}
-	if err := json.NewDecoder(io.LimitReader(response.Body, maxBotResponseBytes+1)).Decode(decoded); err != nil {
+	responseBody, err := io.ReadAll(io.LimitReader(response.Body, maxBotResponseBytes+1))
+	if err != nil || len(responseBody) > maxBotResponseBytes || json.Unmarshal(responseBody, decoded) != nil {
 		return fmt.Errorf("invalid telegram %s response", methodName)
 	}
 	return nil
+}
+
+func readBotAPIStatus(response *http.Response, methodName string) BotAPIStatusError {
+	result := BotAPIStatusError{Method: methodName, Status: response.StatusCode}
+	body, err := io.ReadAll(io.LimitReader(response.Body, maxBotResponseBytes+1))
+	if err != nil || len(body) > maxBotResponseBytes {
+		return result
+	}
+	var decoded struct {
+		Description string `json:"description"`
+	}
+	if json.Unmarshal(body, &decoded) != nil {
+		return result
+	}
+	description := strings.ToLower(strings.TrimSpace(decoded.Description))
+	if methodName == "sendRichMessage" && (description == "bad request: message thread not found" || description == "bad request: message thread is not found" || description == "bad request: topic was deleted") {
+		result.Kind = BotAPIErrorDeletedTopic
+	}
+	return result
 }

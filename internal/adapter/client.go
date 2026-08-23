@@ -13,6 +13,7 @@ import (
 	"net"
 	"net/http"
 	"net/url"
+	"strconv"
 	"strings"
 	"time"
 
@@ -28,6 +29,22 @@ import (
 type AccessServiceToken struct {
 	ClientID     string
 	ClientSecret string
+}
+
+// DoctorProbeResult contains only stable reachability decisions. It never
+// carries provider response text, URLs, credentials, or response bodies.
+type DoctorProbeResult struct {
+	Transport        bool
+	Origin           bool
+	Access           bool
+	Enrolled         bool
+	Protocol         bool
+	Attached         bool
+	AttachmentsKnown bool
+	ActiveEndpoints  int
+	ExpiredEndpoints int
+	ActiveRoles      int
+	ExpiredRoles     int
 }
 
 // OpenAccessSession validates and copies the HTTP client used to reach a
@@ -137,6 +154,167 @@ func NewHTTPRelayClientWithPolicy(rawURL, machineID string, privateKey ed25519.P
 		clientCopy.Jar = nil
 	}
 	result := &HTTPRelayClient{baseURL: baseURL, machineID: machineID, privateKey: append(ed25519.PrivateKey(nil), privateKey...), httpClient: &clientCopy, consumerID: consumerID, accessToken: accessToken}
+	return result, nil
+}
+
+// Doctor performs the signed, non-mutating relay reachability probe. A nonce
+// echo is required before interpreting an HTTP status as a Punaro-origin
+// result; intermediary rejections therefore cannot masquerade as enrollment
+// or protocol failures.
+func (c *HTTPRelayClient) Doctor(ctx context.Context) (DoctorProbeResult, error) {
+	return c.doctor(ctx, "")
+}
+
+// DoctorEndpoint adds a read-only durable attachment assertion for one exact
+// endpoint already authorized to this enrolled machine.
+func (c *HTTPRelayClient) DoctorEndpoint(ctx context.Context, endpoint string) (DoctorProbeResult, error) {
+	if !relay.ValidEndpoint(endpoint) {
+		return DoctorProbeResult{}, errors.New("relay doctor endpoint is invalid")
+	}
+	return c.doctor(ctx, endpoint)
+}
+
+func (c *HTTPRelayClient) doctor(ctx context.Context, endpoint string) (DoctorProbeResult, error) {
+	if c == nil || c.httpClient == nil || c.baseURL == nil {
+		return DoctorProbeResult{}, errors.New("relay doctor client is unavailable")
+	}
+	nonce, err := randomNonce()
+	if err != nil {
+		return DoctorProbeResult{}, err
+	}
+	timestamp := time.Now().UTC()
+	signed := relay.SignedRequest{MachineID: c.machineID, Method: http.MethodHead, Path: relay.DoctorPath, Timestamp: timestamp, Nonce: nonce}
+	signed.Signature = ed25519.Sign(c.privateKey, relay.CanonicalRequest(signed))
+	target := c.baseURL.ResolveReference(&url.URL{Path: relay.DoctorPath})
+	request, err := http.NewRequestWithContext(ctx, http.MethodHead, target.String(), nil)
+	if err != nil {
+		return DoctorProbeResult{}, errors.New("build relay doctor request")
+	}
+	request.Header.Set("X-Punaro-Machine", signed.MachineID)
+	request.Header.Set("X-Punaro-Timestamp", signed.Timestamp.Format(time.RFC3339Nano))
+	request.Header.Set("X-Punaro-Nonce", signed.Nonce)
+	request.Header.Set("X-Punaro-Signature", base64.RawURLEncoding.EncodeToString(signed.Signature))
+	if endpoint != "" {
+		request.Header.Set(relay.DoctorEndpointHeader, endpoint)
+	}
+	if c.accessToken.ClientID != "" {
+		request.Header.Set("CF-Access-Client-Id", c.accessToken.ClientID)
+		request.Header.Set("CF-Access-Client-Secret", c.accessToken.ClientSecret)
+	}
+	c.addAccessCookies(request.Header)
+	client := *c.httpClient
+	client.CheckRedirect = func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }
+	response, err := client.Do(request)
+	if err != nil {
+		return DoctorProbeResult{}, errors.New("relay doctor transport failed")
+	}
+	defer func() { _ = response.Body.Close() }()
+	result := DoctorProbeResult{Transport: true}
+	responseNonces := response.Header.Values(relay.ResponseNonceHeader)
+	if len(responseNonces) != 1 || responseNonces[0] != nonce {
+		return result, errors.New("relay doctor origin was not confirmed")
+	}
+	result.Origin = true
+	result.Access = true
+	if response.StatusCode != http.StatusNoContent {
+		return result, errors.New("relay doctor authorization failed")
+	}
+	result.Enrolled = true
+	protocols := response.Header.Values(relay.ProtocolHeader)
+	if len(protocols) != 1 || protocols[0] != strconv.Itoa(relay.ProtocolVersion) {
+		return result, errors.New("relay doctor protocol is incompatible")
+	}
+	result.Protocol = true
+	if activeEndpoints, ok := parseDoctorCountHeader(response.Header, relay.DoctorActiveEndpointsHeader); ok {
+		expiredEndpoints, endpointsOK := parseDoctorCountHeader(response.Header, relay.DoctorExpiredEndpointsHeader)
+		activeRoles, activeRolesOK := parseDoctorCountHeader(response.Header, relay.DoctorActiveRolesHeader)
+		expiredRoles, expiredRolesOK := parseDoctorCountHeader(response.Header, relay.DoctorExpiredRolesHeader)
+		if endpointsOK && activeRolesOK && expiredRolesOK {
+			result.AttachmentsKnown = true
+			result.ActiveEndpoints, result.ExpiredEndpoints = activeEndpoints, expiredEndpoints
+			result.ActiveRoles, result.ExpiredRoles = activeRoles, expiredRoles
+			result.Attached = activeEndpoints > 0
+		}
+	}
+	if endpoint != "" {
+		result.Attached = response.Header.Get(relay.DoctorAttachmentHeader) == "true"
+	}
+	return result, nil
+}
+
+func parseDoctorCountHeader(header http.Header, name string) (int, bool) {
+	values := header.Values(name)
+	if len(values) != 1 {
+		return 0, false
+	}
+	value, err := strconv.Atoi(values[0])
+	return value, err == nil && value >= 0 && value <= 10000
+}
+
+// DoctorNotifications performs only the signed WebSocket upgrade handshake on
+// the dedicated doctor route. It does not register for, read, or acknowledge
+// notification events and does not consume a durable request nonce.
+func (c *HTTPRelayClient) DoctorNotifications(ctx context.Context) (DoctorProbeResult, error) {
+	if c == nil || c.httpClient == nil || c.baseURL == nil {
+		return DoctorProbeResult{}, errors.New("relay notification doctor client is unavailable")
+	}
+	nonce, err := randomNonce()
+	if err != nil {
+		return DoctorProbeResult{}, err
+	}
+	timestamp := time.Now().UTC()
+	signed := relay.SignedRequest{MachineID: c.machineID, Method: http.MethodGet, Path: relay.DoctorNotificationsPath, Timestamp: timestamp, Nonce: nonce}
+	signed.Signature = ed25519.Sign(c.privateKey, relay.CanonicalRequest(signed))
+	target := *c.baseURL
+	if target.Scheme == "https" {
+		target.Scheme = "wss"
+	} else {
+		target.Scheme = "ws"
+	}
+	target.Path = relay.DoctorNotificationsPath
+	headers := http.Header{}
+	headers.Set("X-Punaro-Machine", signed.MachineID)
+	headers.Set("X-Punaro-Timestamp", signed.Timestamp.Format(time.RFC3339Nano))
+	headers.Set("X-Punaro-Nonce", signed.Nonce)
+	headers.Set("X-Punaro-Signature", base64.RawURLEncoding.EncodeToString(signed.Signature))
+	if c.accessToken.ClientID != "" {
+		headers.Set("CF-Access-Client-Id", c.accessToken.ClientID)
+		headers.Set("CF-Access-Client-Secret", c.accessToken.ClientSecret)
+	}
+	c.addAccessCookies(headers)
+	client := *c.httpClient
+	client.CheckRedirect = func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }
+	connection, response, dialErr := websocket.Dial(ctx, target.String(), &websocket.DialOptions{HTTPClient: &client, HTTPHeader: headers, CompressionMode: websocket.CompressionDisabled})
+	if response != nil && response.Body != nil {
+		defer func() { _ = response.Body.Close() }()
+	}
+	if response == nil {
+		return DoctorProbeResult{}, errors.New("relay notification doctor transport failed")
+	}
+	result := DoctorProbeResult{Transport: true}
+	responseNonces := response.Header.Values(relay.ResponseNonceHeader)
+	if len(responseNonces) != 1 || responseNonces[0] != nonce {
+		if connection != nil {
+			_ = connection.CloseNow()
+		}
+		return result, errors.New("relay notification doctor origin was not confirmed")
+	}
+	result.Origin = true
+	result.Access = true
+	if dialErr != nil || connection == nil || response.StatusCode != http.StatusSwitchingProtocols {
+		if connection != nil {
+			_ = connection.CloseNow()
+		}
+		return result, errors.New("relay notification doctor authorization failed")
+	}
+	result.Enrolled = true
+	protocols := response.Header.Values(relay.ProtocolHeader)
+	if len(protocols) != 1 || protocols[0] != strconv.Itoa(relay.ProtocolVersion) {
+		_ = connection.CloseNow()
+		return result, errors.New("relay notification doctor protocol is incompatible")
+	}
+	result.Protocol = true
+	_ = connection.Close(websocket.StatusNormalClosure, "")
 	return result, nil
 }
 

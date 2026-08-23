@@ -38,6 +38,7 @@ Read the [accepted platform and Big Brain plan](docs/big-brain-plan.md),
 [GitHub Releases origin](docs/github-releases.md),
 [user guide](docs/user-guide.md), [operator guide](docs/operator-guide.md),
 [installation guide](docs/installation.md),
+[doctor and fleet-readiness guide](docs/doctor.md),
 [agent plugin guide](docs/agent-plugin.md),
 [trusted-LAN deployment guide](docs/trusted-lan-deployment.md),
 [alpha text-relay onboarding](docs/alpha-text-relay.md),
@@ -183,6 +184,11 @@ make ci
 
 The Makefile also exposes individual `test`, `test-race`, `test-postgres`, `staticcheck`,
 `security`, `dockerfile-lint`, and `workflow-lint` targets.
+
+Release and deployment readiness is checked with the strict, read-only doctor
+commands for the server, adapter, bootstrap, Telegram gateway, and collected
+fleet. See [the doctor guide](docs/doctor.md) for the JSON/exit contract and
+complete stable check-code registry.
 
 ## License
 

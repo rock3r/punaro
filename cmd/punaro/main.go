@@ -13,12 +13,15 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
 
 	"github.com/google/uuid"
 	punarobackup "github.com/rock3r/punaro/internal/backup"
+	punarodiagnostic "github.com/rock3r/punaro/internal/diagnostic"
 	"github.com/rock3r/punaro/internal/ingress"
 	"github.com/rock3r/punaro/internal/operator"
 	punaropostgres "github.com/rock3r/punaro/internal/postgres"
@@ -157,7 +160,58 @@ var (
 	listOperatorBackups   = punarobackup.List
 	verifyOperatorBackup  = punarobackup.Verify
 	restoreOperatorBackup = restoreBackup
+	serverDoctorInspect   = inspectServerDoctorState
 )
+
+var (
+	serverBuildRelease         string
+	serverBuildSequence        string
+	serverBuildCatalogSequence string
+	serverBuildImage           string
+	serverBuildComposeSHA256   string
+	serverBuildMigrationSHA256 string
+)
+
+type knownDoctorBool struct {
+	Known bool
+	OK    bool
+}
+
+type serverDoctorState struct {
+	MachineID           string
+	Release             string
+	ReleaseSequence     int64
+	CatalogSequence     int64
+	Protocol            int64
+	InstalledRelease    knownDoctorBool
+	RunningImage        knownDoctorBool
+	ComposeBinding      knownDoctorBool
+	MigrationBinding    knownDoctorBool
+	PostgresMajor       int
+	PostgresKnown       bool
+	Storage             knownDoctorBool
+	BackupAvailable     knownDoctorBool
+	BackupFresh         knownDoctorBool
+	UpdateTransaction   knownDoctorBool
+	RecoveryReceipt     knownDoctorBool
+	UpdateRecovery      knownDoctorBool
+	DatabasePrivate     knownDoctorBool
+	HealthPrivate       knownDoctorBool
+	AdminPrivate        knownDoctorBool
+	BlobPrivate         knownDoctorBool
+	TunnelRoute         knownDoctorBool
+	TunnelOrigin        knownDoctorBool
+	AccessAdmission     knownDoctorBool
+	RelayEnrollment     knownDoctorBool
+	RelayProtocol       knownDoctorBool
+	GatewayInstalled    knownDoctorBool
+	GatewayEnabled      knownDoctorBool
+	GatewayRunning      knownDoctorBool
+	GatewayExecutable   knownDoctorBool
+	GatewayExitStatus   knownDoctorBool
+	GatewayRestartState knownDoctorBool
+	GatewayRelease      knownDoctorBool
+}
 
 type restoreRequest struct {
 	BackupDirectory string
@@ -337,7 +391,7 @@ func main() { os.Exit(run(os.Args[1:], os.Stdout, os.Stderr)) }
 
 func run(args []string, stdout, stderr io.Writer) int {
 	if len(args) == 0 {
-		_, _ = fmt.Fprintln(stderr, "usage: punaro init|up|status|doctor|client|relay|mail|backup|restore|update")
+		_, _ = fmt.Fprintln(stderr, "usage: punaro init|up|status|doctor|client|relay|mail|backup|restore|update|version")
 		return 2
 	}
 	switch args[0] {
@@ -385,6 +439,12 @@ func run(args []string, stdout, stderr io.Writer) int {
 		return runRestore(args[1:], stdout, stderr)
 	case "update":
 		return runUpdate(args[1:], stdout, stderr)
+	case "version":
+		if len(args) != 1 || serverBuildRelease == "" {
+			return 1
+		}
+		_, _ = fmt.Fprintln(stdout, serverBuildRelease)
+		return 0
 	}
 	_, _ = fmt.Fprintln(stderr, "unsupported operator command")
 	return 2
@@ -551,6 +611,9 @@ func runStatus(args []string, stdout, stderr io.Writer, doctor bool) int {
 	if doctor {
 		name = "doctor"
 	}
+	if doctor {
+		return runServerDoctor(args, stdout, stderr)
+	}
 	directory, ok := parseDirectory(name, args, stderr)
 	if !ok {
 		return 2
@@ -564,10 +627,270 @@ func runStatus(args []string, stdout, stderr io.Writer, doctor bool) int {
 	if code := writeJSON(stdout, stderr, result); code != 0 {
 		return code
 	}
-	if doctor && !result.Healthy {
-		return 1
-	}
 	return 0
+}
+
+func runServerDoctor(args []string, stdout, stderr io.Writer) int {
+	flags := flag.NewFlagSet("doctor", flag.ContinueOnError)
+	flags.SetOutput(stderr)
+	directory := flags.String("directory", "", "absolute installation directory")
+	timeout := flags.Duration("timeout", 20*time.Second, "total diagnostic deadline")
+	if flags.Parse(args) != nil || flags.NArg() != 0 || *directory == "" || *timeout < time.Second || *timeout > 30*time.Second {
+		return 2
+	}
+	installation, err := operator.Load(*directory)
+	if err != nil {
+		report, reportErr := punarodiagnostic.New(punarodiagnostic.ComponentServer, punarodiagnostic.Identity{Platform: runtime.GOOS + "-" + runtime.GOARCH}, unavailableServerDoctorChecks())
+		if reportErr != nil || writeJSON(stdout, stderr, report) != 0 {
+			_, _ = fmt.Fprintln(stderr, "punaro doctor failed: diagnostic report unavailable")
+			return 2
+		}
+		return punarodiagnostic.ExitCode(report)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), *timeout)
+	defer cancel()
+	report, err := diagnoseServer(ctx, installation)
+	if err != nil {
+		_, _ = fmt.Fprintln(stderr, "punaro doctor failed: diagnostic report unavailable")
+		return 2
+	}
+	if code := writeJSON(stdout, stderr, report); code != 0 {
+		return code
+	}
+	return punarodiagnostic.ExitCode(report)
+}
+
+func unavailableServerDoctorChecks() []punarodiagnostic.Check {
+	codes := []string{
+		"access_admission", "administration_listener_private", "application_credential_file", "attachment_blob_containment", "attachment_blob_directory",
+		"backup_directory", "backup_freshness", "blob_storage_private", "compose_manifest_binding", "compose_override", "daemon_environment", "data_directory",
+		"database_connection", "database_listener_private", "database_owner", "database_pair", "database_schema", "gateway_release", "gateway_service_enabled",
+		"gateway_service_executable", "gateway_service_installed", "gateway_service_last_exit", "gateway_service_restart_state", "gateway_service_running",
+		"health_endpoint", "health_listener_private", "host_update_stage", "image_digest_binding", "installed_release", "installation_directory", "machine_identity",
+		"maintenance_fence", "migration_manifest_binding", "owner_credential_file", "postgres_major", "readiness_endpoint", "recovery_receipt", "relay_enrollment",
+		"relay_protocol", "running_image", "storage_capacity", "storage_credential_isolation", "storage_directory_separation", "tunnel_origin", "tunnel_route",
+		"update_recovery", "update_transaction", "verified_backup",
+	}
+	checks := []punarodiagnostic.Check{punarodiagnostic.Fail("installation_configuration", "repair_installation_configuration")}
+	for _, code := range codes {
+		checks = append(checks, punarodiagnostic.Unavailable(code, "repair_installation_configuration"))
+	}
+	return checks
+}
+
+func diagnoseServer(ctx context.Context, installation operator.Installation) (punarodiagnostic.Report, error) {
+	identity := punarodiagnostic.Identity{Platform: runtime.GOOS + "-" + runtime.GOARCH}
+	if _, digest, ok := strings.Cut(installation.Image, "@"); ok {
+		identity.ArtifactDigest = digest
+	}
+	checks := serverPathChecks(operator.CheckPaths(installation))
+	checks = append(checks, punarodiagnostic.Pass("installation_configuration"), punarodiagnostic.Pass("image_digest_binding"))
+	extended := serverDoctorInspect(ctx, installation)
+	identity.MachineID = extended.MachineID
+	identity.Release = extended.Release
+	identity.ReleaseSequence = extended.ReleaseSequence
+	identity.CatalogSequence = extended.CatalogSequence
+	identity.Protocol = extended.Protocol
+	identity.Capabilities = serverDoctorCapabilities(installation)
+	checks = appendKnownServerCheck(checks, "installed_release", "install_signed_release", extended.InstalledRelease)
+	if extended.MachineID == "" {
+		checks = append(checks, punarodiagnostic.Fail("machine_identity", "configure_server_machine_identity"))
+	} else {
+		checks = append(checks, punarodiagnostic.Pass("machine_identity"))
+	}
+	checks = appendKnownServerCheck(checks, "running_image", "restart_with_installed_image", extended.RunningImage)
+	checks = appendKnownServerCheck(checks, "compose_manifest_binding", "reinstall_release_compose_manifest", extended.ComposeBinding)
+	checks = appendKnownServerCheck(checks, "migration_manifest_binding", "reinstall_release_migration_manifest", extended.MigrationBinding)
+	switch {
+	case !extended.PostgresKnown:
+		checks = append(checks, punarodiagnostic.Unavailable("postgres_major", "repair_database_connection"))
+	case extended.PostgresMajor < 14:
+		checks = append(checks, punarodiagnostic.Fail("postgres_major", "upgrade_postgres_major"))
+	default:
+		checks = append(checks, punarodiagnostic.Pass("postgres_major"))
+	}
+	checks = appendKnownServerCheck(checks, "storage_capacity", "free_server_storage", extended.Storage)
+	checks = appendKnownServerCheck(checks, "verified_backup", "create_verified_backup", extended.BackupAvailable)
+	checks = appendKnownServerCheck(checks, "backup_freshness", "refresh_verified_backup", extended.BackupFresh)
+	checks = appendKnownServerCheck(checks, "update_transaction", "resume_abort_or_recover_update", extended.UpdateTransaction)
+	checks = appendKnownServerCheck(checks, "recovery_receipt", "repair_update_recovery_receipt", extended.RecoveryReceipt)
+	checks = appendKnownServerCheck(checks, "update_recovery", "resume_abort_or_recover_update", extended.UpdateRecovery)
+	checks = appendKnownServerCheck(checks, "database_listener_private", "repair_database_listener_topology", extended.DatabasePrivate)
+	checks = appendKnownServerCheck(checks, "health_listener_private", "repair_health_listener_topology", extended.HealthPrivate)
+	checks = appendKnownServerCheck(checks, "administration_listener_private", "repair_administration_listener_topology", extended.AdminPrivate)
+	checks = appendKnownServerCheck(checks, "blob_storage_private", "repair_blob_storage_topology", extended.BlobPrivate)
+	checks = appendKnownServerCheck(checks, "tunnel_route", "repair_tunnel_route", extended.TunnelRoute)
+	checks = appendKnownServerCheck(checks, "tunnel_origin", "repair_tunnel_device_route", extended.TunnelOrigin)
+	checks = appendKnownServerCheck(checks, "access_admission", "repair_access_service_auth", extended.AccessAdmission)
+	checks = appendKnownServerCheck(checks, "relay_enrollment", "repair_server_doctor_enrollment", extended.RelayEnrollment)
+	checks = appendKnownServerCheck(checks, "relay_protocol", "install_compatible_release", extended.RelayProtocol)
+	checks = appendKnownServerCheck(checks, "gateway_service_installed", "install_gateway_service", extended.GatewayInstalled)
+	checks = appendKnownServerCheck(checks, "gateway_service_enabled", "enable_gateway_service", extended.GatewayEnabled)
+	checks = appendKnownServerCheck(checks, "gateway_service_running", "repair_gateway_service", extended.GatewayRunning)
+	checks = appendKnownServerCheck(checks, "gateway_service_executable", "repair_gateway_service_binding", extended.GatewayExecutable)
+	checks = appendKnownServerCheck(checks, "gateway_service_last_exit", "inspect_gateway_service_exit", extended.GatewayExitStatus)
+	checks = appendKnownServerCheck(checks, "gateway_service_restart_state", "repair_gateway_service_restart", extended.GatewayRestartState)
+	checks = appendKnownServerCheck(checks, "gateway_release", "install_compatible_gateway_release", extended.GatewayRelease)
+
+	state, schemaErr := inspectSchema(ctx, installation.AppDSNFile)
+	if schemaErr != nil {
+		checks = append(checks,
+			punarodiagnostic.Unavailable("database_connection", "repair_database_connection"),
+			punarodiagnostic.Unavailable("database_schema", "repair_database_connection"),
+			punarodiagnostic.Unavailable("database_pair", "repair_database_connection"),
+		)
+	} else {
+		identity.StorageSchema = state.Version
+		checks = append(checks, punarodiagnostic.Pass("database_connection"))
+		if state.Classification != punaropostgres.Compatible {
+			checks = append(checks,
+				punarodiagnostic.Fail("database_schema", "run_supported_update_or_recovery"),
+				punarodiagnostic.Unavailable("database_pair", "repair_database_schema"),
+			)
+		} else {
+			checks = append(checks, punarodiagnostic.Pass("database_schema"))
+			if err := verifyInstallationPair(ctx, installation.AppDSNFile, installation.OwnerDSNFile); err != nil {
+				checks = append(checks, punarodiagnostic.Fail("database_pair", "repair_database_pair"))
+			} else {
+				checks = append(checks, punarodiagnostic.Pass("database_pair"))
+			}
+		}
+	}
+
+	owner, ownerErr := inspectOwner(ctx, installation.AppDSNFile)
+	switch {
+	case ownerErr != nil:
+		checks = append(checks, punarodiagnostic.Unavailable("database_owner", "repair_database_connection"))
+	case owner.ID != installation.OwnerPrincipalID:
+		checks = append(checks, punarodiagnostic.Fail("database_owner", "repair_database_owner"))
+	default:
+		checks = append(checks, punarodiagnostic.Pass("database_owner"))
+	}
+
+	maintenance, maintenanceErr := maintenanceActive(ctx, installation.AppDSNFile)
+	switch {
+	case maintenanceErr != nil:
+		checks = append(checks, punarodiagnostic.Unavailable("maintenance_fence", "inspect_update_recovery"))
+	case maintenance:
+		checks = append(checks, punarodiagnostic.Fail("maintenance_fence", "resume_or_recover_update"))
+	default:
+		checks = append(checks, punarodiagnostic.Pass("maintenance_fence"))
+	}
+
+	if _, err := operator.ExistingUpdateStage(installation.Directory); err == nil {
+		checks = append(checks, punarodiagnostic.Fail("host_update_stage", "resume_or_recover_update"))
+	} else if errors.Is(err, operator.ErrUpdateStageNotFound) {
+		checks = append(checks, punarodiagnostic.Pass("host_update_stage"))
+	} else {
+		checks = append(checks, punarodiagnostic.Unavailable("host_update_stage", "inspect_update_recovery"))
+	}
+
+	base := strings.TrimRight(installation.HealthURL, "/")
+	if err := probe(ctx, base+"/healthz"); err != nil {
+		checks = append(checks, punarodiagnostic.Fail("health_endpoint", "repair_server_service"))
+	} else {
+		checks = append(checks, punarodiagnostic.Pass("health_endpoint"))
+	}
+	if err := probe(ctx, base+"/readyz"); err != nil {
+		checks = append(checks, punarodiagnostic.Fail("readiness_endpoint", "repair_server_readiness"))
+	} else {
+		checks = append(checks, punarodiagnostic.Pass("readiness_endpoint"))
+	}
+
+	return punarodiagnostic.New(punarodiagnostic.ComponentServer, identity, checks)
+}
+
+func serverDoctorCapabilities(installation operator.Installation) []string {
+	capabilities := []string{"device_authentication", "device_enrollment", "postgresql"}
+	if installation.RelayEnabled {
+		capabilities = append(capabilities, "relay")
+	}
+	if installation.MemoryAPIEnabled {
+		capabilities = append(capabilities, "memory_api")
+	}
+	if installation.MemoryMutationsEnabled {
+		capabilities = append(capabilities, "memory_mutations")
+	}
+	if installation.TrustedAttachmentsEnabled {
+		capabilities = append(capabilities, "trusted_attachments")
+	}
+	if installation.MailCutover != nil {
+		capabilities = append(capabilities, "mail_cutover")
+	}
+	slices.Sort(capabilities)
+	return capabilities
+}
+
+func appendKnownServerCheck(checks []punarodiagnostic.Check, code, remediation string, result knownDoctorBool) []punarodiagnostic.Check {
+	if !result.Known {
+		return append(checks, punarodiagnostic.Unavailable(code, remediation))
+	}
+	if !result.OK {
+		return append(checks, punarodiagnostic.Fail(code, remediation))
+	}
+	return append(checks, punarodiagnostic.Pass(code))
+}
+
+type serverPathDiagnostic struct {
+	failure     string
+	code        string
+	remediation string
+}
+
+var serverPathDiagnostics = []serverPathDiagnostic{
+	{"installation directory unavailable or unsafe", "installation_directory", "repair_installation_directory"},
+	{"data directory unavailable or unsafe", "data_directory", "repair_data_directory"},
+	{"backup directory unavailable or unsafe", "backup_directory", "repair_backup_directory"},
+	{"trusted attachment blob directory unavailable or unsafe", "attachment_blob_directory", "repair_attachment_blob_directory"},
+	{"trusted attachment blob directory is outside data directory", "attachment_blob_containment", "repair_attachment_blob_directory"},
+	{"data and backup directories overlap", "storage_directory_separation", "separate_data_and_backup_directories"},
+	{"owner DSN file unavailable or unsafe", "owner_credential_file", "repair_owner_credential_file"},
+	{"application DSN file unavailable or unsafe", "application_credential_file", "repair_application_credential_file"},
+	{"daemon-writable data directory overlaps database credentials or operator state", "storage_credential_isolation", "separate_storage_and_credentials"},
+	{"generated daemon environment unavailable or unsafe", "daemon_environment", "regenerate_server_configuration"},
+	{"generated daemon environment does not match installation configuration", "daemon_environment", "regenerate_server_configuration"},
+	{"generated Compose override unavailable or unsafe", "compose_override", "regenerate_server_configuration"},
+	{"generated Compose override does not match installation configuration", "compose_override", "regenerate_server_configuration"},
+}
+
+func serverPathChecks(failures []string) []punarodiagnostic.Check {
+	failed := make(map[string]struct{}, len(failures))
+	for _, failure := range failures {
+		failed[failure] = struct{}{}
+	}
+	checks := make([]punarodiagnostic.Check, 0, len(serverPathDiagnostics)+1)
+	emitted := make(map[string]struct{}, len(serverPathDiagnostics))
+	for _, definition := range serverPathDiagnostics {
+		if _, duplicate := emitted[definition.code]; duplicate {
+			continue
+		}
+		emitted[definition.code] = struct{}{}
+		failedCode := false
+		for _, candidate := range serverPathDiagnostics {
+			if candidate.code == definition.code {
+				_, failedCode = failed[candidate.failure]
+				if failedCode {
+					break
+				}
+			}
+		}
+		if failedCode {
+			checks = append(checks, punarodiagnostic.Fail(definition.code, definition.remediation))
+		} else {
+			checks = append(checks, punarodiagnostic.Pass(definition.code))
+		}
+	}
+	known := make(map[string]struct{}, len(serverPathDiagnostics))
+	for _, definition := range serverPathDiagnostics {
+		known[definition.failure] = struct{}{}
+	}
+	for _, failure := range failures {
+		if _, ok := known[failure]; !ok {
+			checks = append(checks, punarodiagnostic.Fail("installation_paths", "repair_installation_paths"))
+			break
+		}
+	}
+	return checks
 }
 
 func diagnose(ctx context.Context, installation operator.Installation) statusResult {

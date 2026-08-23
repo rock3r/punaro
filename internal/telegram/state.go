@@ -10,6 +10,7 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
@@ -19,6 +20,7 @@ import (
 	_ "modernc.org/sqlite"
 )
 
+// Stable persisted gateway failure classifications.
 const (
 	callbackTokenTTL  = 15 * time.Minute
 	maxCallbackTokens = 100
@@ -77,6 +79,20 @@ func Open(database string) (*State, error) {
 		"CREATE TABLE IF NOT EXISTS claim_executions (conversation_id TEXT PRIMARY KEY, thread_id INTEGER, phase TEXT NOT NULL, display_name TEXT, skip_reserve INTEGER NOT NULL DEFAULT 0, chat_id INTEGER)",
 		"CREATE TABLE IF NOT EXISTS telegram_outbound (chat_id INTEGER NOT NULL, message_id INTEGER NOT NULL, conversation_id TEXT NOT NULL, punaro_message_id TEXT NOT NULL, from_endpoint TEXT NOT NULL, created_at INTEGER NOT NULL, PRIMARY KEY (chat_id, message_id))",
 		"CREATE TABLE IF NOT EXISTS gateway_cursors (name TEXT PRIMARY KEY, value TEXT NOT NULL)",
+		`CREATE TABLE IF NOT EXISTS gateway_health (
+			id INTEGER PRIMARY KEY CHECK (id = 1),
+			last_cycle_at INTEGER NOT NULL,
+			last_success_at INTEGER,
+			last_poll_at INTEGER,
+			last_relay_at INTEGER,
+			last_telegram_at INTEGER,
+			last_progress_at INTEGER NOT NULL,
+			offset INTEGER NOT NULL,
+			consecutive_failures INTEGER NOT NULL,
+			last_failure TEXT NOT NULL,
+			terminal_inbound INTEGER NOT NULL,
+			terminal_outbound INTEGER NOT NULL
+		)`,
 	} {
 		if _, err := db.ExecContext(context.Background(), statement); err != nil {
 			_ = db.Close()
@@ -88,6 +104,192 @@ func Open(database string) (*State, error) {
 		return nil, fmt.Errorf("initialize telegram state: %w", err)
 	}
 	return &State{db: db}, nil
+}
+
+// GatewayFailureClass is a closed, content-free retry outcome persisted for
+// doctor. It never contains provider text or message identifiers.
+type GatewayFailureClass string
+
+// Stable persisted gateway failure classifications.
+const (
+	GatewayFailureNone                      GatewayFailureClass = ""
+	GatewayFailureTransient                 GatewayFailureClass = "transient"
+	GatewayFailureMessageLessPoll           GatewayFailureClass = "message_less_poll"
+	GatewayFailureInboundRelayPermanent     GatewayFailureClass = "inbound_relay_permanent"
+	GatewayFailureOutboundTelegramPermanent GatewayFailureClass = "outbound_telegram_permanent"
+	GatewayFailureDeletedTopic              GatewayFailureClass = "deleted_topic"
+)
+
+// GatewayCycleRecord contains only aggregate cycle health.
+type GatewayCycleRecord struct {
+	At         time.Time
+	Offset     int64
+	PollOK     bool
+	RelayOK    bool
+	TelegramOK bool
+	Failure    GatewayFailureClass
+}
+
+// GatewayStateSnapshot is the bounded, content-free state used by doctor.
+type GatewayStateSnapshot struct {
+	Integrity           bool
+	RoutesConsistent    bool
+	HasHealth           bool
+	HasSuccess          bool
+	HasPoll             bool
+	HasRelay            bool
+	HasTelegram         bool
+	RouteCount          int
+	IncompleteClaims    int
+	LastCycleAge        time.Duration
+	LastSuccessAge      time.Duration
+	LastPollAge         time.Duration
+	LastRelayAge        time.Duration
+	LastTelegramAge     time.Duration
+	ConsecutiveFailures int
+	LastFailure         GatewayFailureClass
+	TerminalInbound     int
+	TerminalOutbound    int
+	StuckHead           bool
+}
+
+func validGatewayFailure(class GatewayFailureClass) bool {
+	switch class {
+	case GatewayFailureNone, GatewayFailureTransient, GatewayFailureMessageLessPoll, GatewayFailureInboundRelayPermanent, GatewayFailureOutboundTelegramPermanent, GatewayFailureDeletedTopic:
+		return true
+	default:
+		return false
+	}
+}
+
+// RecordGatewayCycle updates the content-free liveness ledger during normal
+// gateway operation. Doctor itself never calls this method.
+func (s *State) RecordGatewayCycle(record GatewayCycleRecord) error {
+	if record.At.IsZero() || record.Offset < 0 || !validGatewayFailure(record.Failure) {
+		return fmt.Errorf("invalid gateway cycle record")
+	}
+	now := record.At.UTC().UnixMilli()
+	var previousOffset int64
+	err := s.db.QueryRowContext(context.Background(), `SELECT offset FROM gateway_health WHERE id = 1`).Scan(&previousOffset)
+	first := errors.Is(err, sql.ErrNoRows)
+	if err != nil && !first {
+		return err
+	}
+	progressAt := now
+	if !first && previousOffset == record.Offset {
+		if err := s.db.QueryRowContext(context.Background(), `SELECT last_progress_at FROM gateway_health WHERE id = 1`).Scan(&progressAt); err != nil {
+			return err
+		}
+	}
+	successAt, pollAt, relayAt, telegramAt := any(nil), any(nil), any(nil), any(nil)
+	consecutiveDelta := 1
+	if record.Failure == GatewayFailureNone {
+		successAt = now
+		consecutiveDelta = 0
+	}
+	if record.PollOK {
+		pollAt = now
+	}
+	if record.RelayOK {
+		relayAt = now
+	}
+	if record.TelegramOK {
+		telegramAt = now
+	}
+	inboundDelta, outboundDelta := 0, 0
+	if record.Failure == GatewayFailureInboundRelayPermanent {
+		inboundDelta = 1
+	}
+	if record.Failure == GatewayFailureOutboundTelegramPermanent || record.Failure == GatewayFailureDeletedTopic {
+		outboundDelta = 1
+	}
+	_, err = s.db.ExecContext(context.Background(), `INSERT INTO gateway_health(
+		id,last_cycle_at,last_success_at,last_poll_at,last_relay_at,last_telegram_at,last_progress_at,offset,consecutive_failures,last_failure,terminal_inbound,terminal_outbound
+	) VALUES (1,?,?,?,?,?,?,?,?,?,?,?)
+	ON CONFLICT(id) DO UPDATE SET
+		last_cycle_at=excluded.last_cycle_at,
+		last_success_at=COALESCE(excluded.last_success_at,gateway_health.last_success_at),
+		last_poll_at=COALESCE(excluded.last_poll_at,gateway_health.last_poll_at),
+		last_relay_at=COALESCE(excluded.last_relay_at,gateway_health.last_relay_at),
+		last_telegram_at=COALESCE(excluded.last_telegram_at,gateway_health.last_telegram_at),
+		last_progress_at=excluded.last_progress_at,
+		offset=excluded.offset,
+		consecutive_failures=CASE WHEN excluded.last_failure='' THEN 0 ELSE gateway_health.consecutive_failures+1 END,
+		last_failure=excluded.last_failure,
+		terminal_inbound=gateway_health.terminal_inbound+excluded.terminal_inbound,
+		terminal_outbound=gateway_health.terminal_outbound+excluded.terminal_outbound`,
+		now, successAt, pollAt, relayAt, telegramAt, progressAt, record.Offset, consecutiveDelta, string(record.Failure), inboundDelta, outboundDelta)
+	return err
+}
+
+// InspectGatewayState opens the database read-only and returns bounded
+// aggregates. It does not initialize, migrate, checkpoint, or repair state.
+func InspectGatewayState(database string, now time.Time) (GatewayStateSnapshot, error) {
+	if !filepath.IsAbs(database) || now.IsZero() {
+		return GatewayStateSnapshot{}, fmt.Errorf("invalid gateway state inspection")
+	}
+	uri := (&url.URL{Scheme: "file", Path: database, RawQuery: "mode=ro"}).String()
+	db, err := sql.Open("sqlite", uri)
+	if err != nil {
+		return GatewayStateSnapshot{}, fmt.Errorf("gateway state unavailable")
+	}
+	defer func() { _ = db.Close() }()
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	if _, err := db.ExecContext(ctx, `PRAGMA query_only = ON`); err != nil {
+		return GatewayStateSnapshot{}, fmt.Errorf("gateway state unavailable")
+	}
+	var integrity string
+	if err := db.QueryRowContext(ctx, `PRAGMA quick_check(1)`).Scan(&integrity); err != nil {
+		return GatewayStateSnapshot{}, fmt.Errorf("gateway state unavailable")
+	}
+	snapshot := GatewayStateSnapshot{Integrity: integrity == "ok", RoutesConsistent: true}
+	if err := db.QueryRowContext(ctx, `SELECT COUNT(*) FROM topic_routes`).Scan(&snapshot.RouteCount); err != nil {
+		return GatewayStateSnapshot{}, fmt.Errorf("gateway state unavailable")
+	}
+	if err := db.QueryRowContext(ctx, `SELECT COUNT(*) FROM claim_executions WHERE phase != ?`, ClaimPhaseComplete).Scan(&snapshot.IncompleteClaims); err != nil {
+		return GatewayStateSnapshot{}, fmt.Errorf("gateway state unavailable")
+	}
+	var inconsistent int
+	if err := db.QueryRowContext(ctx, `SELECT COUNT(*) FROM claim_executions c
+		LEFT JOIN topic_routes r ON r.conversation_id = c.conversation_id
+		WHERE c.phase IN (?, ?) AND (r.conversation_id IS NULL OR c.thread_id IS NULL OR c.thread_id <= 0 OR r.thread_id != c.thread_id OR c.chat_id IS NOT NULL AND r.chat_id != c.chat_id)`, ClaimPhaseRoutePersisted, ClaimPhaseComplete).Scan(&inconsistent); err != nil {
+		return GatewayStateSnapshot{}, fmt.Errorf("gateway state unavailable")
+	}
+	snapshot.RoutesConsistent = inconsistent == 0
+	var cycle, success, poll, relayAt, telegramAt, progress sql.NullInt64
+	var lastFailure string
+	err = db.QueryRowContext(ctx, `SELECT last_cycle_at,last_success_at,last_poll_at,last_relay_at,last_telegram_at,last_progress_at,consecutive_failures,last_failure,terminal_inbound,terminal_outbound FROM gateway_health WHERE id=1`).Scan(
+		&cycle, &success, &poll, &relayAt, &telegramAt, &progress, &snapshot.ConsecutiveFailures, &lastFailure, &snapshot.TerminalInbound, &snapshot.TerminalOutbound)
+	if errors.Is(err, sql.ErrNoRows) {
+		return snapshot, nil
+	}
+	if err != nil || !validGatewayFailure(GatewayFailureClass(lastFailure)) {
+		return GatewayStateSnapshot{}, fmt.Errorf("gateway state unavailable")
+	}
+	snapshot.HasHealth = true
+	snapshot.HasSuccess = success.Valid
+	snapshot.HasPoll = poll.Valid
+	snapshot.HasRelay = relayAt.Valid
+	snapshot.HasTelegram = telegramAt.Valid
+	snapshot.LastFailure = GatewayFailureClass(lastFailure)
+	age := func(value sql.NullInt64) time.Duration {
+		if !value.Valid {
+			return 0
+		}
+		delta := now.UTC().Sub(time.UnixMilli(value.Int64))
+		if delta < 0 {
+			return 0
+		}
+		return delta
+	}
+	snapshot.LastCycleAge = age(cycle)
+	snapshot.LastSuccessAge = age(success)
+	snapshot.LastPollAge = age(poll)
+	snapshot.LastRelayAge = age(relayAt)
+	snapshot.LastTelegramAge = age(telegramAt)
+	snapshot.StuckHead = snapshot.ConsecutiveFailures >= 3 && age(progress) >= 5*time.Minute
+	return snapshot, nil
 }
 
 func ensureClaimExecutionChatID(db *sql.DB) error {

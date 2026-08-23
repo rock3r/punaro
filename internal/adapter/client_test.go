@@ -109,6 +109,86 @@ func TestHTTPRelayClientValidatesSenderWithoutMessageMutation(t *testing.T) {
 	}
 }
 
+func TestHTTPRelayClientDoctorProbeRequiresConfirmedOriginProtocol(t *testing.T) {
+	public, private, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	tests := []struct {
+		name       string
+		status     int
+		confirm    bool
+		protocol   string
+		wantResult DoctorProbeResult
+		wantErr    bool
+	}{
+		{name: "healthy", status: http.StatusNoContent, confirm: true, protocol: "1", wantResult: DoctorProbeResult{Transport: true, Origin: true, Access: true, Enrolled: true, Protocol: true}},
+		{name: "intermediary access rejection", status: http.StatusForbidden, wantResult: DoctorProbeResult{Transport: true}, wantErr: true},
+		{name: "origin enrollment rejection", status: http.StatusUnauthorized, confirm: true, wantResult: DoctorProbeResult{Transport: true, Origin: true, Access: true}, wantErr: true},
+		{name: "protocol mismatch", status: http.StatusNoContent, confirm: true, protocol: "2", wantResult: DoctorProbeResult{Transport: true, Origin: true, Access: true, Enrolled: true}, wantErr: true},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if r.Method != http.MethodHead || r.URL.Path != relay.DoctorPath || r.ContentLength > 0 {
+					t.Fatalf("request=%s %s length=%d", r.Method, r.URL.Path, r.ContentLength)
+				}
+				timestamp, parseErr := time.Parse(time.RFC3339Nano, r.Header.Get("X-Punaro-Timestamp"))
+				signature, signatureErr := base64.RawURLEncoding.DecodeString(r.Header.Get("X-Punaro-Signature"))
+				signed := relay.SignedRequest{MachineID: r.Header.Get("X-Punaro-Machine"), Method: r.Method, Path: r.URL.Path, Timestamp: timestamp, Nonce: r.Header.Get("X-Punaro-Nonce")}
+				if parseErr != nil || signatureErr != nil || signed.MachineID != "machine-a" || !ed25519.Verify(public, relay.CanonicalRequest(signed), signature) {
+					t.Fatal("doctor request was not signed")
+				}
+				if test.confirm {
+					w.Header().Set(relay.ResponseNonceHeader, signed.Nonce)
+				}
+				if test.protocol != "" {
+					w.Header().Set(relay.ProtocolHeader, test.protocol)
+				}
+				w.WriteHeader(test.status)
+			}))
+			defer server.Close()
+			client, err := NewHTTPRelayClient(server.URL, "machine-a", private, server.Client(), AccessServiceToken{})
+			if err != nil {
+				t.Fatal(err)
+			}
+			result, probeErr := client.Doctor(t.Context())
+			if result != test.wantResult || (probeErr != nil) != test.wantErr {
+				t.Fatalf("result=%#v err=%v", result, probeErr)
+			}
+		})
+	}
+}
+
+func TestHTTPRelayClientDoctorNotificationProbeIsContentFree(t *testing.T) {
+	_, private, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet || r.URL.Path != relay.DoctorNotificationsPath {
+			t.Fatalf("request=%s %s", r.Method, r.URL.Path)
+		}
+		w.Header().Set(relay.ResponseNonceHeader, r.Header.Get("X-Punaro-Nonce"))
+		w.Header().Set(relay.ProtocolHeader, "1")
+		connection, acceptErr := websocket.Accept(w, r, &websocket.AcceptOptions{CompressionMode: websocket.CompressionDisabled})
+		if acceptErr != nil {
+			t.Errorf("accept: %v", acceptErr)
+			return
+		}
+		_ = connection.Close(websocket.StatusNormalClosure, "")
+	}))
+	defer server.Close()
+	client, err := NewHTTPRelayClient(server.URL, "machine-a", private, server.Client(), AccessServiceToken{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	result, err := client.DoctorNotifications(t.Context())
+	if err != nil || result != (DoctorProbeResult{Transport: true, Origin: true, Access: true, Enrolled: true, Protocol: true}) {
+		t.Fatalf("result=%#v err=%v", result, err)
+	}
+}
+
 func TestHTTPRelayClientSendsToOneDurableRole(t *testing.T) {
 	_, machinePrivate, err := ed25519.GenerateKey(rand.Reader)
 	if err != nil {

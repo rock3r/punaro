@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -36,6 +37,66 @@ func TestClientFetchesMinimalTopicUpdateWithoutLeakingToken(t *testing.T) {
 	}
 	if len(updates) != 1 || updates[0].ID != 10 || updates[0].UserID != 55 || updates[0].ThreadID != 7 || updates[0].MessageID != 4 || updates[0].Text != "question" || updates[0].IsCommand {
 		t.Fatalf("updates=%#v", updates)
+	}
+}
+
+func TestClientDoctorUsesNonMutatingGetMeAndRedactsProviderResponse(t *testing.T) {
+	t.Parallel()
+	server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost || r.URL.Path != "/botsecret/getMe" {
+			t.Fatalf("unexpected doctor request %s %s", r.Method, r.URL.Path)
+		}
+		_, _ = w.Write([]byte(`{"ok":true,"result":{"id":42,"username":"provider-controlled"}}`))
+	}))
+	defer server.Close()
+	client, err := NewClient(server.URL, "secret", server.Client())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := client.Doctor(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+
+	server.Config.Handler = http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusUnauthorized)
+		_, _ = w.Write([]byte(`{"ok":false,"description":"secret provider body"}`))
+	})
+	err = client.Doctor(context.Background())
+	if err == nil || strings.Contains(err.Error(), "secret") || strings.Contains(err.Error(), server.URL) {
+		t.Fatalf("unsafe doctor error %q", err)
+	}
+}
+
+func TestClientDoctorRejectsOversizedOrCancelledProviderResponseWithoutLeakingIt(t *testing.T) {
+	const providerText = "provider-controlled-secret"
+	server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = io.WriteString(w, `{"ok":true,"result":{"id":42}}`+strings.Repeat(providerText, maxBotResponseBytes))
+	}))
+	defer server.Close()
+	client, err := NewClient(server.URL, "secret", server.Client())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := client.Doctor(context.Background()); err == nil || strings.Contains(err.Error(), providerText) || strings.Contains(err.Error(), "secret") {
+		t.Fatalf("unsafe oversized doctor error %q", err)
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	if err := client.Doctor(ctx); err == nil || strings.Contains(err.Error(), server.URL) || strings.Contains(err.Error(), "secret") {
+		t.Fatalf("unsafe cancelled doctor error %q", err)
+	}
+}
+
+func TestBotAPIStatusClassificationKeepsUnauthorizedRetryableAndDetectsDeletedTopic(t *testing.T) {
+	if PermanentBotAPIFailure(BotAPIStatusError{Method: "sendRichMessage", Status: http.StatusUnauthorized}) {
+		t.Fatal("Telegram 401 was made terminal")
+	}
+	if !PermanentBotAPIFailure(BotAPIStatusError{Method: "sendRichMessage", Status: http.StatusForbidden}) {
+		t.Fatal("Telegram 403 was not terminal")
+	}
+	if !DeletedTopicFailure(BotAPIStatusError{Method: "sendRichMessage", Status: http.StatusBadRequest, Kind: BotAPIErrorDeletedTopic}) {
+		t.Fatal("deleted topic was not classified")
 	}
 }
 

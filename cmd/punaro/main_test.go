@@ -3,7 +3,9 @@ package main
 import (
 	"bytes"
 	"context"
+	"crypto/ed25519"
 	"database/sql"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -17,6 +19,7 @@ import (
 	"time"
 
 	punarobackup "github.com/rock3r/punaro/internal/backup"
+	punarodiagnostic "github.com/rock3r/punaro/internal/diagnostic"
 	"github.com/rock3r/punaro/internal/ingress"
 	"github.com/rock3r/punaro/internal/operator"
 	punaropostgres "github.com/rock3r/punaro/internal/postgres"
@@ -435,6 +438,7 @@ func preserveDependencies(t *testing.T) {
 	originalVerify := verifyInstallationPair
 	originalStart, originalProbe, originalIssue, originalListClients, originalRevokeClient := startServices, probe, issueEnrollment, listClients, revokeClient
 	originalBackup, originalListBackups, originalVerifyBackup, originalRestore := createOperatorBackup, listOperatorBackups, verifyOperatorBackup, restoreOperatorBackup
+	originalServerDoctorInspect := serverDoctorInspect
 	t.Cleanup(func() {
 		inspectSchema, inspectOwner, migratePristinePair, maintenanceActive = originalInspect, originalOwner, originalMigrate, originalMaintenance
 		createOwner, recoverInstallationOwner = originalCreate, originalRecover
@@ -443,6 +447,7 @@ func preserveDependencies(t *testing.T) {
 		issueEnrollment = originalIssue
 		listClients, revokeClient = originalListClients, originalRevokeClient
 		createOperatorBackup, listOperatorBackups, verifyOperatorBackup, restoreOperatorBackup = originalBackup, originalListBackups, originalVerifyBackup, originalRestore
+		serverDoctorInspect = originalServerDoctorInspect
 	})
 	inspectOwner = func(context.Context, string) (punaropostgres.Principal, error) {
 		return punaropostgres.Principal{ID: "11111111-1111-4111-8111-111111111111", DisplayName: "owner"}, nil
@@ -452,6 +457,26 @@ func preserveDependencies(t *testing.T) {
 		return punaropostgres.SchemaState{Classification: punaropostgres.Compatible, Version: 5}, nil
 	}
 	maintenanceActive = func(context.Context, string) (bool, error) { return false, nil }
+	serverDoctorInspect = func(context.Context, operator.Installation) serverDoctorState {
+		return healthyServerDoctorState()
+	}
+}
+
+func healthyServerDoctorState() serverDoctorState {
+	return serverDoctorState{
+		MachineID: "punaro-lxc", Release: "v0.1.0-alpha.1", ReleaseSequence: 1, CatalogSequence: 1, Protocol: 1,
+		InstalledRelease: knownDoctorBool{Known: true, OK: true}, RunningImage: knownDoctorBool{Known: true, OK: true},
+		ComposeBinding: knownDoctorBool{Known: true, OK: true}, MigrationBinding: knownDoctorBool{Known: true, OK: true},
+		PostgresMajor: 18, PostgresKnown: true, Storage: knownDoctorBool{Known: true, OK: true},
+		BackupAvailable: knownDoctorBool{Known: true, OK: true}, BackupFresh: knownDoctorBool{Known: true, OK: true},
+		UpdateTransaction: knownDoctorBool{Known: true, OK: true}, RecoveryReceipt: knownDoctorBool{Known: true, OK: true}, UpdateRecovery: knownDoctorBool{Known: true, OK: true}, DatabasePrivate: knownDoctorBool{Known: true, OK: true},
+		HealthPrivate: knownDoctorBool{Known: true, OK: true}, AdminPrivate: knownDoctorBool{Known: true, OK: true},
+		BlobPrivate: knownDoctorBool{Known: true, OK: true}, TunnelRoute: knownDoctorBool{Known: true, OK: true},
+		TunnelOrigin: knownDoctorBool{Known: true, OK: true}, AccessAdmission: knownDoctorBool{Known: true, OK: true},
+		RelayEnrollment: knownDoctorBool{Known: true, OK: true}, RelayProtocol: knownDoctorBool{Known: true, OK: true}, GatewayInstalled: knownDoctorBool{Known: true, OK: true},
+		GatewayEnabled: knownDoctorBool{Known: true, OK: true}, GatewayRunning: knownDoctorBool{Known: true, OK: true}, GatewayExecutable: knownDoctorBool{Known: true, OK: true},
+		GatewayExitStatus: knownDoctorBool{Known: true, OK: true}, GatewayRestartState: knownDoctorBool{Known: true, OK: true}, GatewayRelease: knownDoctorBool{Known: true, OK: true},
+	}
 }
 
 func TestUpRefusesActiveUpdateBeforeStartingWriters(t *testing.T) {
@@ -729,7 +754,7 @@ func TestDoctorClassifiesOldSchemaBeforeRolePair(t *testing.T) {
 	verifyInstallationPair = func(context.Context, string, string) error { pairChecked = true; return errors.New("must not run") }
 	probe = func(context.Context, string) error { return nil }
 	var stdout, stderr bytes.Buffer
-	if code := run([]string{"doctor", "--directory", directory}, &stdout, &stderr); code != 1 || pairChecked || !strings.Contains(stdout.String(), "schema not compatible") || strings.Contains(stdout.String(), "database roles target different") {
+	if code := run([]string{"doctor", "--directory", directory}, &stdout, &stderr); code != 1 || pairChecked || !strings.Contains(stdout.String(), `"code": "database_schema"`) || !strings.Contains(stdout.String(), `"code": "database_pair"`) || !strings.Contains(stdout.String(), `"status": "unavailable"`) {
 		t.Fatalf("code=%d pairChecked=%t stdout=%q stderr=%q", code, pairChecked, stdout.String(), stderr.String())
 	}
 }
@@ -810,8 +835,154 @@ func TestDoctorFailsForConfigurationDriftAndRoleMismatch(t *testing.T) {
 	}
 	probe = func(context.Context, string) error { return nil }
 	var stdout, stderr bytes.Buffer
-	if code := run([]string{"doctor", "--directory", directory}, &stdout, &stderr); code != 1 || !strings.Contains(stdout.String(), `"healthy": false`) || !strings.Contains(stdout.String(), "database roles target different installations") || !strings.Contains(stdout.String(), "backup directory") {
+	if code := run([]string{"doctor", "--directory", directory}, &stdout, &stderr); code != 1 || !strings.Contains(stdout.String(), `"healthy": false`) || !strings.Contains(stdout.String(), `"code": "database_pair"`) || !strings.Contains(stdout.String(), `"code": "backup_directory"`) {
 		t.Fatalf("code=%d stdout=%q stderr=%q", code, stdout.String(), stderr.String())
+	}
+}
+
+func TestDoctorEmitsStrictContentFreeServerReport(t *testing.T) {
+	preserveDependencies(t)
+	directory := testInstallation(t)
+	inspectSchema = func(context.Context, string) (punaropostgres.SchemaState, error) {
+		return punaropostgres.SchemaState{Classification: punaropostgres.Compatible, Version: 44}, nil
+	}
+	probe = func(context.Context, string) error { return nil }
+	var stdout, stderr bytes.Buffer
+	if code := run([]string{"doctor", "--directory", directory}, &stdout, &stderr); code != 0 {
+		t.Fatalf("code=%d stdout=%q stderr=%q", code, stdout.String(), stderr.String())
+	}
+	report, err := punarodiagnostic.Decode(bytes.NewReader(stdout.Bytes()))
+	if err != nil || report.Component != punarodiagnostic.ComponentServer || !report.Healthy || report.Identity.StorageSchema != 44 || report.Identity.ArtifactDigest != "sha256:"+strings.Repeat("a", 64) {
+		t.Fatalf("report=%#v err=%v stderr=%q", report, err, stderr.String())
+	}
+	for _, forbidden := range []string{directory, "postgres://", "invalid", "127.0.0.1", "registry.example"} {
+		if strings.Contains(stdout.String(), forbidden) {
+			t.Fatalf("doctor leaked %q: %s", forbidden, stdout.String())
+		}
+	}
+}
+
+func TestDoctorClassifiesEveryExtendedServerDependency(t *testing.T) {
+	preserveDependencies(t)
+	directory := testInstallation(t)
+	inspectSchema = func(context.Context, string) (punaropostgres.SchemaState, error) {
+		return punaropostgres.SchemaState{Classification: punaropostgres.Compatible, Version: 44}, nil
+	}
+	probe = func(context.Context, string) error { return nil }
+	state := healthyServerDoctorState()
+	state.Release = "v0.1.0-alpha.2"
+	state.ReleaseSequence = 2
+	state.CatalogSequence = 4
+	state.InstalledRelease.OK = false
+	state.RunningImage.OK = false
+	state.ComposeBinding.OK = false
+	state.MigrationBinding.Known = false
+	state.PostgresKnown = false
+	state.Storage.OK = false
+	state.BackupAvailable.OK = false
+	state.BackupFresh.Known = false
+	state.UpdateTransaction.OK = false
+	state.RecoveryReceipt.Known = false
+	state.UpdateRecovery.OK = false
+	state.DatabasePrivate.OK = false
+	state.HealthPrivate.OK = false
+	state.AdminPrivate.OK = false
+	state.BlobPrivate.OK = false
+	state.TunnelRoute.OK = false
+	state.TunnelOrigin.OK = false
+	state.AccessAdmission.Known = false
+	state.RelayEnrollment.OK = false
+	state.RelayProtocol.Known = false
+	state.GatewayInstalled.OK = false
+	state.GatewayEnabled.OK = false
+	state.GatewayRunning.Known = false
+	state.GatewayExecutable.OK = false
+	state.GatewayExitStatus.Known = false
+	state.GatewayRestartState.OK = false
+	state.GatewayRelease.OK = false
+	serverDoctorInspect = func(context.Context, operator.Installation) serverDoctorState { return state }
+
+	var stdout, stderr bytes.Buffer
+	if code := run([]string{"doctor", "--directory", directory}, &stdout, &stderr); code != 1 {
+		t.Fatalf("code=%d stdout=%q stderr=%q", code, stdout.String(), stderr.String())
+	}
+	report, err := punarodiagnostic.Decode(bytes.NewReader(stdout.Bytes()))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if report.Identity.Release != state.Release || report.Identity.ReleaseSequence != state.ReleaseSequence || report.Identity.CatalogSequence != state.CatalogSequence || report.Identity.Platform == "" {
+		t.Fatalf("identity=%#v", report.Identity)
+	}
+	want := map[string]punarodiagnostic.Status{
+		"installed_release": "fail", "running_image": "fail", "compose_manifest_binding": "fail",
+		"migration_manifest_binding": "unavailable", "postgres_major": "unavailable", "storage_capacity": "fail",
+		"verified_backup": "fail", "backup_freshness": "unavailable", "update_transaction": "fail", "recovery_receipt": "unavailable", "update_recovery": "fail",
+		"database_listener_private": "fail", "health_listener_private": "fail", "administration_listener_private": "fail",
+		"blob_storage_private": "fail", "tunnel_route": "fail", "access_admission": "unavailable",
+		"tunnel_origin": "fail", "relay_enrollment": "fail", "relay_protocol": "unavailable",
+		"gateway_service_installed": "fail", "gateway_service_running": "unavailable", "gateway_release": "fail",
+		"gateway_service_enabled": "fail", "gateway_service_executable": "fail", "gateway_service_last_exit": "unavailable", "gateway_service_restart_state": "fail",
+	}
+	for _, check := range report.Checks {
+		if status, ok := want[check.Code]; ok {
+			if check.Status != status {
+				t.Fatalf("check %s=%s want %s", check.Code, check.Status, status)
+			}
+			delete(want, check.Code)
+		}
+	}
+	if len(want) != 0 {
+		t.Fatalf("missing checks: %v", want)
+	}
+}
+
+func TestServerDoctorProfileLoadsOnlyProtectedLeastPrivilegeInputs(t *testing.T) {
+	root := t.TempDir()
+	if runtime.GOOS != "windows" {
+		if err := os.Chmod(root, 0o700); err != nil { // #nosec G302 -- directory must be owner-only executable.
+			t.Fatal(err)
+		}
+	}
+	write := func(name, body string, mode os.FileMode) string {
+		path := filepath.Join(root, name)
+		if err := os.WriteFile(path, []byte(body), mode); err != nil {
+			t.Fatal(err)
+		}
+		return path
+	}
+	privateKey := ed25519.NewKeyFromSeed(make([]byte, ed25519.SeedSize))
+	keyPath := write("doctor.key", base64.RawURLEncoding.EncodeToString(privateKey), 0o600)
+	accessPath := write("access.env", "PUNARO_CF_ACCESS_CLIENT_ID=doctor-id\nPUNARO_CF_ACCESS_CLIENT_SECRET=doctor-secret\n", 0o600)
+	profilePath := write("doctor.env", "PUNARO_SERVER_DOCTOR_RELAY_URL=https://punaro.example\nPUNARO_SERVER_DOCTOR_MACHINE_ID=server-doctor\nPUNARO_SERVER_DOCTOR_PRIVATE_KEY_FILE="+keyPath+"\nPUNARO_SERVER_DOCTOR_ACCESS_TOKEN_FILE="+accessPath+"\n", 0o600)
+	profile, err := loadServerDoctorProfile(profilePath)
+	if err != nil || profile.RelayURL != "https://punaro.example" || profile.MachineID != "server-doctor" || len(profile.PrivateKey) != ed25519.PrivateKeySize || profile.AccessToken.ClientID != "doctor-id" || profile.AccessToken.ClientSecret != "doctor-secret" {
+		t.Fatalf("protected server doctor profile did not load: %v", err)
+	}
+
+	if runtime.GOOS != "windows" {
+		if err := os.Chmod(accessPath, 0o644); err != nil { // #nosec G302 -- deliberate insecure-permission diagnostic fixture.
+			t.Fatal(err)
+		}
+		if _, err := loadServerDoctorProfile(profilePath); err == nil || strings.Contains(err.Error(), "doctor-secret") || strings.Contains(err.Error(), accessPath) {
+			t.Fatalf("unsafe profile error=%q", err)
+		}
+	}
+}
+
+func TestServerDoctorRequiresRecoveryReceiptAtIrreversibleUpdateBoundary(t *testing.T) {
+	for _, phase := range []punaropostgres.UpdatePhase{
+		punaropostgres.UpdateBackupVerified, punaropostgres.UpdateMigrationStarted, punaropostgres.UpdateMigrated,
+		punaropostgres.UpdateCandidateReady, punaropostgres.UpdateDoctorPassed, punaropostgres.UpdateConfigPublished,
+		punaropostgres.UpdateRecoveryRequired, punaropostgres.UpdateRecoveryReady, punaropostgres.UpdateRecoveryDoctor, punaropostgres.UpdateRecoveryConfig,
+	} {
+		if !updatePhaseRequiresRecoveryReceipt(phase) {
+			t.Fatalf("phase %s did not require recovery receipt", phase)
+		}
+	}
+	for _, phase := range []punaropostgres.UpdatePhase{punaropostgres.UpdateFenced, punaropostgres.UpdateWritersStopped, punaropostgres.UpdateCommitted, punaropostgres.UpdateRecovered, punaropostgres.UpdateAborted} {
+		if updatePhaseRequiresRecoveryReceipt(phase) {
+			t.Fatalf("phase %s unexpectedly required recovery receipt", phase)
+		}
 	}
 }
 

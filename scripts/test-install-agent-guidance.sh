@@ -39,6 +39,7 @@ for file in "$project/AGENTS.md" "$project/CLAUDE.md"; do
 	grep -Fq 'or the session has a claimed topic' "$file" && { printf '%s\n' 'installed guidance still routes claimed-topic sessions to user-telegram' >&2; exit 1; }
 	grep -Fq 'envelope is from `user-telegram`' "$file" || { printf '%s\n' 'installed guidance omitted telegram-origin restriction' >&2; exit 1; }
 	grep -Fq 'Proactive Telegram pings' "$file" || { printf '%s\n' 'installed guidance omitted proactive Telegram pings' >&2; exit 1; }
+	grep -Fq 'punaro-adapter doctor --plugin-root' "$file" || { printf '%s\n' 'installed guidance omitted read-only doctor readiness' >&2; exit 1; }
 done
 [ -f "$project/.agents/skills/punaro-mailbox/SKILL.md" ]
 [ -f "$project/.agents/skills/punaro-reply/SKILL.md" ]
@@ -76,6 +77,7 @@ for installer in "$repo_dir/scripts/install-agent-guidance.sh" "$repo_dir/script
 	require_phrase "$installer" 'envelope is from `user-telegram`'
 	require_phrase "$installer" 'Proactive Telegram pings'
 	require_phrase "$installer" 'predates telegram-origin-only send'
+	require_phrase "$installer" 'punaro-adapter doctor --plugin-root'
 done
 
 linked_project="$fixture_dir/linked-project"

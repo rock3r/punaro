@@ -6,8 +6,9 @@ never supplies a download URL, installer script, or unsigned `latest` pointer.
 
 This is the release-trust slice of
 [`client-lifecycle-compatibility-recovery-rfc.md`](client-lifecycle-compatibility-recovery-rfc.md).
-It is not yet a signed official release and does not implement enrollment,
-fleet rollout, or the recovery HTTP surface.
+The workflow produces a draft unsigned candidate; an operator publishes it
+only after the offline signatures and release evidence are attached. Enrollment
+and host-local update recovery remain separate from release publication.
 
 ## Fixed origin
 
@@ -49,7 +50,10 @@ gh workflow run macos-notarize.yml --repo rock3r/punaro --ref <branch>
 
 ## What CI publishes
 
-The `release` workflow dispatch builds:
+The `release` workflow first publishes the Linux/amd64 gateway image to GHCR
+with OCI SBOM and provenance attestations, captures its registry digest, and
+binds that exact `ghcr.io/rock3r/punaro@sha256:...` identity into the release
+manifest and native build provenance. It then builds:
 
 - `punaro-adapter`, `punaro-trusted-attachment`, `punaro-memory`,
   `punaro-enroll`, and `punaro-bootstrap` for `darwin/arm64`, `linux/amd64`,
@@ -74,6 +78,14 @@ the origin path stays stable. Replacing it does not make the catalog trusted.
 2. Run the `release` workflow with an explicit release name and sequence. Do
    not publish by pushing a tag; the workflow is dispatch-only so the sequence
    cannot race a live repo variable. Overlapping dispatch runs queue.
+
+   ```sh
+   gh workflow run release.yml --repo rock3r/punaro --ref main \
+     -f release=v0.1.0-alpha.1 \
+     -f sequence=1 \
+     -f catalog_sequence=1 \
+     -f draft=true
+   ```
 3. Wait for the draft release and the `catalog` prerelease to appear.
 4. Generate the offline key once, on an air-gapped or owner-only machine, and
    keep the private file `0600` off this repository:
@@ -104,10 +116,22 @@ the origin path stays stable. Replacing it does not make the catalog trusted.
      --signature punaro-release.sig
    ```
 
-6. Upload the two `.sig` files to the versioned release and
-   `punaro-catalog.sig` to the `catalog` prerelease. Pass that public key set
-   to `punaro-bootstrap update --keys-file`. Do not embed a production key
-   until the first official signed release exists.
+6. Put the downloaded manifest/catalog and both offline signatures in one
+   private directory. Publish only after the tool re-verifies both signatures
+   and proves the draft contains the exact signed bytes:
+
+   ```sh
+   ./scripts/publish-signed-release.sh \
+     --release v0.1.0-alpha.1 \
+     --dir /absolute/private/signed-alpha.1 \
+     --keys-file /absolute/private/punaro-release.pub
+   ```
+
+   The publisher makes the immutable versioned prerelease available first,
+   then replaces the live catalog signature and JSON. The unsigned build
+   workflow never touches the live catalog. Pass the public key set to
+   `punaro-bootstrap update --keys-file`. Do not embed a production key until
+   the first official signed release exists.
 7. An official maintained release still requires the
    [security release gates](security-release-gates.md) and a
    [release-evidence record](release-evidence/README.md). This origin does not
@@ -116,18 +140,24 @@ the origin path stays stable. Replacing it does not make the catalog trusted.
 ## Local assembly
 
 ```sh
-./scripts/build-release-artifacts.sh --output-dir ./dist
+./scripts/build-release-artifacts.sh \
+  --output-dir ./dist \
+  --release v0.1.0-alpha.1 \
+  --sequence 1 \
+  --catalog-sequence 1 \
+  --image ghcr.io/rock3r/punaro@sha256:IMAGE_DIGEST
 go run ./cmd/punaro-release assemble \
   --dir ./dist \
-  --release v0.1.0 \
+  --release v0.1.0-alpha.1 \
   --sequence 1 \
-  --catalog-sequence 1
+  --catalog-sequence 1 \
+  --image ghcr.io/rock3r/punaro@sha256:IMAGE_DIGEST
 go run ./cmd/punaro-release validate --dir ./dist
 ```
 
 `assemble` hashes `deploy/compose/production.yaml` and the embedded migration
-manifest. A digest-pinned gateway image is optional until GHCR publication
-exists; when present it must be `@sha256:` and `release_sha256` must match.
+manifest. Published releases require the workflow-produced digest-pinned GHCR
+image; it must be `@sha256:` and `release_sha256` must match.
 
 ## Bootstrap pull
 
@@ -169,9 +199,11 @@ omitted. Source installers may `seed-checkout` a reviewed local adapter as
 exits successfully so platform services do not restart-loop; a crash after a
 healthy child still fails the supervisor so the service can restart.
 
-## Still outstanding
+## Deliberately offline or separately gated
 
-- embedding the production public key in that bootstrap
-- GHCR image publication and a required `image` digest
-- SBOM, provenance attestations, and offline recovery bundles
-- gateway desired-release store and fleet rollout
+- The production release public key is supplied out of band until an approved
+  transition bootstrap embeds it; the private key never enters CI.
+- Offline recovery bundles and key-compromise re-key remain a separate
+  high-authority process.
+- Fleet rollout mutation remains an operator workflow. `fleet-doctor` provides
+  the signed, read-only cross-machine release/protocol/schema/plugin/skill gate.

@@ -2,6 +2,7 @@ package telegram
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"strings"
 
@@ -33,6 +34,51 @@ type Bridge struct {
 	Log      func(string, ...any)
 }
 
+// GatewayCyclePhase is a closed local failure boundary used only for retry
+// classification. It contains no delivery or provider data.
+type GatewayCyclePhase string
+
+// Supported gateway cycle phases.
+const (
+	GatewayPhaseAdvertise GatewayCyclePhase = "advertise"
+	GatewayPhaseClaim     GatewayCyclePhase = "claim"
+	GatewayPhasePoll      GatewayCyclePhase = "poll"
+	GatewayPhaseInbound   GatewayCyclePhase = "inbound"
+	GatewayPhaseLease     GatewayCyclePhase = "lease"
+	GatewayPhaseSend      GatewayCyclePhase = "send"
+	GatewayPhaseAck       GatewayCyclePhase = "ack"
+)
+
+// GatewayCycleError preserves only the local phase while retaining the
+// wrapped typed error for content-free terminal/transient classification.
+type GatewayCycleError struct {
+	Phase GatewayCyclePhase
+	Err   error
+}
+
+func (e *GatewayCycleError) Error() string { return "telegram gateway cycle failed" }
+func (e *GatewayCycleError) Unwrap() error { return e.Err }
+
+// ClassifyGatewayCycleFailure maps typed local failures to the durable doctor
+// ledger without inspecting arbitrary error strings.
+func ClassifyGatewayCycleFailure(err error) GatewayFailureClass {
+	if DeletedTopicFailure(err) {
+		return GatewayFailureDeletedTopic
+	}
+	var status BotAPIStatusError
+	if errors.As(err, &status) && status.Method == "getUpdates" && PermanentBotAPIFailure(err) {
+		return GatewayFailureMessageLessPoll
+	}
+	if PermanentBotAPIFailure(err) {
+		return GatewayFailureOutboundTelegramPermanent
+	}
+	var permanentRelay interface{ PermanentRelayFailure() bool }
+	if errors.As(err, &permanentRelay) && permanentRelay.PermanentRelayFailure() {
+		return GatewayFailureInboundRelayPermanent
+	}
+	return GatewayFailureTransient
+}
+
 // SyncOnce renews gateway attachment, resumes incomplete claims, processes one
 // inbound Telegram page, then sends and acknowledges its durable outbound
 // deliveries. Claim recovery runs before polling so a routed-but-incomplete
@@ -43,32 +89,37 @@ func (b Bridge) SyncOnce(ctx context.Context, offset int64) (int64, error) {
 		return offset, fmt.Errorf("telegram bridge is not configured")
 	}
 	if err := b.Relay.Advertise(ctx, []string{b.Endpoint}); err != nil {
-		return offset, fmt.Errorf("advertise telegram gateway endpoint: %w", err)
+		return offset, &GatewayCycleError{Phase: GatewayPhaseAdvertise, Err: err}
 	}
 	if b.Claims != nil {
 		if err := b.Claims.ResumeAll(ctx); err != nil {
-			return offset, err
+			return offset, &GatewayCycleError{Phase: GatewayPhaseClaim, Err: err}
 		}
 		if err := b.Claims.StartPending(ctx); err != nil {
-			return offset, err
+			return offset, &GatewayCycleError{Phase: GatewayPhaseClaim, Err: err}
 		}
 	}
 	next, err := (Runner{Poller: b.Poller, Gateway: b.Gateway}).RunOnce(ctx, offset)
 	if err != nil {
-		return offset, err
+		phase := GatewayPhaseInbound
+		var status BotAPIStatusError
+		if errors.As(err, &status) && status.Method == "getUpdates" {
+			phase = GatewayPhasePoll
+		}
+		return offset, &GatewayCycleError{Phase: phase, Err: err}
 	}
 	deliveries, err := b.Relay.Lease(ctx, b.Endpoint)
 	if err != nil {
-		return next, fmt.Errorf("lease Telegram gateway deliveries: %w", err)
+		return next, &GatewayCycleError{Phase: GatewayPhaseLease, Err: err}
 	}
 	for _, delivery := range deliveries {
 		if err := SendDelivery(ctx, b.State, b.Sender, delivery, b.Gateway.AllowedUserID); err != nil {
 			b.logEvent("telegram_send_err", "delivery_id="+delivery.ID)
-			return next, fmt.Errorf("send Telegram delivery %q: %w", delivery.ID, err)
+			return next, &GatewayCycleError{Phase: GatewayPhaseSend, Err: err}
 		}
 		b.logEvent("telegram_send_ok", "delivery_id="+delivery.ID)
 		if err := b.Relay.Ack(ctx, delivery); err != nil {
-			return next, fmt.Errorf("acknowledge Telegram delivery %q: %w", delivery.ID, err)
+			return next, &GatewayCycleError{Phase: GatewayPhaseAck, Err: err}
 		}
 	}
 	return next, nil

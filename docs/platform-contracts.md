@@ -669,8 +669,10 @@ capability, merge/membership administration, backup, and restore.
 
 ## OCI and Compose contract
 
-The release publishes one semantically versioned, digest-addressable Punaro
-application image for Linux amd64 and arm64. Role subcommands cover server,
+The first alpha release publishes one semantically versioned,
+digest-addressable Punaro application image for the Linux/amd64 LXC host plus
+native client artifacts for the documented Darwin, Linux, and Windows matrix.
+An arm64 server image remains a later platform expansion. Role subcommands cover server,
 worker, gateway, migration, administration, and supported backup operations.
 An SBOM, vulnerability scan, database compatibility range, rollback floor,
 Compose bundle, and migration/backup release notes accompany it. `latest` is

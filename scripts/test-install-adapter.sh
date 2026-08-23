@@ -56,6 +56,9 @@ mailbox_log="$fixture_dir/mailbox.log"
 guidance_project="$fixture_dir/project"
 mailbox_state="$fixture_dir/custom-mailbox"
 mkdir -p "$home" "$guidance_project"
+# Prove the installer establishes privacy itself instead of inheriting a
+# restrictive caller umask.
+umask 022
 
 cat >"$mailbox" <<'EOF'
 #!/bin/sh
@@ -120,6 +123,7 @@ fi
 [ "$(file_mode "$key")" = 600 ] || { printf '%s\n' 'machine key permissions are not 0600' >&2; exit 1; }
 [ "$(file_mode "$config")" = 600 ] || { printf '%s\n' 'adapter environment permissions are not 0600' >&2; exit 1; }
 [ "$(file_mode "$enrollment")" = 600 ] || { printf '%s\n' 'enrollment record permissions are not 0600' >&2; exit 1; }
+[ "$(file_mode "$mailbox_state")" = 700 ] || { printf '%s\n' 'mailbox state directory permissions are not 0700' >&2; exit 1; }
 
 grep -Fqx 'PUNARO_ADAPTER_RELAY_URL=https://relay.example.test' "$config"
 grep -Fqx 'PUNARO_MACHINE_ID=macbook' "$config"

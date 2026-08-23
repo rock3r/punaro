@@ -665,6 +665,12 @@ Corrupt or incompatible database state is not repaired by installing a newer
 binary. Recovery remains fenced and follows the existing verified-backup
 restore workflow into safe paths.
 
+Every online preflight, candidate handoff, rollback, and interrupted-update
+recovery uses the same bounded non-mutating component doctor contract described
+in [doctor.md](doctor.md). Bootstrap and fleet doctor verify signed release
+state independently; a remediation identifier is evidence for an operator and
+is never executed as a command or treated as remote repair authority.
+
 ### Offline recovery bundle
 
 Every named release publishes one signed bundle containing:

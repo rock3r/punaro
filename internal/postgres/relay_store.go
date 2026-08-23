@@ -23,8 +23,31 @@ var _ relay.DirectMessageBackend = (*Database)(nil)
 var _ relay.ControlBackend = (*Database)(nil)
 var _ relay.DisplayNameBackend = (*Database)(nil)
 var _ relay.TelegramClaimBackend = (*Database)(nil)
+var _ relay.AttachmentDoctorBackend = (*Database)(nil)
 
 const postgresRelayMaxMessageBytes = 32 << 10
+
+// DoctorAttachments returns bounded aggregate lease state without renewing or
+// deleting endpoints or role bindings.
+func (d *Database) DoctorAttachments(machineID string, now time.Time) (relay.AttachmentDoctorSnapshot, error) {
+	if !relay.ValidMachineID(machineID) {
+		return relay.AttachmentDoctorSnapshot{}, relay.ErrForbidden
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), operationTimeout)
+	defer cancel()
+	var snapshot relay.AttachmentDoctorSnapshot
+	if err := d.relayPool().QueryRowContext(ctx, `SELECT
+		count(*) FILTER (WHERE lease_until > $2), count(*) FILTER (WHERE lease_until <= $2)
+		FROM relay.mail_endpoints WHERE machine_id = $1`, machineID, now.UTC()).Scan(&snapshot.ActiveEndpoints, &snapshot.ExpiredEndpoints); err != nil {
+		return relay.AttachmentDoctorSnapshot{}, relayDatabaseError(err, "inspect endpoint attachments")
+	}
+	if err := d.relayPool().QueryRowContext(ctx, `SELECT
+		count(*) FILTER (WHERE lease_until > $2), count(*) FILTER (WHERE lease_until <= $2)
+		FROM relay.mail_role_bindings WHERE machine_id = $1`, machineID, now.UTC()).Scan(&snapshot.ActiveRoles, &snapshot.ExpiredRoles); err != nil {
+		return relay.AttachmentDoctorSnapshot{}, relayDatabaseError(err, "inspect role attachments")
+	}
+	return snapshot, nil
+}
 
 // ConsumeRequestNonce atomically consumes one signed-request replay token
 // through the schema-owner routine. The application role cannot delete nonce

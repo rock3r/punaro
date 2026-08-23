@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"crypto/ed25519"
 	"crypto/rand"
@@ -8,8 +9,13 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
+	"time"
 
+	"github.com/rock3r/punaro/internal/adapter"
+	punarodiagnostic "github.com/rock3r/punaro/internal/diagnostic"
+	"github.com/rock3r/punaro/internal/relay"
 	"github.com/rock3r/punaro/internal/telegram"
 )
 
@@ -20,6 +26,23 @@ func TestParseRouteRequiresExactTopicAndConversation(t *testing.T) {
 	}
 	if _, err := parseRoute([]string{"--chat-id", "100", "--conversation", "conversation-1"}); err == nil {
 		t.Fatal("route without thread ID accepted")
+	}
+}
+
+func TestTelegramServiceBindingRejectsStaleDefinitions(t *testing.T) {
+	valid := "[Service]\nExecStart=/usr/local/bin/punaro-telegram\n"
+	if !telegramServiceFileBound("linux", valid) {
+		t.Fatal("valid system service rejected")
+	}
+	for _, stale := range []string{
+		"[Service]\nExecStart=/home/user/punaro-telegram\n",
+		valid + "ExecStart=/usr/local/bin/punaro-telegram\n",
+		"[Service]\nExecStart=/usr/local/bin/punaro-adapter\n",
+		"[Service]\n# ExecStart=/usr/local/bin/punaro-telegram\nExecStart=/usr/local/bin/punaro-adapter\n",
+	} {
+		if telegramServiceFileBound("linux", stale) {
+			t.Fatalf("stale system service accepted: %q", stale)
+		}
 	}
 }
 
@@ -237,4 +260,178 @@ func TestLoadConfigAcceptsOnlyCompleteExplicitLANPolicy(t *testing.T) {
 	if !config.transportPolicy.AllowLANHTTP || config.transportPolicy.TrustedLANCIDR != "192.168.1.0/24" {
 		t.Fatalf("transport policy=%#v", config.transportPolicy)
 	}
+}
+
+func TestTelegramDoctorProducesStrictHealthyContentFreeReport(t *testing.T) {
+	directory := configureTelegramDoctorTest(t)
+	now := time.Date(2026, 8, 23, 12, 0, 0, 0, time.UTC)
+	state, err := telegram.Open(filepath.Join(directory, "telegram.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := state.RecordGatewayCycle(telegram.GatewayCycleRecord{At: now.Add(-time.Minute), Offset: 4, PollOK: true, RelayOK: true, TelegramOK: true}); err != nil {
+		t.Fatal(err)
+	}
+	if err := state.Close(); err != nil {
+		t.Fatal(err)
+	}
+	setTelegramDoctorFakes(t, now, adapter.DoctorProbeResult{Transport: true, Origin: true, Access: true, Enrolled: true, Protocol: true, Attached: true}, nil)
+
+	var stdout, stderr bytes.Buffer
+	if code := runTelegramDoctor([]string{"--timeout", "2s"}, &stdout, &stderr); code != 0 {
+		t.Fatalf("exit=%d stderr=%q report=%s", code, stderr.String(), stdout.String())
+	}
+	report, err := punarodiagnostic.Decode(bytes.NewReader(stdout.Bytes()))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if report.Component != punarodiagnostic.ComponentTelegram || report.Identity.MachineID != "telegram-machine" || report.Identity.Release != "v0.1.0-alpha.1" || report.Identity.Protocol != relay.ProtocolVersion || !report.Healthy {
+		t.Fatalf("report=%#v", report)
+	}
+	for _, secret := range []string{"bot-secret", "access-secret", directory, "relay.example"} {
+		if strings.Contains(stdout.String(), secret) || strings.Contains(stderr.String(), secret) {
+			t.Fatalf("doctor leaked %q", secret)
+		}
+	}
+}
+
+func TestTelegramDoctorSeparatesRelayBotAndDurableFailureClasses(t *testing.T) {
+	directory := configureTelegramDoctorTest(t)
+	now := time.Date(2026, 8, 23, 12, 0, 0, 0, time.UTC)
+	state, err := telegram.Open(filepath.Join(directory, "telegram.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for range 3 {
+		if err := state.RecordGatewayCycle(telegram.GatewayCycleRecord{At: now.Add(-10 * time.Minute), Offset: 4, Failure: telegram.GatewayFailureInboundRelayPermanent}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := state.Close(); err != nil {
+		t.Fatal(err)
+	}
+	setTelegramDoctorFakes(t, now, adapter.DoctorProbeResult{Transport: true, Origin: true, Access: false}, fmt.Errorf("provider secret body"))
+
+	var stdout, stderr bytes.Buffer
+	if code := runTelegramDoctor(nil, &stdout, &stderr); code != 1 {
+		t.Fatalf("exit=%d stderr=%q report=%s", code, stderr.String(), stdout.String())
+	}
+	report, err := punarodiagnostic.Decode(bytes.NewReader(stdout.Bytes()))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for code, want := range map[string]punarodiagnostic.Status{
+		"relay_access":               punarodiagnostic.StatusFail,
+		"notification_access":        punarodiagnostic.StatusFail,
+		"bot_api":                    punarodiagnostic.StatusFail,
+		"terminal_inbound_rejection": punarodiagnostic.StatusFail,
+		"stuck_head_delivery":        punarodiagnostic.StatusFail,
+	} {
+		if got := telegramDoctorStatus(report, code); got != want {
+			t.Fatalf("%s=%s want %s", code, got, want)
+		}
+	}
+	if strings.Contains(stdout.String(), "provider") || strings.Contains(stderr.String(), "provider") {
+		t.Fatal("provider error leaked")
+	}
+}
+
+func TestTelegramDoctorReportsEveryDurableGatewayFailureClassSeparately(t *testing.T) {
+	for name, test := range map[string]struct {
+		class telegram.GatewayFailureClass
+		code  string
+	}{
+		"message less poll":  {telegram.GatewayFailureMessageLessPoll, "message_less_update_stall"},
+		"transient retry":    {telegram.GatewayFailureTransient, "transient_retry_stall"},
+		"outbound permanent": {telegram.GatewayFailureOutboundTelegramPermanent, "terminal_outbound_rejection"},
+		"deleted topic":      {telegram.GatewayFailureDeletedTopic, "deleted_topic_target"},
+	} {
+		t.Run(name, func(t *testing.T) {
+			directory := configureTelegramDoctorTest(t)
+			now := time.Date(2026, 8, 23, 12, 0, 0, 0, time.UTC)
+			state, err := telegram.Open(filepath.Join(directory, "telegram.db"))
+			if err != nil {
+				t.Fatal(err)
+			}
+			for range 3 {
+				if err := state.RecordGatewayCycle(telegram.GatewayCycleRecord{At: now.Add(-10 * time.Minute), Offset: 4, Failure: test.class}); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if err := state.Close(); err != nil {
+				t.Fatal(err)
+			}
+			setTelegramDoctorFakes(t, now, adapter.DoctorProbeResult{Transport: true, Origin: true, Access: true, Enrolled: true, Protocol: true, Attached: true}, nil)
+			var stdout, stderr bytes.Buffer
+			if code := runTelegramDoctor(nil, &stdout, &stderr); code != 1 {
+				t.Fatalf("exit=%d stderr=%q report=%s", code, stderr.String(), stdout.String())
+			}
+			report, err := punarodiagnostic.Decode(bytes.NewReader(stdout.Bytes()))
+			if err != nil || telegramDoctorStatus(report, test.code) != punarodiagnostic.StatusFail {
+				t.Fatalf("code=%s status=%s err=%v", test.code, telegramDoctorStatus(report, test.code), err)
+			}
+		})
+	}
+}
+
+func configureTelegramDoctorTest(t *testing.T) string {
+	t.Helper()
+	_, private, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	directory := t.TempDir()
+	keyFile := filepath.Join(directory, "machine.key")
+	botFile := filepath.Join(directory, "bot.credential")
+	accessFile := filepath.Join(directory, "access.credential")
+	if err := os.WriteFile(keyFile, []byte(base64.RawURLEncoding.EncodeToString(private)), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(botFile, []byte("bot-secret"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(accessFile, []byte("PUNARO_CF_ACCESS_CLIENT_ID=access-id\nPUNARO_CF_ACCESS_CLIENT_SECRET=access-secret\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PUNARO_ADAPTER_RELAY_URL", "https://relay.example")
+	t.Setenv("PUNARO_MACHINE_ID", "telegram-machine")
+	t.Setenv("PUNARO_MACHINE_PRIVATE_KEY_FILE", keyFile)
+	t.Setenv("PUNARO_TELEGRAM_BOT_TOKEN", "")
+	t.Setenv("PUNARO_TELEGRAM_BOT_TOKEN_FILE", botFile)
+	t.Setenv("PUNARO_TELEGRAM_ACCESS_TOKEN_FILE", accessFile)
+	t.Setenv("PUNARO_CF_ACCESS_CLIENT_ID", "")
+	t.Setenv("PUNARO_CF_ACCESS_CLIENT_SECRET", "")
+	t.Setenv("PUNARO_TELEGRAM_ALLOWED_USER_ID", "55")
+	t.Setenv("PUNARO_TELEGRAM_GATEWAY_ENDPOINT", relay.TelegramGatewayEndpoint)
+	t.Setenv("PUNARO_TELEGRAM_STATE_DIR", directory)
+	return directory
+}
+
+func setTelegramDoctorFakes(t *testing.T, now time.Time, relayResult adapter.DoctorProbeResult, botErr error) {
+	t.Helper()
+	oldRelay, oldNotifications := telegramDoctorRelayProbe, telegramDoctorNotificationProbe
+	oldBot, oldService := telegramDoctorBotProbe, telegramDoctorServiceProbe
+	oldNow, oldRelease := telegramDoctorNow, telegramBuildRelease
+	telegramDoctorRelayProbe = func(context.Context, config) (adapter.DoctorProbeResult, error) { return relayResult, nil }
+	telegramDoctorNotificationProbe = func(context.Context, config) (adapter.DoctorProbeResult, error) { return relayResult, nil }
+	telegramDoctorBotProbe = func(context.Context, config) error { return botErr }
+	telegramDoctorServiceProbe = func(context.Context) telegramServiceDoctorResult {
+		return telegramServiceDoctorResult{Installed: true, Enabled: true, Running: true, Executable: true, Release: true, ExitStatus: true, RestartState: true}
+	}
+	telegramDoctorNow = func() time.Time { return now }
+	telegramBuildRelease = "v0.1.0-alpha.1"
+	t.Cleanup(func() {
+		telegramDoctorRelayProbe, telegramDoctorNotificationProbe = oldRelay, oldNotifications
+		telegramDoctorBotProbe, telegramDoctorServiceProbe = oldBot, oldService
+		telegramDoctorNow, telegramBuildRelease = oldNow, oldRelease
+	})
+}
+
+func telegramDoctorStatus(report punarodiagnostic.Report, code string) punarodiagnostic.Status {
+	for _, check := range report.Checks {
+		if check.Code == code {
+			return check.Status
+		}
+	}
+	return ""
 }

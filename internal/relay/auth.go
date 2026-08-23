@@ -310,6 +310,39 @@ func (a *Authenticator) AuthenticateHTTPSession(request *http.Request, body []by
 	return MachineSession{MachineID: signed.MachineID, PrincipalID: authorization.PrincipalID, current: authorization.Current}, nil
 }
 
+// AuthenticateReadOnlyDoctor verifies the exact signed doctor route without
+// consuming a replay nonce. The route is harmless and content-free; keeping
+// the method route-specific prevents it from becoming a general non-durable
+// authentication escape hatch for mutating APIs.
+func (a *Authenticator) AuthenticateReadOnlyDoctor(request *http.Request, body []byte, now time.Time) (MachineSession, error) {
+	validRoute := request != nil && request.URL != nil && ((request.Method == http.MethodHead && request.URL.Path == DoctorPath) || (request.Method == http.MethodGet && request.URL.Path == DoctorNotificationsPath))
+	if a == nil || !validRoute || len(body) != 0 || request.Header.Get("Authorization") != "" {
+		return MachineSession{}, ErrForbidden
+	}
+	timestamp, err := time.Parse(time.RFC3339Nano, request.Header.Get("X-Punaro-Timestamp"))
+	if err != nil {
+		return MachineSession{}, ErrForbidden
+	}
+	signatureText := request.Header.Get("X-Punaro-Signature")
+	signature, err := base64.RawURLEncoding.DecodeString(signatureText)
+	if err != nil || base64.RawURLEncoding.EncodeToString(signature) != signatureText {
+		return MachineSession{}, ErrForbidden
+	}
+	signed := SignedRequest{MachineID: request.Header.Get("X-Punaro-Machine"), Method: request.Method, Path: request.URL.Path, Timestamp: timestamp, Nonce: request.Header.Get("X-Punaro-Nonce"), Signature: signature}
+	machine, err := a.verifySignature(signed, now.UTC())
+	if err != nil {
+		return MachineSession{}, ErrForbidden
+	}
+	if a.transition == nil {
+		return MachineSession{MachineID: machine.ID}, nil
+	}
+	authorization, err := a.transition.AuthorizeTransition(request.Context(), "", machine.PublicKey)
+	if err != nil || uuid.Validate(authorization.PrincipalID) != nil || authorization.Current == nil || !bytes.Equal(authorization.LegacyPublicKey, machine.PublicKey) {
+		return MachineSession{}, ErrForbidden
+	}
+	return MachineSession{MachineID: machine.ID, PrincipalID: authorization.PrincipalID, current: authorization.Current}, nil
+}
+
 func (a *Authenticator) authenticateTransitionDevice(request *http.Request, authorization string) (MachineSession, error) {
 	if a.transition == nil || len(request.Header.Values("Authorization")) != 1 || !strings.HasPrefix(authorization, "Bearer ") || strings.Count(authorization, " ") != 1 || request.Header.Get("X-Punaro-Machine") != "" || request.Header.Get("X-Punaro-Signature") != "" || request.Header.Get("X-Punaro-Timestamp") != "" || request.Header.Get("X-Punaro-Nonce") != "" {
 		return MachineSession{}, ErrForbidden

@@ -38,3 +38,25 @@ if ! grep -Fq 'build punaro-relay-adopt-prepare ./cmd/punaro-relay-adopt-prepare
 	printf '%s\n' 'linux release artifacts omit punaro-relay-adopt-prepare' >&2
 	exit 1
 fi
+if ! grep -Fq -- '--provenance mode=max' "$repo_dir/.github/workflows/release.yml" ||
+	! grep -Fq -- '--sbom true' "$repo_dir/.github/workflows/release.yml" ||
+	! grep -Fq 'packages: write' "$repo_dir/.github/workflows/release.yml" ||
+	! grep -Fq 'needs.image.outputs.image' "$repo_dir/.github/workflows/release.yml"; then
+	printf '%s\n' 'release workflow does not publish and bind the attested GHCR image' >&2
+	exit 1
+fi
+if ! grep -Fq 'ARG PUNARO_RELEASE' "$repo_dir/Dockerfile" ||
+	! grep -Fq 'main.serverBuildRelease=${PUNARO_RELEASE}' "$repo_dir/Dockerfile"; then
+	printf '%s\n' 'release image does not embed its build identity' >&2
+	exit 1
+fi
+if grep -Fq 'gh release upload catalog dist/punaro-catalog.json' "$repo_dir/.github/workflows/release.yml"; then
+	printf '%s\n' 'unsigned workflow still mutates the live catalog' >&2
+	exit 1
+fi
+if ! "$repo_dir/scripts/publish-signed-release.sh" --help >/dev/null ||
+	! grep -Fq 'go run ./cmd/punaro-release verify' "$repo_dir/scripts/publish-signed-release.sh" ||
+	! grep -Fq 'gh release edit "$release"' "$repo_dir/scripts/publish-signed-release.sh"; then
+	printf '%s\n' 'verified offline release publication step is unavailable' >&2
+	exit 1
+fi

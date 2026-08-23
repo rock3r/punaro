@@ -1,0 +1,186 @@
+package bootstrap
+
+import (
+	"context"
+	"crypto/sha256"
+	"fmt"
+	"os"
+	"path/filepath"
+	"runtime"
+	"sort"
+	"strings"
+	"testing"
+	"time"
+
+	punarodiagnostic "github.com/rock3r/punaro/internal/diagnostic"
+)
+
+func TestDoctorVerifiesSignedSlotWithoutMutatingBootstrapState(t *testing.T) {
+	origin := newSignedOrigin(t, originSpec{payload: testArtifact, goos: runtime.GOOS, goarch: runtime.GOARCH})
+	directory := privateDir(t)
+	now := time.Date(2026, 8, 20, 0, 0, 0, 0, time.UTC)
+	if _, err := Update(Request{Directory: directory, Origin: origin.URL, Keys: origin.Keys, GOOS: runtime.GOOS, GOARCH: runtime.GOARCH, Now: now}); err != nil {
+		t.Fatal(err)
+	}
+	before := bootstrapTreeDigest(t, directory)
+	report, err := Doctor(t.Context(), DoctorRequest{Directory: directory, Origin: origin.URL, Keys: origin.Keys, GOOS: runtime.GOOS, GOARCH: runtime.GOARCH, Now: now, BootstrapRelease: "v0.1.0", FreeBytes: func(string) (uint64, error) { return 1 << 40, nil }})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if report.Component != punarodiagnostic.ComponentBootstrap || report.Identity.Release != "v0.1.0" || report.Identity.ReleaseSequence != 1 || report.Identity.CatalogSequence != 1 || report.Identity.ArtifactDigest == "" {
+		t.Fatalf("report=%#v", report)
+	}
+	for _, code := range []string{"bootstrap_directory", "bootstrap_lock", "run_lock", "disk_space", "release_keys", "catalog_signature", "catalog_freshness", "accepted_state", "current_slot", "current_catalog_allowed", "current_critical_block", "current_manifest_signature", "current_platform_compatibility", "current_artifact_integrity", "minimum_bootstrap_release", "minimum_recovery_protocol", "journal_state", "recovery_state"} {
+		if doctorCheckStatus(report, code) != punarodiagnostic.StatusPass {
+			t.Fatalf("check %s report=%#v", code, report)
+		}
+	}
+	if after := bootstrapTreeDigest(t, directory); after != before {
+		t.Fatalf("doctor mutated bootstrap state\nbefore=%s\nafter=%s", before, after)
+	}
+}
+
+func TestDoctorFailsUnsafeLockAndInsufficientPreflightDiskWithoutChangingEither(t *testing.T) {
+	origin := newSignedOrigin(t, originSpec{payload: testArtifact, goos: runtime.GOOS, goarch: runtime.GOARCH})
+	directory := privateDir(t)
+	now := time.Date(2026, 8, 20, 0, 0, 0, 0, time.UTC)
+	if _, err := Update(Request{Directory: directory, Origin: origin.URL, Keys: origin.Keys, GOOS: runtime.GOOS, GOARCH: runtime.GOARCH, Now: now}); err != nil {
+		t.Fatal(err)
+	}
+	lockPath := filepath.Join(directory, lockFile)
+	if err := os.Remove(lockPath); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(filepath.Join(directory, acceptedFile), lockPath); err != nil {
+		t.Fatal(err)
+	}
+	before := bootstrapTreeDigest(t, directory)
+	report, err := Doctor(t.Context(), DoctorRequest{Directory: directory, Origin: origin.URL, Keys: origin.Keys, GOOS: runtime.GOOS, GOARCH: runtime.GOARCH, Now: now, BootstrapRelease: "v0.1.0", FreeBytes: func(string) (uint64, error) { return 1, nil }})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if doctorCheckStatus(report, "bootstrap_lock") != punarodiagnostic.StatusFail || doctorCheckStatus(report, "disk_space") != punarodiagnostic.StatusFail {
+		t.Fatalf("report=%#v", report)
+	}
+	if after := bootstrapTreeDigest(t, directory); after != before {
+		t.Fatal("doctor modified unsafe lock or bootstrap state")
+	}
+}
+
+func TestDoctorDetectsArtifactTamperAndDoesNotRepairInvalidJournal(t *testing.T) {
+	origin := newSignedOrigin(t, originSpec{payload: testArtifact, goos: runtime.GOOS, goarch: runtime.GOARCH})
+	directory := privateDir(t)
+	now := time.Date(2026, 8, 20, 0, 0, 0, 0, time.UTC)
+	if _, err := Update(Request{Directory: directory, Origin: origin.URL, Keys: origin.Keys, GOOS: runtime.GOOS, GOARCH: runtime.GOARCH, Now: now}); err != nil {
+		t.Fatal(err)
+	}
+	artifact := filepath.Join(directory, currentSlot, artifactName(adapterComponent, runtime.GOOS, runtime.GOARCH))
+	if err := os.WriteFile(artifact, []byte(strings.Repeat("x", len(testArtifact))), 0o755); err != nil { // #nosec G306 -- executable artifact fixture.
+		t.Fatal(err)
+	}
+	journalBody := []byte(`{"schema":1,"phase":"publishing","phase":"staging"}`)
+	if err := os.WriteFile(filepath.Join(directory, journalFile), journalBody, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	report, err := Doctor(t.Context(), DoctorRequest{Directory: directory, Origin: origin.URL, Keys: origin.Keys, GOOS: runtime.GOOS, GOARCH: runtime.GOARCH, Now: now})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if doctorCheckStatus(report, "current_artifact_integrity") != punarodiagnostic.StatusFail || doctorCheckStatus(report, "journal_state") != punarodiagnostic.StatusFail || report.Healthy {
+		t.Fatalf("report=%#v", report)
+	}
+	retained, err := os.ReadFile(filepath.Join(directory, journalFile)) // #nosec G304 -- private test fixture.
+	if err != nil || string(retained) != string(journalBody) {
+		t.Fatalf("journal=%q err=%v", retained, err)
+	}
+}
+
+func TestDoctorCancellationProducesExplicitPartialFailureWithoutMutation(t *testing.T) {
+	origin := newSignedOrigin(t, originSpec{payload: testArtifact, goos: runtime.GOOS, goarch: runtime.GOARCH})
+	directory := privateDir(t)
+	now := time.Date(2026, 8, 20, 0, 0, 0, 0, time.UTC)
+	if _, err := Update(Request{Directory: directory, Origin: origin.URL, Keys: origin.Keys, GOOS: runtime.GOOS, GOARCH: runtime.GOARCH, Now: now}); err != nil {
+		t.Fatal(err)
+	}
+	before := bootstrapTreeDigest(t, directory)
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	report, err := Doctor(ctx, DoctorRequest{Directory: directory, Origin: origin.URL, Keys: origin.Keys, GOOS: runtime.GOOS, GOARCH: runtime.GOARCH, Now: now, BootstrapRelease: "v0.1.0", FreeBytes: func(string) (uint64, error) { return 1 << 40, nil }})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if report.Healthy || doctorCheckStatus(report, "catalog_reachability") != punarodiagnostic.StatusFail || doctorCheckStatus(report, "current_artifact_integrity") != punarodiagnostic.StatusUnavailable {
+		t.Fatalf("report=%#v", report)
+	}
+	if after := bootstrapTreeDigest(t, directory); after != before {
+		t.Fatal("cancelled doctor mutated bootstrap state")
+	}
+}
+
+func TestReleaseAtLeastUsesSemverPrereleaseOrdering(t *testing.T) {
+	for name, test := range map[string]struct {
+		current string
+		minimum string
+		want    bool
+	}{
+		"same alpha":                {"v0.1.0-alpha.1", "v0.1.0-alpha.1", true},
+		"next alpha":                {"v0.1.0-alpha.2", "v0.1.0-alpha.1", true},
+		"numeric identifiers":       {"v0.1.0-alpha.10", "v0.1.0-alpha.2", true},
+		"numeric before text":       {"v0.1.0-1", "v0.1.0-alpha", false},
+		"release after prerelease":  {"v0.1.0", "v0.1.0-rc.9", true},
+		"prerelease before release": {"v0.1.0-rc.9", "v0.1.0", false},
+		"older core":                {"v0.1.9", "v0.2.0-alpha.1", false},
+		"leading zero invalid":      {"v0.1.0-alpha.01", "v0.1.0-alpha.1", false},
+		"empty current invalid":     {"", "v0.1.0-alpha.1", false},
+	} {
+		t.Run(name, func(t *testing.T) {
+			if got := releaseAtLeast(test.current, test.minimum); got != test.want {
+				t.Fatalf("releaseAtLeast(%q,%q)=%t want %t", test.current, test.minimum, got, test.want)
+			}
+		})
+	}
+}
+
+func doctorCheckStatus(report punarodiagnostic.Report, code string) punarodiagnostic.Status {
+	for _, check := range report.Checks {
+		if check.Code == code {
+			return check.Status
+		}
+	}
+	return ""
+}
+
+func bootstrapTreeDigest(t *testing.T, directory string) string {
+	t.Helper()
+	var records []string
+	err := filepath.WalkDir(directory, func(path string, entry os.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		relative, err := filepath.Rel(directory, path)
+		if err != nil {
+			return err
+		}
+		info, err := entry.Info()
+		if err != nil {
+			return err
+		}
+		record := fmt.Sprintf("%s:%s:%o", relative, info.Mode().Type(), info.Mode().Perm())
+		if info.Mode().IsRegular() {
+			body, err := os.ReadFile(path) // #nosec G304,G122 -- private non-concurrent test fixture.
+			if err != nil {
+				return err
+			}
+			sum := sha256.Sum256(body)
+			record += fmt.Sprintf(":%x", sum[:])
+		}
+		records = append(records, record)
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	sort.Strings(records)
+	sum := sha256.Sum256([]byte(strings.Join(records, "\n")))
+	return fmt.Sprintf("%x", sum[:])
+}

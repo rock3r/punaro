@@ -1,6 +1,13 @@
 FROM golang:1.26-alpine@sha256:1a9c10cf505a9e6b1e96ea77ebdbfe79a0f10380181faf88bc3b51d7e4315fae AS build
 RUN apk add --no-cache postgresql18-client=18.6-r0
 WORKDIR /src
+ARG PUNARO_RELEASE
+ARG PUNARO_SEQUENCE
+ARG PUNARO_CATALOG_SEQUENCE
+ARG PUNARO_IMAGE
+ARG PUNARO_COMPOSE_SHA256
+ARG PUNARO_MIGRATION_SHA256
+ARG PUNARO_SKILL_SET_SHA256
 COPY go.mod go.sum ./
 RUN go mod download
 COPY cmd ./cmd
@@ -12,12 +19,12 @@ COPY deploy/systemd/user/punaro-adapter.service ./deploy/systemd/user/
 RUN mkdir -p /home/punaro/tmp \
  && chown 65532:65532 /home/punaro /home/punaro/tmp \
  && chmod 700 /home/punaro /home/punaro/tmp
-RUN CGO_ENABLED=0 go build -trimpath -ldflags='-s -w' -o /out/punaro ./cmd/punaro \
+RUN CGO_ENABLED=0 go build -trimpath -ldflags="-s -w -X main.serverBuildRelease=${PUNARO_RELEASE} -X main.serverBuildSequence=${PUNARO_SEQUENCE} -X main.serverBuildCatalogSequence=${PUNARO_CATALOG_SEQUENCE} -X main.serverBuildImage=${PUNARO_IMAGE} -X main.serverBuildComposeSHA256=${PUNARO_COMPOSE_SHA256} -X main.serverBuildMigrationSHA256=${PUNARO_MIGRATION_SHA256}" -o /out/punaro ./cmd/punaro \
  && CGO_ENABLED=0 go build -trimpath -ldflags='-s -w' -o /out/punarod ./cmd/punarod \
  && CGO_ENABLED=0 go build -trimpath -ldflags='-s -w' -o /out/punaro-migrate ./cmd/punaro-migrate \
  && CGO_ENABLED=0 go build -trimpath -ldflags='-s -w' -o /out/punaro-admin ./cmd/punaro-admin \
- && CGO_ENABLED=0 go build -trimpath -ldflags='-s -w' -o /out/punaro-adapter ./cmd/punaro-adapter \
- && CGO_ENABLED=0 go build -trimpath -ldflags='-s -w' -o /out/punaro-telegram ./cmd/punaro-telegram \
+ && CGO_ENABLED=0 go build -trimpath -ldflags="-s -w -X main.adapterBuildRelease=${PUNARO_RELEASE} -X main.adapterExpectedSkillSetDigest=${PUNARO_SKILL_SET_SHA256}" -o /out/punaro-adapter ./cmd/punaro-adapter \
+ && CGO_ENABLED=0 go build -trimpath -ldflags="-s -w -X main.telegramBuildRelease=${PUNARO_RELEASE}" -o /out/punaro-telegram ./cmd/punaro-telegram \
  && CGO_ENABLED=0 go build -trimpath -ldflags='-s -w' -o /out/punaro-trusted-attachment ./cmd/punaro-trusted-attachment \
  && CGO_ENABLED=0 go build -trimpath -ldflags='-s -w' -o /out/punaro-relay-adopt-prepare ./cmd/punaro-relay-adopt-prepare
 

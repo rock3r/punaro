@@ -64,6 +64,33 @@ func TestBridgeSyncsInboundAndOutboundThroughOneAttachedGatewayEndpoint(t *testi
 	}
 }
 
+func TestClassifyGatewayCycleFailureSeparatesRetryAndTerminalPlanes(t *testing.T) {
+	t.Parallel()
+	permanentRelay := permanentRelayFixtureError{}
+	for _, test := range []struct {
+		name  string
+		err   error
+		class GatewayFailureClass
+	}{
+		{name: "transient unauthorized Telegram", err: &GatewayCycleError{Phase: GatewayPhaseSend, Err: BotAPIStatusError{Method: "sendRichMessage", Status: 401}}, class: GatewayFailureTransient},
+		{name: "deleted topic", err: &GatewayCycleError{Phase: GatewayPhaseSend, Err: BotAPIStatusError{Method: "sendRichMessage", Status: 400, Kind: BotAPIErrorDeletedTopic}}, class: GatewayFailureDeletedTopic},
+		{name: "permanent outbound Telegram", err: &GatewayCycleError{Phase: GatewayPhaseSend, Err: BotAPIStatusError{Method: "sendRichMessage", Status: 403}}, class: GatewayFailureOutboundTelegramPermanent},
+		{name: "permanent inbound relay", err: &GatewayCycleError{Phase: GatewayPhaseInbound, Err: permanentRelay}, class: GatewayFailureInboundRelayPermanent},
+		{name: "message-less poll", err: &GatewayCycleError{Phase: GatewayPhasePoll, Err: BotAPIStatusError{Method: "getUpdates", Status: 404}}, class: GatewayFailureMessageLessPoll},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			if got := ClassifyGatewayCycleFailure(test.err); got != test.class {
+				t.Fatalf("class=%s want %s", got, test.class)
+			}
+		})
+	}
+}
+
+type permanentRelayFixtureError struct{}
+
+func (permanentRelayFixtureError) Error() string               { return "provider controlled" }
+func (permanentRelayFixtureError) PermanentRelayFailure() bool { return true }
+
 func TestBridgeResumesIncompleteClaimBeforePollingInbound(t *testing.T) {
 	t.Parallel()
 	state, err := Open(filepath.Join(t.TempDir(), "telegram.db"))

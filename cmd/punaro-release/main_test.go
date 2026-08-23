@@ -39,6 +39,9 @@ func TestReleaseToolAssemblesSignsAndVerifiesExactBytes(t *testing.T) {
 	if err := run([]string{"validate", "--dir", artifacts}); err != nil {
 		t.Fatal(err)
 	}
+	if err := run([]string{"validate", "--dir", artifacts, "--release", "v9.9.9"}); err == nil {
+		t.Fatal("unexpected release identity was accepted")
+	}
 	manifestPath := filepath.Join(artifacts, punarorelease.ReleaseManifestFile)
 	privatePath := filepath.Join(dir, "release.key")
 	publicPath := filepath.Join(dir, "release.pub")
@@ -76,6 +79,24 @@ func TestReleaseToolAssemblesSignsAndVerifiesExactBytes(t *testing.T) {
 	}
 	if runtime.GOOS != "windows" && info.Mode().Perm()&0o077 != 0 {
 		t.Fatalf("private key permissions=%v", info.Mode())
+	}
+}
+
+func TestBuildFactsBindsPluginSkillsComposeAndMigrations(t *testing.T) {
+	root, err := filepath.Abs(filepath.Join("..", ".."))
+	if err != nil {
+		t.Fatal(err)
+	}
+	compose := filepath.Join(t.TempDir(), "production.yaml")
+	if err := os.WriteFile(compose, []byte("services: {}\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	facts, err := buildFacts([]string{"--release", "v0.1.0-alpha.1", "--compose-file", compose, "--plugin-root", root})
+	if err != nil || facts.Release != "v0.1.0-alpha.1" || len(facts.ComposeSHA256) != 64 || len(facts.MigrationManifestSHA256) != 64 || len(facts.SkillSetSHA256) != 64 {
+		t.Fatalf("facts=%#v err=%v", facts, err)
+	}
+	if _, err := buildFacts([]string{"--release", "v0.1.0", "--compose-file", compose, "--plugin-root", root}); err == nil {
+		t.Fatal("release not matching all plugin manifests was accepted")
 	}
 }
 

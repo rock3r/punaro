@@ -2,6 +2,23 @@ name: macos-notarize
 
 on:
   workflow_dispatch:
+    inputs:
+      release:
+        description: Product release name
+        required: true
+        type: string
+      sequence:
+        description: Monotonic release sequence
+        required: true
+        type: string
+      catalog_sequence:
+        description: Monotonic catalog sequence
+        required: true
+        type: string
+      image:
+        description: Digest-pinned GHCR gateway image
+        required: true
+        type: string
 
 permissions:
   contents: read
@@ -21,7 +38,12 @@ jobs:
           GOOS: darwin
           GOARCH: arm64
           CGO_ENABLED: '1'
-        run: ./scripts/build-release-artifacts.sh --output-dir dist
+        run: >-
+          ./scripts/build-release-artifacts.sh --output-dir dist
+          --release "${{ inputs.release }}"
+          --sequence "${{ inputs.sequence }}"
+          --catalog-sequence "${{ inputs.catalog_sequence }}"
+          --image "${{ inputs.image }}"
       - name: Import Developer ID certificate
         env:
           MACOS_DEVELOPER_ID_APPLICATION_P12: ${{ secrets.MACOS_DEVELOPER_ID_APPLICATION_P12 }}

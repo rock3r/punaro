@@ -29,8 +29,62 @@ permissions:
   contents: read
 
 jobs:
+  image:
+    name: Publish digest-pinned gateway image
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    outputs:
+      image: ${{ steps.publish.outputs.image }}
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
+      - uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6
+        with:
+          go-version-file: go.mod
+      - name: Publish image with SBOM and provenance
+        id: publish
+        env:
+          GHCR_TOKEN: ${{ github.token }}
+          RELEASE: ${{ inputs.release }}
+          SEQUENCE: ${{ inputs.sequence }}
+          CATALOG_SEQUENCE: ${{ inputs.catalog_sequence }}
+        run: |
+          set -eu
+          repository="ghcr.io/${GITHUB_REPOSITORY_OWNER,,}/punaro"
+          facts=$(env -u GOOS -u GOARCH -u CGO_ENABLED go run ./cmd/punaro-release build-facts \
+            --release "$RELEASE" \
+            --compose-file "$PWD/deploy/compose/production.yaml" \
+            --plugin-root "$PWD")
+          compose_sha256=$(printf '%s\n' "$facts" | jq -er .compose_sha256)
+          migration_sha256=$(printf '%s\n' "$facts" | jq -er .migration_manifest_sha256)
+          skill_sha256=$(printf '%s\n' "$facts" | jq -er .skill_set_sha256)
+          printf '%s' "$GHCR_TOKEN" | docker login ghcr.io --username "$GITHUB_ACTOR" --password-stdin
+          metadata="$RUNNER_TEMP/punaro-image-metadata.json"
+          docker buildx build \
+            --platform linux/amd64 \
+            --provenance mode=max \
+            --sbom true \
+            --build-arg "PUNARO_RELEASE=$RELEASE" \
+            --build-arg "PUNARO_SEQUENCE=$SEQUENCE" \
+            --build-arg "PUNARO_CATALOG_SEQUENCE=$CATALOG_SEQUENCE" \
+            --build-arg "PUNARO_COMPOSE_SHA256=$compose_sha256" \
+            --build-arg "PUNARO_MIGRATION_SHA256=$migration_sha256" \
+            --build-arg "PUNARO_SKILL_SET_SHA256=$skill_sha256" \
+            --label "org.opencontainers.image.revision=$GITHUB_SHA" \
+            --label "org.opencontainers.image.version=$RELEASE" \
+            --metadata-file "$metadata" \
+            --tag "$repository:$RELEASE" \
+            --push .
+          digest=$(jq -er '."containerimage.digest"' "$metadata")
+          case "$digest" in sha256:[0-9a-f][0-9a-f]*) ;; *) printf '%s\n' 'published image digest is invalid' >&2; exit 2 ;; esac
+          [ "${#digest}" -eq 71 ] || { printf '%s\n' 'published image digest is invalid' >&2; exit 2; }
+          image="$repository@$digest"
+          printf 'image=%s\n' "$image" >>"$GITHUB_OUTPUT"
+
   build:
     name: Build ${{ matrix.goos }}/${{ matrix.goarch }}
+    needs: image
     runs-on: ${{ matrix.runner }}
     strategy:
       fail-fast: true
@@ -63,7 +117,12 @@ jobs:
           GOOS: ${{ matrix.goos }}
           GOARCH: ${{ matrix.goarch }}
           CGO_ENABLED: ${{ matrix.cgo }}
-        run: ./scripts/build-release-artifacts.sh --output-dir dist
+        run: >-
+          ./scripts/build-release-artifacts.sh --output-dir dist
+          --release "${{ inputs.release }}"
+          --sequence "${{ inputs.sequence }}"
+          --catalog-sequence "${{ inputs.catalog_sequence }}"
+          --image "${{ needs.image.outputs.image }}"
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: punaro-${{ matrix.goos }}-${{ matrix.goarch }}
@@ -72,7 +131,7 @@ jobs:
 
   publish:
     name: Assemble catalog and draft GitHub Release
-    needs: build
+    needs: [image, build]
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -127,7 +186,8 @@ jobs:
             --dir dist \
             --release "$RELEASE" \
             --sequence "$SEQUENCE" \
-            --catalog-sequence "$CATALOG_SEQUENCE"
+            --catalog-sequence "$CATALOG_SEQUENCE" \
+            --image "${{ needs.image.outputs.image }}"
           go run ./cmd/punaro-release validate --dir dist
           if grep -Eq 'https?://' dist/punaro-release.json dist/punaro-catalog.json; then
             printf '%s\n' 'assembled documents contain a URL' >&2
@@ -157,11 +217,3 @@ jobs:
             set -- --draft "$@"
           fi
           gh release create "$RELEASE" --target "$GITHUB_SHA" "$@" dist/*
-          if gh release view catalog >/dev/null 2>&1; then
-            gh release upload catalog dist/punaro-catalog.json --clobber
-          else
-            gh release create catalog --prerelease \
-              --title "Punaro release catalog" \
-              --notes "Short-lived unsigned catalog. Bootstrap requires punaro-catalog.sig from the offline signing key." \
-              dist/punaro-catalog.json
-          fi

@@ -38,6 +38,9 @@ type config struct {
 	apiURL          string
 	accessToken     adapter.AccessServiceToken
 	transportPolicy clienttransport.Policy
+	privateKeyFile  string
+	botTokenFile    string
+	accessTokenFile string
 }
 
 type routeRequest struct {
@@ -47,6 +50,16 @@ type routeRequest struct {
 }
 
 func main() {
+	if len(os.Args) > 1 && os.Args[1] == "version" {
+		if len(os.Args) != 2 || telegramBuildRelease == "" {
+			os.Exit(1)
+		}
+		fmt.Println(telegramBuildRelease)
+		return
+	}
+	if len(os.Args) > 1 && os.Args[1] == "doctor" {
+		os.Exit(runTelegramDoctor(os.Args[2:], os.Stdout, os.Stderr))
+	}
 	if len(os.Args) > 1 && os.Args[1] == "route" {
 		if err := runRoute(os.Args[2:]); err != nil {
 			log.Printf("punaro-telegram stopped: %v", err)
@@ -62,7 +75,7 @@ func main() {
 		return
 	}
 	if len(os.Args) > 1 {
-		log.Print("punaro-telegram stopped: unknown command (supported: route, adopt)")
+		log.Print("punaro-telegram stopped: unknown command (supported: doctor, route, adopt, version)")
 		os.Exit(1)
 	}
 	if err := run(); err != nil {
@@ -187,8 +200,28 @@ func run() error {
 	for ctx.Err() == nil {
 		next, err := bridge.SyncOnce(ctx, offset)
 		if err == nil {
-			offset = next
-			continue
+			if recordErr := state.RecordGatewayCycle(telegram.GatewayCycleRecord{At: time.Now().UTC(), Offset: next, PollOK: true, RelayOK: true, TelegramOK: true}); recordErr != nil {
+				err = recordErr
+			} else {
+				offset = next
+				continue
+			}
+		} else {
+			record := telegram.GatewayCycleRecord{At: time.Now().UTC(), Offset: next, Failure: telegram.ClassifyGatewayCycleFailure(err)}
+			var cycleErr *telegram.GatewayCycleError
+			if errors.As(err, &cycleErr) {
+				switch cycleErr.Phase {
+				case telegram.GatewayPhaseLease:
+					record.PollOK = true
+				case telegram.GatewayPhaseSend:
+					record.PollOK, record.RelayOK = true, true
+				case telegram.GatewayPhaseAck:
+					record.PollOK, record.RelayOK, record.TelegramOK = true, true, true
+				}
+			}
+			if recordErr := state.RecordGatewayCycle(record); recordErr != nil {
+				log.Print("telegram event class=gateway_health err=state_unavailable")
+			}
 		}
 		if errors.Is(err, context.Canceled) || ctx.Err() != nil {
 			return nil
@@ -223,6 +256,7 @@ func loadConfig() (config, error) {
 		cfg.apiURL = defaultTelegramAPIURL
 	}
 	botTokenFile := strings.TrimSpace(os.Getenv("PUNARO_TELEGRAM_BOT_TOKEN_FILE"))
+	cfg.botTokenFile = botTokenFile
 	if (cfg.botToken == "") == (botTokenFile == "") {
 		return config{}, fmt.Errorf("exactly one of PUNARO_TELEGRAM_BOT_TOKEN or PUNARO_TELEGRAM_BOT_TOKEN_FILE is required")
 	}
@@ -243,6 +277,7 @@ func loadConfig() (config, error) {
 		return config{}, fmt.Errorf("PUNARO_TELEGRAM_GATEWAY_ENDPOINT must be %s", relay.TelegramGatewayEndpoint)
 	}
 	accessTokenFile := strings.TrimSpace(os.Getenv("PUNARO_TELEGRAM_ACCESS_TOKEN_FILE"))
+	cfg.accessTokenFile = accessTokenFile
 	if accessTokenFile != "" {
 		if cfg.accessToken.ClientID != "" || cfg.accessToken.ClientSecret != "" {
 			return config{}, fmt.Errorf("PUNARO_TELEGRAM_ACCESS_TOKEN_FILE cannot be combined with Access environment credentials")
@@ -273,6 +308,7 @@ func loadConfig() (config, error) {
 	if keyFile == "" {
 		return config{}, fmt.Errorf("PUNARO_MACHINE_PRIVATE_KEY_FILE is required")
 	}
+	cfg.privateKeyFile = keyFile
 	privateKey, err := loadPrivateKey(keyFile)
 	if err != nil {
 		return config{}, err

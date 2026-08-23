@@ -1778,6 +1778,10 @@ The implementation is not internet-exposure-ready until these cases pass:
 - Go, not Rust, for v1.
 - Versioned OCI images and Docker Compose are the reference production path;
   a dedicated Linux LXC remains a valid OCI host.
+- Server, adapter, bootstrap, Telegram, and fleet readiness use the shared
+  schema-version 1 doctor contract in `docs/doctor.md`. Reports are bounded,
+  content-free, deterministic, and read-only; remediation identifiers never
+  grant authority to repair, restart, enroll, update, or reroute anything.
 - Client updates pull signed artifacts from the fixed GitHub Releases origin
   `https://github.com/rock3r/punaro/releases/download`. The gateway names a
   signed release; it never supplies a URL, command, or unsigned `latest`
