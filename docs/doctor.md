@@ -35,8 +35,18 @@ hash their state tree before and after the MCP initialize/tools-only exchange.
 Server on the Punaro host:
 
 ```sh
-punaro doctor --directory /absolute/private/installation --timeout 20s
+punaro doctor \
+  --directory /absolute/private/installation \
+  --machine-id punaro-lxc \
+  --timeout 20s
 ```
+
+`--machine-id` is required and is the stable public identity used to match this
+report in fleet doctor. A separately deployed Telegram gateway is the default;
+its local-service checks are optional in the server report and its own
+`punaro-telegram doctor` report is authoritative. Add `--gateway-co-located`
+only when this server host is explicitly expected to own and run the local
+`punaro-telegram` system service.
 
 Client adapter on macOS, Linux, or Windows (pass the installed plugin root so
 plugin and skill parity are checked):
@@ -114,7 +124,9 @@ Service and edge: `health_endpoint`, `readiness_endpoint`,
 `gateway_service_installed`, `gateway_service_enabled`,
 `gateway_service_running`, `gateway_service_executable`,
 `gateway_service_last_exit`, `gateway_service_restart_state`,
-`gateway_release`.
+`gateway_release`. These gateway checks are required only with the explicit
+server `--gateway-co-located` declaration; otherwise they are optional and the
+separate Telegram component report supplies gateway readiness.
 
 ### Adapter
 
@@ -188,7 +200,7 @@ and none authorizes an agent to perform the action. Use the supported installer,
 service manager, update/recovery command, or provider console only after the
 operator explicitly approves that separate action.
 
-- Observation only: `inspect_adapter_service_exit`,
+- Observation only: `collect_gateway_report`, `inspect_adapter_service_exit`,
   `inspect_gateway_retry_state`, `inspect_gateway_service_exit`, and
   `inspect_update_recovery` mean collect the corresponding content-free local
   service/update state before choosing a mutation.

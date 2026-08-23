@@ -26,7 +26,7 @@ valid but contains a failed or required-unavailable check; report only its
 stable check codes and remediation identifiers to the task owner. Exit `2`
 means invocation or report generation failed. Doctor is observational: never
 execute a remediation identifier, repair state, restart a service, change
-enrollment, or alter routing unless the task owner separately authorizes it.
+enrollment, or alter routing without separate task-owner authorization.
 
 ## Await and claim
 

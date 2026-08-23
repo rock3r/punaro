@@ -33,11 +33,11 @@ const (
 	serverDoctorBackupFresh    = 24 * time.Hour
 )
 
-func inspectServerDoctorState(parent context.Context, installation operator.Installation) serverDoctorState {
+func inspectServerDoctorState(parent context.Context, installation operator.Installation, machineID string, gatewayColocated bool) serverDoctorState {
 	ctx, cancel := context.WithTimeout(parent, serverDoctorTimeout)
 	defer cancel()
 
-	state := serverDoctorState{MachineID: validServerMachineID(strings.TrimSpace(os.Getenv("PUNARO_DOCTOR_MACHINE_ID"))), Release: serverBuildRelease, Protocol: relay.ProtocolVersion}
+	state := serverDoctorState{MachineID: validServerMachineID(machineID), Release: serverBuildRelease, Protocol: relay.ProtocolVersion}
 	state.ReleaseSequence, _ = strconv.ParseInt(serverBuildSequence, 10, 64)
 	state.CatalogSequence, _ = strconv.ParseInt(serverBuildCatalogSequence, 10, 64)
 	state.InstalledRelease = known(serverBuildRelease != "" && serverBuildImage != "", serverBuildRelease != "" && serverBuildImage == installation.Image)
@@ -51,7 +51,9 @@ func inspectServerDoctorState(parent context.Context, installation operator.Inst
 	state.AdminPrivate = state.DatabasePrivate
 	state.BlobPrivate = known(true, serverBlobTopologyPrivate(installation))
 	state.TunnelRoute, state.TunnelOrigin, state.AccessAdmission, state.RelayEnrollment, state.RelayProtocol = inspectServerRelay(ctx, installation)
-	state.GatewayInstalled, state.GatewayEnabled, state.GatewayRunning, state.GatewayExecutable, state.GatewayExitStatus, state.GatewayRestartState, state.GatewayRelease = inspectGatewayService(ctx, serverBuildRelease)
+	if gatewayColocated {
+		state.GatewayInstalled, state.GatewayEnabled, state.GatewayRunning, state.GatewayExecutable, state.GatewayExitStatus, state.GatewayRestartState, state.GatewayRelease = inspectGatewayService(ctx, serverBuildRelease)
+	}
 
 	database, err := punaropostgres.OpenApplication(ctx, punaropostgres.Config{DSNFile: installation.AppDSNFile})
 	if err == nil {

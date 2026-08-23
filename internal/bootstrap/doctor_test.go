@@ -27,7 +27,7 @@ func TestDoctorVerifiesSignedSlotWithoutMutatingBootstrapState(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if report.Component != punarodiagnostic.ComponentBootstrap || report.Identity.Release != "v0.1.0" || report.Identity.ReleaseSequence != 1 || report.Identity.CatalogSequence != 1 || report.Identity.ArtifactDigest == "" {
+	if report.Component != punarodiagnostic.ComponentBootstrap || report.Identity.Release != "v0.1.0" || report.Identity.ReleaseSequence != 1 || report.Identity.CatalogSequence != 1 || report.Identity.Protocol != BootstrapProtocolVersion || report.Identity.ArtifactDigest == "" {
 		t.Fatalf("report=%#v", report)
 	}
 	for _, code := range []string{"bootstrap_directory", "bootstrap_lock", "run_lock", "disk_space", "release_keys", "catalog_signature", "catalog_freshness", "accepted_state", "current_slot", "current_catalog_allowed", "current_critical_block", "current_manifest_signature", "current_platform_compatibility", "current_artifact_integrity", "minimum_bootstrap_release", "minimum_recovery_protocol", "journal_state", "recovery_state"} {

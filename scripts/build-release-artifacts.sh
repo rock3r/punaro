@@ -95,7 +95,7 @@ build() {
 		punaro-adapter) ldflags="-X main.adapterBuildRelease=$release -X main.adapterExpectedSkillSetDigest=$skill_sha256" ;;
 		punaro-bootstrap) ldflags="-X main.bootstrapBuildRelease=$release" ;;
 		punaro) ldflags="-X main.serverBuildRelease=$release -X main.serverBuildSequence=$sequence -X main.serverBuildCatalogSequence=$catalog_sequence -X main.serverBuildImage=$image -X main.serverBuildComposeSHA256=$compose_sha256 -X main.serverBuildMigrationSHA256=$migration_sha256" ;;
-		punaro-telegram) ldflags="-X main.telegramBuildRelease=$release" ;;
+		punaro-telegram) ldflags="-X main.telegramBuildRelease=$release -X main.telegramBuildSequence=$sequence -X main.telegramBuildCatalogSequence=$catalog_sequence" ;;
 	esac
 	(
 		cd "$repo_dir"

@@ -528,7 +528,10 @@ requires recovery. It waits up to 30 seconds for readiness and then runs the
 same checks as doctor. Raw `docker compose up` and `punarod` never migrate.
 
 Use `punaro status --directory ...` for a non-mutating report and `punaro doctor
---directory ...` for a failing health gate. Reports contain only capability and
+--directory ... --machine-id punaro-lxc` for a failing health gate. Add
+`--gateway-co-located` only when this host is explicitly responsible for the
+local `punaro-telegram` system service; otherwise collect its separate doctor
+report. Reports contain only capability and
 content-free path/schema/health states. The report contract, exact exit codes,
 fleet aggregation, and complete stable check registry are documented in
 [doctor.md](doctor.md). The generated M-5 server Compose file

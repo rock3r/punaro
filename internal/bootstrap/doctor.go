@@ -62,7 +62,7 @@ func Doctor(ctx context.Context, request DoctorRequest) (punarodiagnostic.Report
 	if request.Now.IsZero() {
 		request.Now = time.Now().UTC()
 	}
-	identity := punarodiagnostic.Identity{MachineID: request.MachineID, Platform: request.GOOS + "-" + request.GOARCH}
+	identity := punarodiagnostic.Identity{MachineID: request.MachineID, Protocol: BootstrapProtocolVersion, Platform: request.GOOS + "-" + request.GOARCH}
 	checks := make([]punarodiagnostic.Check, 0, 40)
 	if err := requireTrustedBootstrapDirectory(request.Directory); err != nil {
 		checks = append(checks, punarodiagnostic.Fail("bootstrap_directory", "repair_bootstrap_directory"))

@@ -596,6 +596,9 @@ func waitHealth(ctx context.Context, request RunRequest, child Process, started 
 		}
 		select {
 		case <-child.Done():
+			if err := ctx.Err(); err != nil {
+				return err
+			}
 			return errChildExited
 		default:
 		}
@@ -609,6 +612,9 @@ func waitHealth(ctx context.Context, request RunRequest, child Process, started 
 		case <-ctx.Done():
 			return ctx.Err()
 		case <-child.Done():
+			if err := ctx.Err(); err != nil {
+				return err
+			}
 			return errChildExited
 		case <-ticker.C:
 		}
@@ -786,8 +792,14 @@ func waitHealthWindow(ctx context.Context, request RunRequest, child Process, st
 				return err
 			}
 		case <-timer.C:
+			if err := ctx.Err(); err != nil {
+				return err
+			}
 			select {
 			case <-child.Done():
+				if err := ctx.Err(); err != nil {
+					return err
+				}
 				return errChildExited
 			default:
 				return nil

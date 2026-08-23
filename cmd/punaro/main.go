@@ -634,13 +634,15 @@ func runServerDoctor(args []string, stdout, stderr io.Writer) int {
 	flags := flag.NewFlagSet("doctor", flag.ContinueOnError)
 	flags.SetOutput(stderr)
 	directory := flags.String("directory", "", "absolute installation directory")
+	machineID := flags.String("machine-id", "", "stable server machine identity")
+	gatewayColocated := flags.Bool("gateway-co-located", false, "require a local punaro-telegram system service")
 	timeout := flags.Duration("timeout", 20*time.Second, "total diagnostic deadline")
-	if flags.Parse(args) != nil || flags.NArg() != 0 || *directory == "" || *timeout < time.Second || *timeout > 30*time.Second {
+	if flags.Parse(args) != nil || flags.NArg() != 0 || *directory == "" || validServerMachineID(*machineID) == "" || *timeout < time.Second || *timeout > 30*time.Second {
 		return 2
 	}
 	installation, err := operator.Load(*directory)
 	if err != nil {
-		report, reportErr := punarodiagnostic.New(punarodiagnostic.ComponentServer, punarodiagnostic.Identity{Platform: runtime.GOOS + "-" + runtime.GOARCH}, unavailableServerDoctorChecks())
+		report, reportErr := punarodiagnostic.New(punarodiagnostic.ComponentServer, punarodiagnostic.Identity{MachineID: *machineID, Platform: runtime.GOOS + "-" + runtime.GOARCH}, unavailableServerDoctorChecks(*gatewayColocated))
 		if reportErr != nil || writeJSON(stdout, stderr, report) != 0 {
 			_, _ = fmt.Fprintln(stderr, "punaro doctor failed: diagnostic report unavailable")
 			return 2
@@ -649,7 +651,7 @@ func runServerDoctor(args []string, stdout, stderr io.Writer) int {
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), *timeout)
 	defer cancel()
-	report, err := diagnoseServer(ctx, installation)
+	report, err := diagnoseServer(ctx, installation, *machineID, *gatewayColocated)
 	if err != nil {
 		_, _ = fmt.Fprintln(stderr, "punaro doctor failed: diagnostic report unavailable")
 		return 2
@@ -660,12 +662,11 @@ func runServerDoctor(args []string, stdout, stderr io.Writer) int {
 	return punarodiagnostic.ExitCode(report)
 }
 
-func unavailableServerDoctorChecks() []punarodiagnostic.Check {
+func unavailableServerDoctorChecks(gatewayColocated bool) []punarodiagnostic.Check {
 	codes := []string{
 		"access_admission", "administration_listener_private", "application_credential_file", "attachment_blob_containment", "attachment_blob_directory",
 		"backup_directory", "backup_freshness", "blob_storage_private", "compose_manifest_binding", "compose_override", "daemon_environment", "data_directory",
-		"database_connection", "database_listener_private", "database_owner", "database_pair", "database_schema", "gateway_release", "gateway_service_enabled",
-		"gateway_service_executable", "gateway_service_installed", "gateway_service_last_exit", "gateway_service_restart_state", "gateway_service_running",
+		"database_connection", "database_listener_private", "database_owner", "database_pair", "database_schema",
 		"health_endpoint", "health_listener_private", "host_update_stage", "image_digest_binding", "installed_release", "installation_directory", "machine_identity",
 		"maintenance_fence", "migration_manifest_binding", "owner_credential_file", "postgres_major", "readiness_endpoint", "recovery_receipt", "relay_enrollment",
 		"relay_protocol", "running_image", "storage_capacity", "storage_credential_isolation", "storage_directory_separation", "tunnel_origin", "tunnel_route",
@@ -675,17 +676,18 @@ func unavailableServerDoctorChecks() []punarodiagnostic.Check {
 	for _, code := range codes {
 		checks = append(checks, punarodiagnostic.Unavailable(code, "repair_installation_configuration"))
 	}
+	checks = appendServerGatewayChecks(checks, serverDoctorState{}, gatewayColocated)
 	return checks
 }
 
-func diagnoseServer(ctx context.Context, installation operator.Installation) (punarodiagnostic.Report, error) {
+func diagnoseServer(ctx context.Context, installation operator.Installation, machineID string, gatewayColocated bool) (punarodiagnostic.Report, error) {
 	identity := punarodiagnostic.Identity{Platform: runtime.GOOS + "-" + runtime.GOARCH}
 	if _, digest, ok := strings.Cut(installation.Image, "@"); ok {
 		identity.ArtifactDigest = digest
 	}
 	checks := serverPathChecks(operator.CheckPaths(installation))
 	checks = append(checks, punarodiagnostic.Pass("installation_configuration"), punarodiagnostic.Pass("image_digest_binding"))
-	extended := serverDoctorInspect(ctx, installation)
+	extended := serverDoctorInspect(ctx, installation, machineID, gatewayColocated)
 	identity.MachineID = extended.MachineID
 	identity.Release = extended.Release
 	identity.ReleaseSequence = extended.ReleaseSequence
@@ -724,13 +726,7 @@ func diagnoseServer(ctx context.Context, installation operator.Installation) (pu
 	checks = appendKnownServerCheck(checks, "access_admission", "repair_access_service_auth", extended.AccessAdmission)
 	checks = appendKnownServerCheck(checks, "relay_enrollment", "repair_server_doctor_enrollment", extended.RelayEnrollment)
 	checks = appendKnownServerCheck(checks, "relay_protocol", "install_compatible_release", extended.RelayProtocol)
-	checks = appendKnownServerCheck(checks, "gateway_service_installed", "install_gateway_service", extended.GatewayInstalled)
-	checks = appendKnownServerCheck(checks, "gateway_service_enabled", "enable_gateway_service", extended.GatewayEnabled)
-	checks = appendKnownServerCheck(checks, "gateway_service_running", "repair_gateway_service", extended.GatewayRunning)
-	checks = appendKnownServerCheck(checks, "gateway_service_executable", "repair_gateway_service_binding", extended.GatewayExecutable)
-	checks = appendKnownServerCheck(checks, "gateway_service_last_exit", "inspect_gateway_service_exit", extended.GatewayExitStatus)
-	checks = appendKnownServerCheck(checks, "gateway_service_restart_state", "repair_gateway_service_restart", extended.GatewayRestartState)
-	checks = appendKnownServerCheck(checks, "gateway_release", "install_compatible_gateway_release", extended.GatewayRelease)
+	checks = appendServerGatewayChecks(checks, extended, gatewayColocated)
 
 	state, schemaErr := inspectSchema(ctx, installation.AppDSNFile)
 	if schemaErr != nil {
@@ -829,6 +825,22 @@ func appendKnownServerCheck(checks []punarodiagnostic.Check, code, remediation s
 		return append(checks, punarodiagnostic.Fail(code, remediation))
 	}
 	return append(checks, punarodiagnostic.Pass(code))
+}
+
+func appendServerGatewayChecks(checks []punarodiagnostic.Check, state serverDoctorState, colocated bool) []punarodiagnostic.Check {
+	if !colocated {
+		for _, code := range []string{"gateway_service_installed", "gateway_service_enabled", "gateway_service_running", "gateway_service_executable", "gateway_service_last_exit", "gateway_service_restart_state", "gateway_release"} {
+			checks = append(checks, punarodiagnostic.OptionalUnavailable(code, "collect_gateway_report"))
+		}
+		return checks
+	}
+	checks = appendKnownServerCheck(checks, "gateway_service_installed", "install_gateway_service", state.GatewayInstalled)
+	checks = appendKnownServerCheck(checks, "gateway_service_enabled", "enable_gateway_service", state.GatewayEnabled)
+	checks = appendKnownServerCheck(checks, "gateway_service_running", "repair_gateway_service", state.GatewayRunning)
+	checks = appendKnownServerCheck(checks, "gateway_service_executable", "repair_gateway_service_binding", state.GatewayExecutable)
+	checks = appendKnownServerCheck(checks, "gateway_service_last_exit", "inspect_gateway_service_exit", state.GatewayExitStatus)
+	checks = appendKnownServerCheck(checks, "gateway_service_restart_state", "repair_gateway_service_restart", state.GatewayRestartState)
+	return appendKnownServerCheck(checks, "gateway_release", "install_compatible_gateway_release", state.GatewayRelease)
 }
 
 type serverPathDiagnostic struct {

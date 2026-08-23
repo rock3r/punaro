@@ -285,7 +285,7 @@ func TestTelegramDoctorProducesStrictHealthyContentFreeReport(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if report.Component != punarodiagnostic.ComponentTelegram || report.Identity.MachineID != "telegram-machine" || report.Identity.Release != "v0.1.0-alpha.1" || report.Identity.Protocol != relay.ProtocolVersion || !report.Healthy {
+	if report.Component != punarodiagnostic.ComponentTelegram || report.Identity.MachineID != "telegram-machine" || report.Identity.Release != "v0.1.0-alpha.1" || report.Identity.ReleaseSequence != 1 || report.Identity.CatalogSequence != 1 || report.Identity.Protocol != relay.ProtocolVersion || !report.Healthy {
 		t.Fatalf("report=%#v", report)
 	}
 	for _, secret := range []string{"bot-secret", "access-secret", directory, "relay.example"} {
@@ -412,6 +412,7 @@ func setTelegramDoctorFakes(t *testing.T, now time.Time, relayResult adapter.Doc
 	oldRelay, oldNotifications := telegramDoctorRelayProbe, telegramDoctorNotificationProbe
 	oldBot, oldService := telegramDoctorBotProbe, telegramDoctorServiceProbe
 	oldNow, oldRelease := telegramDoctorNow, telegramBuildRelease
+	oldSequence, oldCatalogSequence := telegramBuildSequence, telegramBuildCatalogSequence
 	telegramDoctorRelayProbe = func(context.Context, config) (adapter.DoctorProbeResult, error) { return relayResult, nil }
 	telegramDoctorNotificationProbe = func(context.Context, config) (adapter.DoctorProbeResult, error) { return relayResult, nil }
 	telegramDoctorBotProbe = func(context.Context, config) error { return botErr }
@@ -420,10 +421,13 @@ func setTelegramDoctorFakes(t *testing.T, now time.Time, relayResult adapter.Doc
 	}
 	telegramDoctorNow = func() time.Time { return now }
 	telegramBuildRelease = "v0.1.0-alpha.1"
+	telegramBuildSequence = "1"
+	telegramBuildCatalogSequence = "1"
 	t.Cleanup(func() {
 		telegramDoctorRelayProbe, telegramDoctorNotificationProbe = oldRelay, oldNotifications
 		telegramDoctorBotProbe, telegramDoctorServiceProbe = oldBot, oldService
 		telegramDoctorNow, telegramBuildRelease = oldNow, oldRelease
+		telegramBuildSequence, telegramBuildCatalogSequence = oldSequence, oldCatalogSequence
 	})
 }
 

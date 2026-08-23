@@ -27,10 +27,14 @@ const (
 	maximumHealthyCycleAge       = 2 * time.Minute
 )
 
-// telegramBuildRelease is set from a verified release build with -X. Empty
-// development builds fail release-provenance readiness without inventing an
-// identity.
-var telegramBuildRelease string
+// Telegram release identity is set from a verified release build with -X.
+// Empty development builds fail release-provenance readiness without inventing
+// an identity.
+var (
+	telegramBuildRelease         string
+	telegramBuildSequence        string
+	telegramBuildCatalogSequence string
+)
 
 type telegramServiceDoctorResult struct {
 	Installed    bool
@@ -144,7 +148,9 @@ func runTelegramDoctor(args []string, stdout, stderr io.Writer) int {
 		}
 	}
 
-	identity := punarodiagnostic.Identity{MachineID: cfg.machineID, Release: telegramBuildRelease, Protocol: relay.ProtocolVersion, Platform: runtime.GOOS + "-" + runtime.GOARCH}
+	releaseSequence, _ := strconv.ParseInt(telegramBuildSequence, 10, 64)
+	catalogSequence, _ := strconv.ParseInt(telegramBuildCatalogSequence, 10, 64)
+	identity := punarodiagnostic.Identity{MachineID: cfg.machineID, Release: telegramBuildRelease, ReleaseSequence: releaseSequence, CatalogSequence: catalogSequence, Protocol: relay.ProtocolVersion, Platform: runtime.GOOS + "-" + runtime.GOARCH}
 	report, reportErr := punarodiagnostic.New(punarodiagnostic.ComponentTelegram, identity, checks)
 	return writeTelegramDoctorReport(stdout, stderr, report, reportErr)
 }

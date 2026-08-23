@@ -457,7 +457,7 @@ func preserveDependencies(t *testing.T) {
 		return punaropostgres.SchemaState{Classification: punaropostgres.Compatible, Version: 5}, nil
 	}
 	maintenanceActive = func(context.Context, string) (bool, error) { return false, nil }
-	serverDoctorInspect = func(context.Context, operator.Installation) serverDoctorState {
+	serverDoctorInspect = func(context.Context, operator.Installation, string, bool) serverDoctorState {
 		return healthyServerDoctorState()
 	}
 }
@@ -754,7 +754,7 @@ func TestDoctorClassifiesOldSchemaBeforeRolePair(t *testing.T) {
 	verifyInstallationPair = func(context.Context, string, string) error { pairChecked = true; return errors.New("must not run") }
 	probe = func(context.Context, string) error { return nil }
 	var stdout, stderr bytes.Buffer
-	if code := run([]string{"doctor", "--directory", directory}, &stdout, &stderr); code != 1 || pairChecked || !strings.Contains(stdout.String(), `"code": "database_schema"`) || !strings.Contains(stdout.String(), `"code": "database_pair"`) || !strings.Contains(stdout.String(), `"status": "unavailable"`) {
+	if code := run([]string{"doctor", "--directory", directory, "--machine-id", "punaro-lxc"}, &stdout, &stderr); code != 1 || pairChecked || !strings.Contains(stdout.String(), `"code": "database_schema"`) || !strings.Contains(stdout.String(), `"code": "database_pair"`) || !strings.Contains(stdout.String(), `"status": "unavailable"`) {
 		t.Fatalf("code=%d pairChecked=%t stdout=%q stderr=%q", code, pairChecked, stdout.String(), stderr.String())
 	}
 }
@@ -835,7 +835,7 @@ func TestDoctorFailsForConfigurationDriftAndRoleMismatch(t *testing.T) {
 	}
 	probe = func(context.Context, string) error { return nil }
 	var stdout, stderr bytes.Buffer
-	if code := run([]string{"doctor", "--directory", directory}, &stdout, &stderr); code != 1 || !strings.Contains(stdout.String(), `"healthy": false`) || !strings.Contains(stdout.String(), `"code": "database_pair"`) || !strings.Contains(stdout.String(), `"code": "backup_directory"`) {
+	if code := run([]string{"doctor", "--directory", directory, "--machine-id", "punaro-lxc"}, &stdout, &stderr); code != 1 || !strings.Contains(stdout.String(), `"healthy": false`) || !strings.Contains(stdout.String(), `"code": "database_pair"`) || !strings.Contains(stdout.String(), `"code": "backup_directory"`) {
 		t.Fatalf("code=%d stdout=%q stderr=%q", code, stdout.String(), stderr.String())
 	}
 }
@@ -843,21 +843,44 @@ func TestDoctorFailsForConfigurationDriftAndRoleMismatch(t *testing.T) {
 func TestDoctorEmitsStrictContentFreeServerReport(t *testing.T) {
 	preserveDependencies(t)
 	directory := testInstallation(t)
+	serverDoctorInspect = func(_ context.Context, _ operator.Installation, machineID string, gatewayColocated bool) serverDoctorState {
+		if machineID != "punaro-lxc" || gatewayColocated {
+			t.Fatalf("doctor inputs machine=%q gateway_colocated=%t", machineID, gatewayColocated)
+		}
+		return healthyServerDoctorState()
+	}
 	inspectSchema = func(context.Context, string) (punaropostgres.SchemaState, error) {
 		return punaropostgres.SchemaState{Classification: punaropostgres.Compatible, Version: 44}, nil
 	}
 	probe = func(context.Context, string) error { return nil }
 	var stdout, stderr bytes.Buffer
-	if code := run([]string{"doctor", "--directory", directory}, &stdout, &stderr); code != 0 {
+	if code := run([]string{"doctor", "--directory", directory, "--machine-id", "punaro-lxc"}, &stdout, &stderr); code != 0 {
 		t.Fatalf("code=%d stdout=%q stderr=%q", code, stdout.String(), stderr.String())
 	}
 	report, err := punarodiagnostic.Decode(bytes.NewReader(stdout.Bytes()))
-	if err != nil || report.Component != punarodiagnostic.ComponentServer || !report.Healthy || report.Identity.StorageSchema != 44 || report.Identity.ArtifactDigest != "sha256:"+strings.Repeat("a", 64) {
+	if err != nil || report.Component != punarodiagnostic.ComponentServer || !report.Healthy || report.Identity.MachineID != "punaro-lxc" || report.Identity.StorageSchema != 44 || report.Identity.ArtifactDigest != "sha256:"+strings.Repeat("a", 64) {
 		t.Fatalf("report=%#v err=%v stderr=%q", report, err, stderr.String())
+	}
+	for _, check := range report.Checks {
+		if strings.HasPrefix(check.Code, "gateway_") && (check.Required || check.Status != punarodiagnostic.StatusUnavailable || check.Remediation != "collect_gateway_report") {
+			t.Fatalf("split gateway check=%#v", check)
+		}
 	}
 	for _, forbidden := range []string{directory, "postgres://", "invalid", "127.0.0.1", "registry.example"} {
 		if strings.Contains(stdout.String(), forbidden) {
 			t.Fatalf("doctor leaked %q: %s", forbidden, stdout.String())
+		}
+	}
+}
+
+func TestDoctorRequiresExplicitValidServerMachineIdentity(t *testing.T) {
+	directory := testInstallation(t)
+	for _, args := range [][]string{
+		{"doctor", "--directory", directory},
+		{"doctor", "--directory", directory, "--machine-id", "bad/id"},
+	} {
+		if code := run(args, io.Discard, io.Discard); code != 2 {
+			t.Fatalf("args=%v code=%d", args, code)
 		}
 	}
 }
@@ -900,10 +923,10 @@ func TestDoctorClassifiesEveryExtendedServerDependency(t *testing.T) {
 	state.GatewayExitStatus.Known = false
 	state.GatewayRestartState.OK = false
 	state.GatewayRelease.OK = false
-	serverDoctorInspect = func(context.Context, operator.Installation) serverDoctorState { return state }
+	serverDoctorInspect = func(context.Context, operator.Installation, string, bool) serverDoctorState { return state }
 
 	var stdout, stderr bytes.Buffer
-	if code := run([]string{"doctor", "--directory", directory}, &stdout, &stderr); code != 1 {
+	if code := run([]string{"doctor", "--directory", directory, "--machine-id", "punaro-lxc", "--gateway-co-located"}, &stdout, &stderr); code != 1 {
 		t.Fatalf("code=%d stdout=%q stderr=%q", code, stdout.String(), stderr.String())
 	}
 	report, err := punarodiagnostic.Decode(bytes.NewReader(stdout.Bytes()))
