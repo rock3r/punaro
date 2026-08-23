@@ -198,12 +198,45 @@ func inspectServerRelay(parent context.Context, installation operator.Installati
 	if err != nil {
 		return knownDoctorBool{}, knownDoctorBool{}, knownDoctorBool{}, knownDoctorBool{}, knownDoctorBool{}
 	}
+	if !installation.RelayEnabled {
+		route, origin, access := inspectServerPublicEdge(parent, installation.Ingress.PublicURL, profile, &http.Client{Timeout: 5 * time.Second})
+		return route, origin, access, knownDoctorBool{}, knownDoctorBool{}
+	}
 	client, err := adapter.NewHTTPRelayClient(profile.RelayURL, profile.MachineID, profile.PrivateKey, &http.Client{Timeout: 5 * time.Second}, profile.AccessToken)
 	if err != nil {
 		return knownDoctorBool{}, knownDoctorBool{}, knownDoctorBool{}, knownDoctorBool{}, knownDoctorBool{}
 	}
 	result, _ := client.Doctor(parent)
 	return known(true, result.Transport), known(result.Transport, result.Origin), known(result.Transport, result.Access), known(result.Origin, result.Enrolled), known(result.Enrolled, result.Protocol)
+}
+
+func inspectServerPublicEdge(ctx context.Context, publicURL string, profile serverDoctorProfile, baseClient *http.Client) (knownDoctorBool, knownDoctorBool, knownDoctorBool) {
+	if strings.TrimSuffix(profile.RelayURL, "/") != strings.TrimSuffix(publicURL, "/") {
+		failed := known(true, false)
+		return failed, failed, failed
+	}
+	client, err := adapter.OpenAccessSession(ctx, profile.RelayURL, baseClient, profile.AccessToken)
+	if err != nil {
+		failed := known(true, false)
+		return failed, failed, failed
+	}
+	client.CheckRedirect = func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }
+	request, err := http.NewRequestWithContext(ctx, http.MethodHead, strings.TrimSuffix(profile.RelayURL, "/")+"/", nil)
+	if err != nil {
+		failed := known(true, false)
+		return failed, failed, failed
+	}
+	if profile.AccessToken.ClientID != "" {
+		request.Header.Set("CF-Access-Client-Id", profile.AccessToken.ClientID)
+		request.Header.Set("CF-Access-Client-Secret", profile.AccessToken.ClientSecret)
+	}
+	response, err := client.Do(request)
+	if err != nil {
+		return known(true, false), knownDoctorBool{}, knownDoctorBool{}
+	}
+	defer func() { _ = response.Body.Close() }()
+	origin := response.StatusCode == http.StatusNotFound && response.Header.Get("Cache-Control") == "no-store" && response.Header.Get("X-Content-Type-Options") == "nosniff" && response.Header.Get("X-Frame-Options") == "DENY"
+	return known(true, true), known(true, origin), known(true, origin)
 }
 
 type serverDoctorProfile struct {

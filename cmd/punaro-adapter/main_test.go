@@ -7,6 +7,7 @@ import (
 	"crypto/rand"
 	"crypto/sha256"
 	"encoding/base64"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -300,7 +301,16 @@ func TestAdapterDoctorEmitsStrictHealthyReport(t *testing.T) {
 	healthy := adapter.DoctorProbeResult{Transport: true, Origin: true, Access: true, Enrolled: true, Protocol: true, AttachmentsKnown: true, ActiveEndpoints: 2, ExpiredEndpoints: 3, ExpiredRoles: 4}
 	adapterDoctorRelayProbe = func(context.Context, adapterConfig) (adapter.DoctorProbeResult, error) { return healthy, nil }
 	adapterDoctorNotificationProbe = func(context.Context, adapterConfig) (adapter.DoctorProbeResult, error) { return healthy, nil }
-	adapterDoctorMailboxProbe = func(context.Context, adapterConfig) error { return nil }
+	adapterDoctorMailboxProbe = func(context.Context, adapterConfig) (mailboxDoctorResult, error) {
+		return mailboxDoctorResult{Attached: []string{"agent/a", "agent/b"}}, nil
+	}
+	probedEndpoints := make([]string, 0, 2)
+	adapterDoctorEndpointProbe = func(_ context.Context, _ adapterConfig, endpoint string) (adapter.DoctorProbeResult, error) {
+		probedEndpoints = append(probedEndpoints, endpoint)
+		result := healthy
+		result.Attached = true
+		return result, nil
+	}
 	adapterDoctorServiceProbe = func(context.Context, adapterConfig) serviceDoctorResult {
 		return serviceDoctorResult{Installed: true, Enabled: true, Running: true, Executable: true, ExitStatus: true, RestartState: true}
 	}
@@ -322,6 +332,9 @@ func TestAdapterDoctorEmitsStrictHealthyReport(t *testing.T) {
 	report, err := punarodiagnostic.Decode(bytes.NewReader(stdout.Bytes()))
 	if err != nil || !report.Healthy || report.Component != punarodiagnostic.ComponentAdapter || report.Identity.MachineID != "profile-machine" || report.Identity.Protocol != 1 {
 		t.Fatalf("report=%#v err=%v", report, err)
+	}
+	if strings.Join(probedEndpoints, ",") != "agent/a,agent/b" {
+		t.Fatalf("endpoint probes=%v", probedEndpoints)
 	}
 	for _, code := range []string{"expired_endpoint_bindings", "expired_role_bindings"} {
 		found := false
@@ -380,7 +393,12 @@ func TestAdapterDoctorReportsIndependentRelayFailures(t *testing.T) {
 	adapterDoctorNotificationProbe = func(context.Context, adapterConfig) (adapter.DoctorProbeResult, error) {
 		return adapter.DoctorProbeResult{Transport: true, Origin: true, Access: true, Enrolled: true, Protocol: true}, nil
 	}
-	adapterDoctorMailboxProbe = func(context.Context, adapterConfig) error { return nil }
+	adapterDoctorMailboxProbe = func(context.Context, adapterConfig) (mailboxDoctorResult, error) {
+		return mailboxDoctorResult{Attached: []string{"agent/a"}}, nil
+	}
+	adapterDoctorEndpointProbe = func(context.Context, adapterConfig, string) (adapter.DoctorProbeResult, error) {
+		return adapter.DoctorProbeResult{Transport: true, Origin: true, Access: true, Enrolled: true, Protocol: true, Attached: true}, nil
+	}
 	adapterDoctorServiceProbe = func(context.Context, adapterConfig) serviceDoctorResult {
 		return serviceDoctorResult{Installed: true, Enabled: true, Running: true, Executable: true, ExitStatus: true, RestartState: true}
 	}
@@ -394,6 +412,35 @@ func TestAdapterDoctorReportsIndependentRelayFailures(t *testing.T) {
 	}
 	if strings.Contains(stdout.String(), "secret") || strings.Contains(stdout.String(), "https://") || strings.Contains(stdout.String(), "provider") {
 		t.Fatalf("doctor leaked remote error: %s", stdout.String())
+	}
+}
+
+func TestAdapterDoctorRejectsStaleMachineAttachmentForCurrentEndpoint(t *testing.T) {
+	clearAdapterEnvironment(t)
+	preserveAdapterDoctorDependencies(t)
+	profile := writeInstallerProfile(t, "https://relay.example")
+	mailboxState := filepath.Join(filepath.Dir(filepath.Dir(filepath.Dir(profile))), ".local", "state", "ai-agent", "mailbox")
+	if err := os.MkdirAll(mailboxState, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv(adapterProfileFileEnv, profile)
+	healthy := adapter.DoctorProbeResult{Transport: true, Origin: true, Access: true, Enrolled: true, Protocol: true, AttachmentsKnown: true, ActiveEndpoints: 1}
+	adapterDoctorRelayProbe = func(context.Context, adapterConfig) (adapter.DoctorProbeResult, error) { return healthy, nil }
+	adapterDoctorNotificationProbe = func(context.Context, adapterConfig) (adapter.DoctorProbeResult, error) { return healthy, nil }
+	adapterDoctorMailboxProbe = func(context.Context, adapterConfig) (mailboxDoctorResult, error) {
+		return mailboxDoctorResult{Attached: []string{"agent/current"}}, nil
+	}
+	adapterDoctorEndpointProbe = func(context.Context, adapterConfig, string) (adapter.DoctorProbeResult, error) {
+		return adapter.DoctorProbeResult{Transport: true, Origin: true, Access: true, Enrolled: true, Protocol: true}, nil
+	}
+	adapterDoctorServiceProbe = func(context.Context, adapterConfig) serviceDoctorResult { return serviceDoctorResult{} }
+	var stdout bytes.Buffer
+	if code := runAdapterDoctor(nil, &stdout, io.Discard); code != 1 {
+		t.Fatalf("code=%d report=%s", code, stdout.String())
+	}
+	report, err := punarodiagnostic.Decode(bytes.NewReader(stdout.Bytes()))
+	if err != nil || checkStatus(report, "endpoint_attachment") != punarodiagnostic.StatusFail {
+		t.Fatalf("report=%#v err=%v", report, err)
 	}
 }
 
@@ -423,6 +470,72 @@ exit 0
 	defer cancel()
 	if err := probeMailboxMCP(ctx, adapterConfig{mailboxBinary: helper, mailboxState: state}); err != nil {
 		t.Fatal(err)
+	}
+}
+
+func TestMailboxDoctorReadsOnlyBoundedActiveAttachments(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("POSIX helper fixture")
+	}
+	writeHelper := func(body string) string {
+		helper := filepath.Join(t.TempDir(), "agent-mailbox")
+		script := "#!/bin/sh\nprintf '%s\\n' '" + body + "'\n"
+		if err := os.WriteFile(helper, []byte(script), 0o700); err != nil { // #nosec G306 -- executable test helper.
+			t.Fatal(err)
+		}
+		return helper
+	}
+	mailboxState := t.TempDir()
+	if err := os.Chmod(mailboxState, 0o700); err != nil { // #nosec G302 -- private mailbox fixture.
+		t.Fatal(err)
+	}
+	config := adapterConfig{mailboxBinary: writeHelper(`[{"person":"agent/b","active":true},{"person":"agent/retired","active":false},{"person":"agent/a","active":true}]`), mailboxState: mailboxState, attachedGroup: "group/punaro"}
+	attached, err := probeMailboxAttachments(t.Context(), config)
+	if err != nil || strings.Join(attached, ",") != "agent/a,agent/b" {
+		t.Fatalf("attached=%v err=%v", attached, err)
+	}
+	memberships := make([]map[string]any, maximumMailboxDoctorEndpoints+1)
+	for index := range memberships {
+		memberships[index] = map[string]any{"person": fmt.Sprintf("agent/%03d", index), "active": true}
+	}
+	oversized, err := json.Marshal(memberships)
+	if err != nil {
+		t.Fatal(err)
+	}
+	config.mailboxBinary = writeHelper(string(oversized))
+	if _, err := probeMailboxAttachments(t.Context(), config); err == nil {
+		t.Fatal("oversized mailbox attachment set was accepted")
+	}
+}
+
+func TestMailboxDoctorRejectsAttachmentReadMutation(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("POSIX helper fixture")
+	}
+	state := t.TempDir()
+	if err := os.Chmod(state, 0o700); err != nil { // #nosec G302 -- private mailbox fixture.
+		t.Fatal(err)
+	}
+	helper := filepath.Join(t.TempDir(), "agent-mailbox")
+	script := `#!/bin/sh
+if [ "$3" = group ]; then
+  printf '%s\n' changed >"$2/doctor-mutated"
+  printf '%s\n' '[{"person":"agent/a","active":true}]'
+  exit 0
+fi
+read initialize
+printf '%s\n' '{"jsonrpc":"2.0","id":1,"result":{"protocolVersion":"2024-11-05","capabilities":{},"serverInfo":{"name":"fixture","version":"1"}}}'
+read initialized
+read tools
+printf '%s\n' '{"jsonrpc":"2.0","id":2,"result":{"tools":[]}}'
+exit 0
+`
+	if err := os.WriteFile(helper, []byte(script), 0o700); err != nil { // #nosec G306 -- executable test helper.
+		t.Fatal(err)
+	}
+	_, err := probeAdapterMailbox(t.Context(), adapterConfig{mailboxBinary: helper, mailboxState: state, attachedGroup: "group/punaro"})
+	if err == nil || err.Error() != "mailbox changed state during doctor" {
+		t.Fatalf("attachment read mutation error=%v", err)
 	}
 }
 
@@ -608,13 +721,14 @@ func checkStatus(report punarodiagnostic.Report, code string) punarodiagnostic.S
 func preserveAdapterDoctorDependencies(t *testing.T) {
 	t.Helper()
 	configLoad := adapterDoctorConfigLoad
-	relayProbe, notificationProbe := adapterDoctorRelayProbe, adapterDoctorNotificationProbe
+	relayProbe, notificationProbe, endpointProbe := adapterDoctorRelayProbe, adapterDoctorNotificationProbe, adapterDoctorEndpointProbe
 	mailboxProbe, serviceProbe := adapterDoctorMailboxProbe, adapterDoctorServiceProbe
 	bootstrapReleaseProbe, bootstrapProbe, pluginProbe := adapterDoctorBootstrapReleaseProbe, adapterDoctorBootstrapProbe, adapterDoctorPluginProbe
 	buildRelease := adapterBuildRelease
 	t.Cleanup(func() {
 		adapterDoctorConfigLoad = configLoad
 		adapterDoctorRelayProbe, adapterDoctorNotificationProbe = relayProbe, notificationProbe
+		adapterDoctorEndpointProbe = endpointProbe
 		adapterDoctorMailboxProbe, adapterDoctorServiceProbe = mailboxProbe, serviceProbe
 		adapterDoctorBootstrapReleaseProbe, adapterDoctorBootstrapProbe, adapterDoctorPluginProbe = bootstrapReleaseProbe, bootstrapProbe, pluginProbe
 		adapterBuildRelease = buildRelease

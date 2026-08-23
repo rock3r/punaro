@@ -32,6 +32,7 @@ const (
 	maximumMailboxDoctorOutput    = 64 << 10
 	maximumMailboxDoctorEntries   = 4096
 	maximumMailboxDoctorBytes     = 64 << 20
+	maximumMailboxDoctorEndpoints = 256
 	maximumBootstrapVersionOutput = 256
 )
 
@@ -51,6 +52,10 @@ type pluginDoctorResult struct {
 	Launcher    bool
 	Version     string
 	SkillDigest string
+}
+
+type mailboxDoctorResult struct {
+	Attached []string
 }
 
 type boundedDoctorOutput struct {
@@ -92,7 +97,14 @@ var (
 		}
 		return client.DoctorNotifications(ctx)
 	}
-	adapterDoctorMailboxProbe          = probeMailboxMCP
+	adapterDoctorEndpointProbe = func(ctx context.Context, config adapterConfig, endpoint string) (adapter.DoctorProbeResult, error) {
+		client, err := adapter.NewHTTPRelayClientWithPolicy(config.relayURL, config.machineID, config.privateKey, nil, config.accessToken, config.transportPolicy)
+		if err != nil {
+			return adapter.DoctorProbeResult{}, errors.New("relay endpoint doctor client is invalid")
+		}
+		return client.DoctorEndpoint(ctx, endpoint)
+	}
+	adapterDoctorMailboxProbe          = probeAdapterMailbox
 	adapterDoctorServiceProbe          = inspectAdapterService
 	adapterDoctorBootstrapReleaseProbe = func(ctx context.Context) string {
 		return inspectAdapterBootstrapRelease(ctx, defaultAdapterBootstrapExecutable())
@@ -160,6 +172,7 @@ func runAdapterDoctor(args []string, stdout, stderr io.Writer) int {
 		boolDoctorCheck(config.identityFile != "", "client_identity_file", "install_client_identity"),
 		boolDoctorCheck(distinctDoctorPaths(config), "installer_path_aliases", "repair_installer_paths"),
 	}
+	mailbox, mailboxErr := adapterDoctorMailboxProbe(ctx, config)
 	if privateDoctorDirectory(config.dataDir) {
 		checks = append(checks, punarodiagnostic.Pass("adapter_data_directory"))
 	} else {
@@ -168,15 +181,19 @@ func runAdapterDoctor(args []string, stdout, stderr io.Writer) int {
 
 	relayResult, _ := adapterDoctorRelayProbe(ctx, config)
 	checks = append(checks, relayDoctorChecks("relay", relayResult)...)
+	switch {
+	case mailboxErr != nil:
+		checks = append(checks, punarodiagnostic.Unavailable("endpoint_attachment", "repair_mailbox_mcp"))
+	default:
+		checks = append(checks, boolDoctorCheck(adapterEndpointsAttached(ctx, config, mailbox.Attached), "endpoint_attachment", "restart_endpoint_attachment"))
+	}
 	if relayResult.AttachmentsKnown {
 		checks = append(checks,
-			boolDoctorCheck(relayResult.ActiveEndpoints > 0, "endpoint_attachment", "restart_endpoint_attachment"),
 			retiredBindingDoctorCheck(relayResult.ExpiredEndpoints, "expired_endpoint_bindings", "inspect_retired_endpoint_bindings"),
 			retiredBindingDoctorCheck(relayResult.ExpiredRoles, "expired_role_bindings", "inspect_retired_role_bindings"),
 		)
 	} else {
 		checks = append(checks,
-			punarodiagnostic.Unavailable("endpoint_attachment", "install_compatible_release"),
 			punarodiagnostic.OptionalUnavailable("expired_endpoint_bindings", "install_compatible_release"),
 			punarodiagnostic.OptionalUnavailable("expired_role_bindings", "install_compatible_release"),
 		)
@@ -190,7 +207,7 @@ func runAdapterDoctor(args []string, stdout, stderr io.Writer) int {
 			punarodiagnostic.Fail("mailbox_state_directory", "repair_mailbox_state_directory"),
 			punarodiagnostic.Unavailable("mailbox_mcp", "repair_mailbox_configuration"),
 		)
-	} else if err := adapterDoctorMailboxProbe(ctx, config); err != nil {
+	} else if mailboxErr != nil {
 		checks = append(checks, punarodiagnostic.Pass("mailbox_executable"), punarodiagnostic.Pass("mailbox_state_directory"), punarodiagnostic.Fail("mailbox_mcp", "repair_mailbox_mcp"))
 	} else {
 		checks = append(checks, punarodiagnostic.Pass("mailbox_executable"), punarodiagnostic.Pass("mailbox_state_directory"), punarodiagnostic.Pass("mailbox_mcp"))
@@ -364,6 +381,82 @@ func distinctDoctorPaths(config adapterConfig) bool {
 			return false
 		}
 		seen[key] = struct{}{}
+	}
+	return true
+}
+
+func probeAdapterMailbox(ctx context.Context, config adapterConfig) (result mailboxDoctorResult, resultErr error) {
+	before, err := mailboxDoctorTreeDigest(ctx, config.mailboxState)
+	if err != nil {
+		return mailboxDoctorResult{}, errors.New("mailbox state cannot be inspected safely")
+	}
+	defer func() {
+		after, err := mailboxDoctorTreeDigest(ctx, config.mailboxState)
+		if err != nil || before != after {
+			result = mailboxDoctorResult{}
+			resultErr = errors.New("mailbox changed state during doctor")
+		}
+	}()
+	if err := probeMailboxMCP(ctx, config); err != nil {
+		return mailboxDoctorResult{}, err
+	}
+	attached, err := probeMailboxAttachments(ctx, config)
+	if err != nil {
+		return mailboxDoctorResult{}, err
+	}
+	return mailboxDoctorResult{Attached: attached}, nil
+}
+
+func probeMailboxAttachments(ctx context.Context, config adapterConfig) ([]string, error) {
+	binary, err := validateMailboxDoctorConfiguration(config)
+	if err != nil {
+		return nil, err
+	}
+	command := exec.CommandContext(ctx, binary, "--state-dir", config.mailboxState, "group", "members", "--group", config.attachedGroup, "--json") // #nosec G204,G702 -- fixed read-only mailbox command using installer configuration.
+	output := &boundedDoctorOutput{maximum: maximumMailboxDoctorOutput}
+	command.Stdout = output
+	command.Stderr = io.Discard
+	if err := command.Run(); err != nil || output.overflow {
+		return nil, errors.New("mailbox attachments are unavailable")
+	}
+	var memberships []struct {
+		Person string `json:"person"`
+		Active bool   `json:"active"`
+	}
+	if json.Unmarshal([]byte(output.buffer.String()), &memberships) != nil || len(memberships) > maximumMailboxDoctorEndpoints {
+		return nil, errors.New("mailbox attachments are invalid")
+	}
+	attached := make([]string, 0, len(memberships))
+	seen := make(map[string]struct{}, len(memberships))
+	for _, membership := range memberships {
+		if !membership.Active {
+			continue
+		}
+		if !relay.ValidEndpoint(membership.Person) {
+			return nil, errors.New("mailbox attachments are invalid")
+		}
+		if _, duplicate := seen[membership.Person]; duplicate {
+			return nil, errors.New("mailbox attachments are invalid")
+		}
+		seen[membership.Person] = struct{}{}
+		attached = append(attached, membership.Person)
+	}
+	sort.Strings(attached)
+	return attached, nil
+}
+
+func adapterEndpointsAttached(ctx context.Context, config adapterConfig, endpoints []string) bool {
+	if len(endpoints) == 0 || len(endpoints) > maximumMailboxDoctorEndpoints {
+		return false
+	}
+	for _, endpoint := range endpoints {
+		if ctx.Err() != nil || !relay.ValidEndpoint(endpoint) {
+			return false
+		}
+		result, err := adapterDoctorEndpointProbe(ctx, config, endpoint)
+		if err != nil || !result.Transport || !result.Origin || !result.Access || !result.Enrolled || !result.Protocol || !result.Attached {
+			return false
+		}
 	}
 	return true
 }

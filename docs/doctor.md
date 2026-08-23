@@ -58,13 +58,17 @@ its local-service checks are optional in the server report and its own
 only when this server host is explicitly expected to own and run the local
 `punaro-telegram` system service.
 
-An Internet/proxy installation also needs `--relay-profile` so the five edge
-checks probe the real public route, origin, Access admission, enrolled relay
-identity, and protocol. The profile writer refuses replacement, creates mode
+An Internet/proxy installation also needs `--relay-profile` so the edge checks
+probe the real public route, origin, and Access admission. When relay is
+enabled, the same probe also requires the enrolled relay identity and protocol.
+When relay is intentionally disabled, those two relay-only checks are optional
+and unavailable; the public-edge checks use the content-free non-relay root
+route instead. The profile writer refuses replacement, creates mode
 `0600` on Unix, validates every referenced credential before writing, and
-prints no credential value. Its relay machine must already be enrolled for the
-read-only doctor handshake. The referenced private-key file contains exactly
-one unpadded base64url Ed25519 private key. The protected Access file contains
+prints no credential value. Its relay machine must already be enrolled when
+relay is enabled and the signed read-only handshake is required. The referenced
+private-key file contains exactly one unpadded base64url Ed25519 private key.
+The protected Access file contains
 exactly these two lines (with the actual values supplied by the operator):
 
 ```text
@@ -181,7 +185,10 @@ Relay and attachment state: `relay_transport`, `relay_origin`, `relay_access`,
 `notification_protocol`, `endpoint_attachment`, `expired_endpoint_bindings`,
 `expired_role_bindings`.
 
-`endpoint_attachment` is the required current-state gate. The two `expired_*`
+`endpoint_attachment` is the required current-state gate. It reads the bounded
+active membership set from the configured local mailbox group and verifies
+every exact current endpoint with a signed relay endpoint probe; a stale lease
+for some other endpoint cannot satisfy the gate. The two `expired_*`
 checks are informational and optional because normal endpoint or role
 retirement leaves durable tombstones for referential and audit history; their
 presence alone does not make an otherwise current adapter unhealthy. They
@@ -298,6 +305,7 @@ operator explicitly approves that separate action.
   owner-only modes/ACLs, follow aliases, overwrite local mailbox state, or edit
   slot records.
 - Relay, edge, and identity: `configure_server_machine_identity`,
+  `enable_relay_to_require_relay_checks`,
   `repair_access_service_auth`, `repair_server_doctor_enrollment`,
   `repair_tunnel_route`, `repair_tunnel_device_route`,
   `restart_endpoint_attachment`, `restart_gateway_attachment`,
@@ -310,6 +318,8 @@ operator explicitly approves that separate action.
   Access policy, enrollment, protocol, and attachment/role lifecycle. Never
   issue a new credential, widen ingress, invent an endpoint, or change routing
   merely because doctor reported the identifier.
+  `enable_relay_to_require_relay_checks` describes why a relay-disabled check
+  is optional; enable relay only when that deployment mode is actually wanted.
 - Server paths and topology: `repair_installation_configuration`,
   `repair_installation_directory`, `repair_installation_paths`,
   `repair_data_directory`, `repair_backup_directory`,

@@ -10,6 +10,8 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -18,6 +20,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/rock3r/punaro/internal/adapter"
 	punarobackup "github.com/rock3r/punaro/internal/backup"
 	punarodiagnostic "github.com/rock3r/punaro/internal/diagnostic"
 	"github.com/rock3r/punaro/internal/ingress"
@@ -896,7 +899,10 @@ func TestDoctorEmitsStrictContentFreeServerReport(t *testing.T) {
 		if relayProfile != "/run/punaro/server-doctor.env" {
 			t.Fatalf("relay profile=%q", relayProfile)
 		}
-		return healthyServerDoctorState()
+		state := healthyServerDoctorState()
+		state.RelayEnrollment = knownDoctorBool{}
+		state.RelayProtocol = knownDoctorBool{}
+		return state
 	}
 	inspectSchema = func(context.Context, string) (punaropostgres.SchemaState, error) {
 		return punaropostgres.SchemaState{Classification: punaropostgres.Compatible, Version: 44}, nil
@@ -914,11 +920,32 @@ func TestDoctorEmitsStrictContentFreeServerReport(t *testing.T) {
 		if strings.HasPrefix(check.Code, "gateway_") && (check.Required || check.Status != punarodiagnostic.StatusUnavailable || check.Remediation != "collect_gateway_report") {
 			t.Fatalf("split gateway check=%#v", check)
 		}
+		if (check.Code == "relay_enrollment" || check.Code == "relay_protocol") && (check.Required || check.Status != punarodiagnostic.StatusUnavailable || check.Remediation != "enable_relay_to_require_relay_checks") {
+			t.Fatalf("disabled relay check=%#v", check)
+		}
 	}
 	for _, forbidden := range []string{directory, "postgres://", "invalid", "127.0.0.1", "registry.example"} {
 		if strings.Contains(stdout.String(), forbidden) {
 			t.Fatalf("doctor leaked %q: %s", forbidden, stdout.String())
 		}
+	}
+}
+
+func TestServerDoctorUsesNonRelayPublicEdgeProbeWhenRelayDisabled(t *testing.T) {
+	server := httptest.NewTLSServer(http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {
+		if request.Method != http.MethodHead || request.URL.Path != "/" {
+			t.Fatalf("request=%s %s", request.Method, request.URL.Path)
+		}
+		response.Header().Set("Cache-Control", "no-store")
+		response.Header().Set("X-Content-Type-Options", "nosniff")
+		response.Header().Set("X-Frame-Options", "DENY")
+		http.NotFound(response, request)
+	}))
+	defer server.Close()
+	profile := serverDoctorProfile{RelayURL: server.URL, AccessToken: adapter.AccessServiceToken{}}
+	route, origin, access := inspectServerPublicEdge(t.Context(), server.URL, profile, server.Client())
+	if !route.Known || !route.OK || !origin.Known || !origin.OK || !access.Known || !access.OK {
+		t.Fatalf("route=%#v origin=%#v access=%#v", route, origin, access)
 	}
 }
 
@@ -937,6 +964,13 @@ func TestDoctorRequiresExplicitValidServerMachineIdentity(t *testing.T) {
 func TestDoctorClassifiesEveryExtendedServerDependency(t *testing.T) {
 	preserveDependencies(t)
 	directory := testInstallation(t)
+	relayMachines := filepath.Join(t.TempDir(), "relay-machines.json")
+	if err := os.WriteFile(relayMachines, []byte(`[{"id":"machine-a","public_key":"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA","endpoint_prefixes":["agent/a/"],"endpoints":[],"attachment_device_id":""}]`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := operator.ConfigureRelayMachines(directory, relayMachines); err != nil {
+		t.Fatal(err)
+	}
 	inspectSchema = func(context.Context, string) (punaropostgres.SchemaState, error) {
 		return punaropostgres.SchemaState{Classification: punaropostgres.Compatible, Version: 44}, nil
 	}

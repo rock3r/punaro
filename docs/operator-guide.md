@@ -531,8 +531,10 @@ Use `punaro status --directory ...` for a non-mutating report and `punaro doctor
 --directory ... --machine-id punaro-lxc --relay-profile
 /absolute/private/server-doctor.env` for an Internet/proxy failing health gate.
 Provision that owner-only profile with `punaro doctor-profile write`; it stores
-only the fixed origin, enrolled diagnostic machine ID, and absolute references
-to separately protected Ed25519 and Cloudflare Access credential files. The
+only the fixed origin, diagnostic machine ID, and absolute references to
+separately protected Ed25519 and Cloudflare Access credential files. The
+diagnostic machine must be enrolled when relay is enabled; relay-only checks
+are optional when relay is intentionally disabled. The
 exact formats and trusted-LAN omission are in [doctor.md](doctor.md). Add
 `--gateway-co-located` only when this host is explicitly responsible for the
 local `punaro-telegram` system service; otherwise collect its separate doctor

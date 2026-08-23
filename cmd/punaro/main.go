@@ -752,8 +752,15 @@ func diagnoseServer(ctx context.Context, installation operator.Installation, mac
 	checks = appendKnownServerCheck(checks, "tunnel_route", "repair_tunnel_route", extended.TunnelRoute)
 	checks = appendKnownServerCheck(checks, "tunnel_origin", "repair_tunnel_device_route", extended.TunnelOrigin)
 	checks = appendKnownServerCheck(checks, "access_admission", "repair_access_service_auth", extended.AccessAdmission)
-	checks = appendKnownServerCheck(checks, "relay_enrollment", "repair_server_doctor_enrollment", extended.RelayEnrollment)
-	checks = appendKnownServerCheck(checks, "relay_protocol", "install_compatible_release", extended.RelayProtocol)
+	if installation.RelayEnabled {
+		checks = appendKnownServerCheck(checks, "relay_enrollment", "repair_server_doctor_enrollment", extended.RelayEnrollment)
+		checks = appendKnownServerCheck(checks, "relay_protocol", "install_compatible_release", extended.RelayProtocol)
+	} else {
+		checks = append(checks,
+			punarodiagnostic.OptionalUnavailable("relay_enrollment", "enable_relay_to_require_relay_checks"),
+			punarodiagnostic.OptionalUnavailable("relay_protocol", "enable_relay_to_require_relay_checks"),
+		)
+	}
 	checks = appendServerGatewayChecks(checks, extended, gatewayColocated)
 
 	state, schemaErr := inspectSchema(ctx, installation.AppDSNFile)
