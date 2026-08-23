@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
 
@@ -29,6 +30,24 @@ func TestHandlerIngestSnapshotRenderAndConditionalFetch(t *testing.T) {
 	handler.ServeHTTP(response, request)
 	if response.Code != http.StatusAccepted {
 		t.Fatalf("POST status = %d, body = %s", response.Code, response.Body.String())
+	}
+
+	snapshotRequest := httptest.NewRequestWithContext(context.Background(), http.MethodGet, "/v1/snapshot", nil)
+	snapshotRequest.Header.Set("Authorization", "Bearer test-token")
+	snapshotResponse := httptest.NewRecorder()
+	handler.ServeHTTP(snapshotResponse, snapshotRequest)
+	snapshotETag := snapshotResponse.Header().Get("ETag")
+	if snapshotResponse.Code != http.StatusOK || !strings.HasPrefix(snapshotETag, `W/"snapshot-`) {
+		t.Fatalf("snapshot status/etag = %d/%q", snapshotResponse.Code, snapshotETag)
+	}
+	now = now.Add(time.Second)
+	conditionalSnapshot := httptest.NewRequestWithContext(context.Background(), http.MethodGet, "/v1/snapshot", nil)
+	conditionalSnapshot.Header.Set("Authorization", "Bearer test-token")
+	conditionalSnapshot.Header.Set("If-None-Match", snapshotETag)
+	conditionalSnapshotResponse := httptest.NewRecorder()
+	handler.ServeHTTP(conditionalSnapshotResponse, conditionalSnapshot)
+	if conditionalSnapshotResponse.Code != http.StatusNotModified || conditionalSnapshotResponse.Body.Len() != 0 {
+		t.Fatalf("conditional snapshot status/body = %d/%d", conditionalSnapshotResponse.Code, conditionalSnapshotResponse.Body.Len())
 	}
 
 	renderRequest := httptest.NewRequestWithContext(context.Background(), http.MethodGet, "/v1/render/800x480.png", nil)

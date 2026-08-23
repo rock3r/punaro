@@ -13,10 +13,13 @@ func TestPanelFirmwareContractUsesConditionalValidatedRefresh(t *testing.T) {
 		t.Fatal(err)
 	}
 	source := string(payload)
-	for _, required := range []string{"If-None-Match", "ETag", "HTTP_CODE_NOT_MODIFIED", "image/png", "CANOPI_WIDTH = 800", "CANOPI_HEIGHT = 480", "int drawPNGLine(PNGDRAW *line)", "epaper.update()"} {
+	for _, required := range []string{"If-None-Match", "ETag", "HTTP_CODE_NOT_MODIFIED", "image/png", "CANOPI_WIDTH = 800", "CANOPI_HEIGHT = 480", "int drawPNGLine(PNGDRAW *line)", "PNG_RGB565_LITTLE_ENDIAN", "packedScanline[CANOPI_WIDTH / 8]", "0x80U >> (x & 7)", "reinterpret_cast<uint16_t *>(packedScanline)", "ETAG_CACHE_VERSION", "lastETagVersion != ETAG_CACHE_VERSION", "lastETag[0] = '\\0'", "epaper.update()"} {
 		if !strings.Contains(source, required) {
 			t.Errorf("panel firmware is missing %q", required)
 		}
+	}
+	if strings.Contains(source, "pushImage(0, line->y, CANOPI_WIDTH, 1, scanline)") {
+		t.Fatal("panel firmware passes RGB565 bytes directly to its one-bit sprite")
 	}
 	if notModified, refresh := strings.Index(source, "HTTP_CODE_NOT_MODIFIED"), strings.Index(source, "epaper.update()"); notModified < 0 || refresh < 0 || notModified > refresh {
 		t.Fatal("panel firmware does not handle 304 before its display refresh path")

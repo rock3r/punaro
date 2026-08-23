@@ -16,18 +16,37 @@ constexpr int MAX_PNG_BYTES = 256 * 1024;
 constexpr uint32_t POLL_INTERVAL_MS = 20000;
 constexpr uint32_t WIFI_TIMEOUT_MS = 15000;
 constexpr uint32_t DOWNLOAD_TIMEOUT_MS = 7000;
+constexpr uint32_t ETAG_CACHE_VERSION = 2;
 
 EPaper epaper;
 PNG png;
 uint16_t scanline[CANOPI_WIDTH];
+alignas(uint16_t) uint8_t packedScanline[CANOPI_WIDTH / 8];
 RTC_DATA_ATTR char lastETag[80] = "";
+RTC_DATA_ATTR uint32_t lastETagVersion = 0;
+
+bool rgb565IsWhite(uint16_t pixel) {
+  const uint32_t red = ((pixel >> 11) & 0x1f) * 255 / 31;
+  const uint32_t green = ((pixel >> 5) & 0x3f) * 255 / 63;
+  const uint32_t blue = (pixel & 0x1f) * 255 / 31;
+  return red * 299 + green * 587 + blue * 114 >= 128000;
+}
 
 int drawPNGLine(PNGDRAW *line) {
   if (line->y < 0 || line->y >= CANOPI_HEIGHT || line->iWidth != CANOPI_WIDTH) {
     return 0;
   }
-  png.getLineAsRGB565(line, scanline, PNG_RGB565_BIG_ENDIAN, 0xffffffff);
-  epaper.pushImage(0, line->y, CANOPI_WIDTH, 1, scanline);
+  png.getLineAsRGB565(line, scanline, PNG_RGB565_LITTLE_ENDIAN, 0xffffffff);
+  memset(packedScanline, 0, sizeof(packedScanline));
+  for (int x = 0; x < CANOPI_WIDTH; ++x) {
+    if (rgb565IsWhite(scanline[x])) {
+      packedScanline[x >> 3] |= static_cast<uint8_t>(0x80U >> (x & 7));
+    }
+  }
+  // EPaper is a one-bit TFT_eSprite. Its pushImage overload takes a uint16_t
+  // pointer even when the source is a packed, MSB-first one-bit bitmap.
+  epaper.pushImage(0, line->y, CANOPI_WIDTH, 1,
+                   reinterpret_cast<uint16_t *>(packedScanline));
   return 1;
 }
 
@@ -173,6 +192,11 @@ void setup() {
   if (epaper.width() != CANOPI_WIDTH || epaper.height() != CANOPI_HEIGHT) {
     Serial.println("Canopi: unexpected panel geometry");
     return;
+  }
+  if (lastETagVersion != ETAG_CACHE_VERSION) {
+    lastETag[0] = '\0';
+    lastETagVersion = ETAG_CACHE_VERSION;
+    Serial.println("Canopi: display cache invalidated after firmware update");
   }
   (void)refreshOnce();
   sleepIfConfigured();

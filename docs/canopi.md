@@ -37,7 +37,8 @@ provider command hook -> bounded durable local spool -> detached retry worker
 - `cmd/canopi` is the collector, durable current-state store and renderer host.
 - `cmd/canopi-claude-hook` is the first real provider adapter.
 - `cmd/canopi-sim` emits 19 realistic agents across three machines and moves
-  one agent between working and permission-waiting on successive ticks.
+  one agent between working and permission-waiting with current activity times
+  on successive ticks. Each process run scopes its event IDs independently.
 - `firmware/canopi-panel` is the XIAO ESP32-C3 panel client.
 
 Card identity is `(source, machine.id, agent_instance_id)`. Delivery is
@@ -85,7 +86,8 @@ dedupe memory, and grid capacity are bounded. A non-loopback listener must be a
 concrete private/link-local IP and requires `--allow-lan`; wildcard and public
 binds are rejected. The token path must name a current-user-owned regular file
 with owner-only access (or an equivalent protected current-user ACL on Windows);
-symlinks and files replaced during open are rejected.
+symlinks and files replaced during open are rejected. The collector, Claude
+adapter, and simulator all use this same protected loader.
 
 ## Run the vertical slice
 
@@ -142,10 +144,12 @@ curl -H "Authorization: Bearer $CANOPI_TOKEN" \
 
 The supported endpoints are `POST /v1/events`, `POST /v1/events:batch`,
 `GET /v1/snapshot`, and `GET /v1/render/800x480.png`. Both GET routes return
-strong ETags and honor `If-None-Match` with a body-free 304. A structurally valid
-batch continues after per-event admission failures and returns `207` with an
-ordered status/result entry for every event, so one permanent rejection cannot
-starve later lifecycle updates. Persistence failure still fails the request.
+ETags and honor `If-None-Match` with a body-free 304. Snapshot validators are
+weak and revision-stable despite its current generation timestamp; image ETags
+are strong hashes of deterministic PNG bytes. A structurally valid batch
+continues after per-event admission failures and returns `207` with an ordered
+status/result entry for every event, so one permanent rejection cannot starve
+later lifecycle updates. Persistence failure still fails the request.
 
 ## Claude Code adapter
 
@@ -161,7 +165,8 @@ first-party hook reference. It consumes the common `session_id`, `cwd`, and
   addressable Canopi task/agent identity.
 
 Only explicit, trusted hook fields drive lifecycle state; assistant text never
-does.
+does. When display labels are derived because optional configuration is absent,
+the adapter truncates them rune-safely to the protocol bounds.
 
 Build the adapter and export its small, non-secret configuration in the shell
 that launches Claude Code:
@@ -244,9 +249,13 @@ gitignored; no Rosetta installation is required.
 The client connects to Wi-Fi, sends the bearer token and retained ETag, and does
 nothing on 304. A 200 response must be `image/png`, have a bounded known length,
 decode successfully, and report exactly 800x480 before `epaper.update()` runs.
+Each decoded RGB565 scanline is thresholded and packed MSB-first into the
+Seeed_GFX one-bit sprite; RGB565 bytes must never be passed directly to its
+one-bit `pushImage` path.
 The new ETag is retained only after a successful full display refresh. USB mode
 polls every 20 seconds. Optional battery mode sleeps for three minutes by
-default; the ETag is retained in RTC memory.
+default; the ETag is retained in RTC memory. A versioned cache invalidates that
+retained validator after a firmware change that requires the panel to redraw.
 
 Physical verification:
 

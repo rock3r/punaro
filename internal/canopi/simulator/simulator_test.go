@@ -11,7 +11,7 @@ import (
 
 func TestEventsModelRealisticMultiMachineOverflow(t *testing.T) {
 	now := time.Now().UTC().Truncate(time.Second)
-	events := Events(now, 0)
+	events := Events(now, 0, "run-a")
 	if len(events) != 19 {
 		t.Fatalf("len(Events) = %d, want 19", len(events))
 	}
@@ -57,9 +57,9 @@ func TestEventsModelRealisticMultiMachineOverflow(t *testing.T) {
 
 func TestEventsAdvanceAWaitingAndResumeLifecycleAcrossTicks(t *testing.T) {
 	now := time.Date(2026, 8, 23, 12, 0, 0, 0, time.UTC)
-	working := Events(now, 0)[8]
-	waiting := Events(now.Add(8*time.Second), 1)[8]
-	resumed := Events(now.Add(16*time.Second), 2)[8]
+	working := Events(now, 0, "run-a")[8]
+	waiting := Events(now.Add(8*time.Second), 1, "run-a")[8]
+	resumed := Events(now.Add(16*time.Second), 2, "run-a")[8]
 
 	if working.State != protocol.StateWorking {
 		t.Fatalf("tick 0 state = %q, want working", working.State)
@@ -73,11 +73,23 @@ func TestEventsAdvanceAWaitingAndResumeLifecycleAcrossTicks(t *testing.T) {
 	if waiting.ActivityAt != now.Add(8*time.Second) {
 		t.Fatalf("waiting activity = %s, want current tick time", waiting.ActivityAt)
 	}
+	if resumed.ActivityAt != now.Add(16*time.Second) {
+		t.Fatalf("resumed activity = %s, want current tick time", resumed.ActivityAt)
+	}
 	if working.EventID == waiting.EventID || waiting.EventID == resumed.EventID {
 		t.Fatal("lifecycle ticks must have unique event IDs")
 	}
-	if waiting.EventID != "sim-v2:1:09" {
+	if waiting.EventID != "sim-v3:run-a:1:09" {
 		t.Fatalf("waiting event ID = %q, want versioned simulator ID", waiting.EventID)
+	}
+}
+
+func TestEventsScopeIDsToSimulatorRun(t *testing.T) {
+	now := time.Date(2026, 8, 23, 12, 0, 0, 0, time.UTC)
+	first := Events(now, 0, "run-a")[0]
+	second := Events(now, 0, "run-b")[0]
+	if first.EventID == second.EventID {
+		t.Fatalf("separate runs reused event ID %q", first.EventID)
 	}
 }
 

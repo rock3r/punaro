@@ -18,6 +18,7 @@ import (
 	"time"
 
 	"github.com/rock3r/punaro/internal/canopi"
+	"github.com/rock3r/punaro/internal/canopicredential"
 	"github.com/rock3r/punaro/internal/listener"
 )
 
@@ -157,26 +158,5 @@ func parseConfig(args []string) (serverConfig, error) {
 }
 
 func loadToken(path string) (string, error) {
-	before, err := os.Lstat(path)
-	if err != nil || !privateTokenFile(path, before) {
-		return "", errors.New("token file must be a private current-user-owned regular file")
-	}
-	file, err := openTokenFile(path)
-	if err != nil {
-		return "", errors.New("token file must be a private current-user-owned regular file")
-	}
-	defer func() { _ = file.Close() }()
-	after, err := file.Stat()
-	if err != nil || !os.SameFile(before, after) || !privateTokenFile(path, after) {
-		return "", errors.New("token file changed while opening")
-	}
-	payload, err := io.ReadAll(io.LimitReader(file, 4097))
-	if err != nil || len(payload) > 4096 {
-		return "", errors.New("invalid token file")
-	}
-	token := strings.TrimSpace(string(payload))
-	if len(token) < 16 {
-		return "", errors.New("token must contain at least 16 characters")
-	}
-	return token, nil
+	return canopicredential.ReadToken(path)
 }

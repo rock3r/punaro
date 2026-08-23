@@ -204,7 +204,7 @@ func (h *Handler) snapshot(response http.ResponseWriter, request *http.Request) 
 		writeError(response, http.StatusInternalServerError, errors.New("encode snapshot"))
 		return
 	}
-	etag := payloadETag(payload)
+	etag := fmt.Sprintf(`W/"snapshot-%d"`, snapshot.Revision)
 	if request.Header.Get("If-None-Match") == etag {
 		response.WriteHeader(http.StatusNotModified)
 		return

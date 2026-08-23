@@ -1779,8 +1779,10 @@ expiry archives/hides abandoned work and never converts it to success; done
 retention is independent. Expiry commits transactionally; a failed state-file
 write leaves the acknowledged record visible under the unchanged revision.
 Snapshot and image ETags change only with state revision or rendered response
-content. TTL checks always use the real clock; only relative-time rendering and
-its image cache key use the configured bucket.
+content. Snapshot responses use a weak revision validator because their
+generation timestamp changes without a semantic state change; rendered PNGs
+use strong content hashes. TTL checks always use the real clock; only
+relative-time rendering and its image cache key use the configured bucket.
 
 Prompts, transcripts, assistant messages, credentials, tool inputs, and tool
 outputs are not part of the protocol. Metadata is default-deny: the schema and
@@ -1791,7 +1793,7 @@ invocation IDs use a fixed-length, secret-keyed HMAC over machine identity,
 provider payload, and local invocation time, never an unkeyed content digest.
 The queued normalized event retains that ID across delivery retries. Adapter
 delivery is detached, bounded, and incapable of blocking or controlling the
-coding agent.
+coding agent. Derived machine labels and task titles are rune-safely bounded.
 
 The Claude adapter durably writes each normalized privacy-safe event to a
 bounded owner-only spool before launching a detached delivery process. One
@@ -1815,9 +1817,11 @@ recent-first inside each state, before applying configurable capacity. Accepted
 fixed-panel grids have one or two columns and one through six rows; other shapes
 are rejected before they can overlap typography or icons. The last slot becomes
 an omitted-tail per-state count when overflowing. Its output is an exact
-800x480 two-color PNG; the panel performs a full e-paper refresh only
-after a changed ETag, bounded PNG download, successful decode, and exact
-dimension validation.
+800x480 two-color PNG. The panel thresholds each decoded RGB565 scanline and
+packs it MSB-first for the Seeed_GFX one-bit sprite; it performs a full e-paper
+refresh only after a changed ETag, bounded PNG download, successful decode, and
+exact dimension validation. The RTC-retained validator is versioned so a
+firmware update that changes image interpretation forces one corrective redraw.
 
 Canopi's first listener is loopback by default. A concrete private/link-local
 listener requires explicit LAN opt-in; wildcard and public binds fail closed.
@@ -1825,7 +1829,12 @@ This shared-token LAN MVP is not yet Punaro device-authenticated and must not be
 mounted on the public Punaro origin. Its bearer token must be a protected,
 current-user-owned regular file (or equivalent current-user-only Windows ACL),
 opened without following symlinks and rejected if its identity changes during
-open.
+open. Collector, provider adapter, and simulator share the same loader.
+
+Simulator event IDs include a random per-process run identity, preventing a
+restart from colliding with the collector's durable dedupe window. State
+transitions use the current tick timestamp so a resumed working update always
+orders after the preceding wait.
 
 ## Required adversarial acceptance tests
 

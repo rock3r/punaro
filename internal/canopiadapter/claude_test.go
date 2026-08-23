@@ -75,6 +75,20 @@ func TestMapClaudeHookEventIDRemainsBoundedForLongValidIdentity(t *testing.T) {
 	}
 }
 
+func TestMapClaudeHookBoundsDerivedDisplayFields(t *testing.T) {
+	raw := []byte(`{"session_id":"session-1","cwd":"/src/` + strings.Repeat("x", 120) + `","hook_event_name":"SessionStart"}`)
+	event, emit, err := MapClaudeHook(raw, AdapterConfig{MachineID: strings.Repeat("m", 100), EventIDKey: []byte("test-secret")}, time.Now())
+	if err != nil || !emit {
+		t.Fatalf("MapClaudeHook(long defaults) = %+v, %t, %v", event, emit, err)
+	}
+	if got := len([]rune(event.Machine.Label)); got != 40 {
+		t.Fatalf("derived machine label length = %d, want 40", got)
+	}
+	if got := len([]rune(event.Task.Title)); got != 80 {
+		t.Fatalf("derived task title length = %d, want 80", got)
+	}
+}
+
 func TestMapClaudeHookRequiresSecretEventIDKey(t *testing.T) {
 	raw := []byte(`{"session_id":"session-1","cwd":"/src/punaro","hook_event_name":"UserPromptSubmit","prompt":"private"}`)
 	if _, _, err := MapClaudeHook(raw, AdapterConfig{MachineID: "studio-m2", TaskTitle: "Punaro / tests"}, time.Now()); err == nil {

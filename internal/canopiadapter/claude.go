@@ -57,7 +57,7 @@ func MapClaudeHook(raw []byte, config AdapterConfig, now time.Time) (protocol.Ev
 	}
 	machineLabel := config.MachineLabel
 	if machineLabel == "" {
-		machineLabel = config.MachineID
+		machineLabel = truncateRunes(config.MachineID, 40)
 	}
 	taskTitle := config.TaskTitle
 	if taskTitle == "" {
@@ -65,7 +65,8 @@ func MapClaudeHook(raw []byte, config AdapterConfig, now time.Time) (protocol.Ev
 		if name == "." || name == string(filepath.Separator) || name == "" {
 			name = "Claude Code"
 		}
-		taskTitle = name + " / Claude"
+		const suffix = " / Claude"
+		taskTitle = truncateRunes(name, 80-len([]rune(suffix))) + suffix
 	}
 	agentID := hook.AgentID
 	parentID := ""
@@ -102,6 +103,14 @@ func MapClaudeHook(raw []byte, config AdapterConfig, now time.Time) (protocol.Ev
 		return protocol.Event{}, false, err
 	}
 	return event, true, nil
+}
+
+func truncateRunes(value string, maximum int) string {
+	runes := []rune(value)
+	if len(runes) <= maximum {
+		return value
+	}
+	return string(runes[:maximum])
 }
 
 func classifyClaudeHook(hook claudeHook) (protocol.State, protocol.WaitingReason, bool) {

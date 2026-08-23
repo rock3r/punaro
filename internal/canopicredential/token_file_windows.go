@@ -1,6 +1,6 @@
 //go:build windows
 
-package main
+package canopicredential
 
 import (
 	"os"
@@ -9,16 +9,16 @@ import (
 	"golang.org/x/sys/windows"
 )
 
-func privateHookTokenFile(path string, info os.FileInfo) bool {
-	return info.Mode().IsRegular() && info.Mode()&os.ModeSymlink == 0 && privateHookTokenWindowsACL(path)
+func privateTokenFile(path string, info os.FileInfo) bool {
+	return info.Mode().IsRegular() && info.Mode()&os.ModeSymlink == 0 && privateTokenWindowsACL(path)
 }
 
-func openHookTokenFile(path string) (*os.File, error) {
+func openTokenFile(path string) (*os.File, error) {
 	name, err := windows.UTF16PtrFromString(path)
 	if err != nil {
 		return nil, err
 	}
-	handle, err := windows.CreateFile(name, windows.GENERIC_READ, windows.FILE_SHARE_READ, nil, windows.OPEN_EXISTING, windows.FILE_ATTRIBUTE_NORMAL|windows.FILE_FLAG_OPEN_REPARSE_POINT, 0) // #nosec G304 -- operator-selected token path is validated before and after open.
+	handle, err := windows.CreateFile(name, windows.GENERIC_READ, windows.FILE_SHARE_READ, nil, windows.OPEN_EXISTING, windows.FILE_ATTRIBUTE_NORMAL|windows.FILE_FLAG_OPEN_REPARSE_POINT, 0) // #nosec G304 -- absolute operator-selected token path is validated before and after open.
 	if err != nil {
 		return nil, err
 	}
@@ -33,7 +33,7 @@ func openHookTokenFile(path string) (*os.File, error) {
 	return os.NewFile(uintptr(handle), path), nil // #nosec G115 -- successful Win32 handles are nonnegative.
 }
 
-func privateHookTokenWindowsACL(path string) bool {
+func privateTokenWindowsACL(path string) bool {
 	token := windows.GetCurrentProcessToken()
 	user, err := token.GetTokenUser()
 	if err != nil || user.User.Sid == nil {

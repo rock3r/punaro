@@ -20,7 +20,7 @@ func TestPostBatchSendsAuthenticatedSimulatorEvents(t *testing.T) {
 		response.WriteHeader(http.StatusAccepted)
 	}))
 	defer server.Close()
-	if err := postBatch(server.Client(), server.URL, "test-token", simulator.Events(time.Now(), 0)); err != nil {
+	if err := postBatch(server.Client(), server.URL, "test-token", simulator.Events(time.Now(), 0, "test-run")); err != nil {
 		t.Fatalf("postBatch() error = %v", err)
 	}
 	if !received {

@@ -38,15 +38,18 @@ var agents = []simulatedAgent{
 	{"Grok / hook spike", protocol.Machine{ID: "studio-m2", Label: "studio-m2"}, protocol.StateWorking, 29*time.Minute + 30*time.Second, protocol.SourceGrokBuild},
 }
 
-// Events returns one deterministic lifecycle batch for the supplied clock tick.
-func Events(now time.Time, tick int) []protocol.Event {
+// Events returns one deterministic lifecycle batch for one simulator run and
+// clock tick.
+func Events(now time.Time, tick int, runID string) []protocol.Event {
 	events := make([]protocol.Event, 0, len(agents))
 	for index, agent := range agents {
 		// Vega alternates between active work and a permission wait so a running
 		// simulator exercises real state changes and conditional panel refreshes.
-		if index == 8 && tick%2 == 1 {
-			agent.state = protocol.StateWaitingForUser
+		if index == 8 && tick > 0 {
 			agent.age = 0
+			if tick%2 == 1 {
+				agent.state = protocol.StateWaitingForUser
+			}
 		}
 		activity := now.Add(-agent.age)
 		reason := protocol.WaitingReason("")
@@ -56,7 +59,7 @@ func Events(now time.Time, tick int) []protocol.Event {
 		agentID := fmt.Sprintf("sim-agent-%02d", index+1)
 		events = append(events, protocol.Event{
 			SpecVersion:     protocol.SpecVersion,
-			EventID:         fmt.Sprintf("sim-v2:%d:%02d", tick, index+1),
+			EventID:         fmt.Sprintf("sim-v3:%s:%d:%02d", runID, tick, index+1),
 			Source:          agent.source,
 			Machine:         agent.machine,
 			SessionID:       agentID,
