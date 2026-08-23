@@ -2,6 +2,7 @@ package telegram
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log"
 	"strings"
@@ -111,6 +112,13 @@ func (g Gateway) Handle(ctx context.Context, update Update) error {
 		return g.markInert(update.ID)
 	}
 	if err := g.Submit(ctx, Submission{UpdateID: update.ID, ConversationID: conversation, Text: update.Text, ChatID: update.ChatID, ThreadID: update.ThreadID, ReplyToID: update.ReplyToID}); err != nil {
+		if isPermanentRelayFailure(err) {
+			g.logEvent("telegram_update_dropped", "reason=relay_rejected")
+			if err := g.State.MarkProcessed(update.ID); err != nil {
+				return fmt.Errorf("record dropped telegram update: %w", err)
+			}
+			return nil
+		}
 		return fmt.Errorf("submit telegram message: %w", err)
 	}
 	if err := g.State.MarkProcessed(update.ID); err != nil {
@@ -118,6 +126,15 @@ func (g Gateway) Handle(ctx context.Context, update Update) error {
 	}
 	g.logEvent("telegram_update_submitted", "conversation_id="+conversation)
 	return nil
+}
+
+type permanentRelayFailure interface {
+	PermanentRelayFailure() bool
+}
+
+func isPermanentRelayFailure(err error) bool {
+	var terminal permanentRelayFailure
+	return errors.As(err, &terminal) && terminal.PermanentRelayFailure()
 }
 
 func (g Gateway) handleCallback(ctx context.Context, update Update) error {

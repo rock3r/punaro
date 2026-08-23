@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -26,6 +27,19 @@ type fakeBridgeRelay struct {
 	deliveries []relay.Delivery
 	acked      []string
 	recordingClaimRelay
+}
+
+type scriptedRichSender struct {
+	errs  []error
+	calls int
+}
+
+func (s *scriptedRichSender) SendRichMessage(context.Context, int64, int64, string) (int64, error) {
+	s.calls++
+	if s.calls <= len(s.errs) && s.errs[s.calls-1] != nil {
+		return 0, s.errs[s.calls-1]
+	}
+	return int64(s.calls), nil
 }
 
 func (r *fakeBridgeRelay) Advertise(_ context.Context, endpoints []string) error {
@@ -72,6 +86,95 @@ func TestBridgeSyncsInboundAndOutboundThroughOneAttachedGatewayEndpoint(t *testi
 	}
 	if next != 11 || submitted != 1 || len(relayClient.advertised) != 1 || relayClient.advertised[0] != "telegram/gateway" || len(relayClient.acked) != 1 || relayClient.acked[0] != "delivery-1" || len(richSender.html) != 1 {
 		t.Fatalf("next=%d submitted=%d advertised=%#v acked=%#v sent=%#v", next, submitted, relayClient.advertised, relayClient.acked, richSender.html)
+	}
+}
+
+func TestBridgeDropsMalformedAndUnroutedDeliveriesThenContinues(t *testing.T) {
+	t.Parallel()
+	state, err := Open(filepath.Join(t.TempDir(), "telegram.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = state.Close() })
+	if err := state.SetRoute(55, 7, "conversation-good"); err != nil {
+		t.Fatal(err)
+	}
+	relayClient := &fakeBridgeRelay{deliveries: []relay.Delivery{
+		{ID: "malformed", Message: relay.Message{ConversationID: "conversation-good", FromEndpoint: "agent/a"}},
+		{ID: "unrouted", Message: relay.Message{ConversationID: "conversation-missing", FromEndpoint: "agent/a", Body: "reply"}},
+		{ID: "good", Message: relay.Message{ConversationID: "conversation-good", FromEndpoint: "agent/a", Body: "reply"}},
+	}}
+	sender := &scriptedRichSender{}
+	var logs []string
+	bridge := Bridge{
+		Relay: relayClient, Endpoint: relay.TelegramGatewayEndpoint, State: state,
+		Poller: fakePoller{}, Gateway: Gateway{AllowedUserID: 55, State: state, Submit: func(context.Context, Submission) error { return nil }},
+		Sender: sender, Log: func(format string, args ...any) { logs = append(logs, fmt.Sprintf(format, args...)) },
+	}
+	if _, err := bridge.SyncOnce(context.Background(), 1); err != nil {
+		t.Fatal(err)
+	}
+	if got := fmt.Sprint(relayClient.acked); got != "[malformed unrouted good]" || sender.calls != 1 {
+		t.Fatalf("acked=%v sender calls=%d", relayClient.acked, sender.calls)
+	}
+	if !strings.Contains(strings.Join(logs, "\n"), "telegram_send_dropped") {
+		t.Fatalf("logs=%#v", logs)
+	}
+}
+
+func TestBridgeDropsPermanentTelegramRejectionThenContinues(t *testing.T) {
+	t.Parallel()
+	state, err := Open(filepath.Join(t.TempDir(), "telegram.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = state.Close() })
+	if err := state.SetRoute(55, 7, "conversation-1"); err != nil {
+		t.Fatal(err)
+	}
+	relayClient := &fakeBridgeRelay{deliveries: []relay.Delivery{
+		{ID: "rejected", Message: relay.Message{ConversationID: "conversation-1", FromEndpoint: "agent/a", Body: "first"}},
+		{ID: "good", Message: relay.Message{ConversationID: "conversation-1", FromEndpoint: "agent/a", Body: "second"}},
+	}}
+	sender := &scriptedRichSender{errs: []error{BotAPIStatusError{Method: "sendRichMessage", Status: 400}}}
+	bridge := Bridge{
+		Relay: relayClient, Endpoint: relay.TelegramGatewayEndpoint, State: state,
+		Poller: fakePoller{}, Gateway: Gateway{AllowedUserID: 55, State: state, Submit: func(context.Context, Submission) error { return nil }},
+		Sender: sender, Log: func(string, ...any) {},
+	}
+	if _, err := bridge.SyncOnce(context.Background(), 1); err != nil {
+		t.Fatal(err)
+	}
+	if got := fmt.Sprint(relayClient.acked); got != "[rejected good]" || sender.calls != 2 {
+		t.Fatalf("acked=%v sender calls=%d", relayClient.acked, sender.calls)
+	}
+}
+
+func TestBridgeRetriesTransientTelegramRejection(t *testing.T) {
+	t.Parallel()
+	for _, status := range []int{401, 429, 500} {
+		t.Run(fmt.Sprint(status), func(t *testing.T) {
+			state, err := Open(filepath.Join(t.TempDir(), "telegram.db"))
+			if err != nil {
+				t.Fatal(err)
+			}
+			t.Cleanup(func() { _ = state.Close() })
+			if err := state.SetRoute(55, 7, "conversation-1"); err != nil {
+				t.Fatal(err)
+			}
+			relayClient := &fakeBridgeRelay{deliveries: []relay.Delivery{{ID: "retryable", Message: relay.Message{ConversationID: "conversation-1", FromEndpoint: "agent/a", Body: "retry"}}}}
+			bridge := Bridge{
+				Relay: relayClient, Endpoint: relay.TelegramGatewayEndpoint, State: state,
+				Poller: fakePoller{}, Gateway: Gateway{AllowedUserID: 55, State: state, Submit: func(context.Context, Submission) error { return nil }},
+				Sender: &scriptedRichSender{errs: []error{BotAPIStatusError{Method: "sendRichMessage", Status: status}}},
+			}
+			if _, err := bridge.SyncOnce(context.Background(), 1); err == nil {
+				t.Fatalf("HTTP %d delivery was accepted", status)
+			}
+			if len(relayClient.acked) != 0 {
+				t.Fatalf("acked=%v", relayClient.acked)
+			}
+		})
 	}
 }
 

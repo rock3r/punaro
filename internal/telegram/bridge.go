@@ -121,6 +121,13 @@ func (b Bridge) SyncOnce(ctx context.Context, offset int64) (int64, error) {
 	outboundProgress := false
 	for _, delivery := range deliveries {
 		if err := SendDelivery(ctx, b.State, b.Sender, delivery, b.Gateway.AllowedUserID); err != nil {
+			if isPermanentTelegramFailure(err) {
+				b.logEvent("telegram_send_dropped", "delivery_id="+delivery.ID, "reason=permanent_rejection")
+				if err := b.Relay.Ack(ctx, delivery); err != nil {
+					return next, fmt.Errorf("acknowledge dropped Telegram delivery %q: %w", delivery.ID, err)
+				}
+				continue
+			}
 			b.logEvent("telegram_send_err", "delivery_id="+delivery.ID)
 			return next, &GatewayCycleError{Phase: GatewayPhaseSend, OutboundBlocked: true, OutboundProgress: outboundProgress, Err: err}
 		}
@@ -131,6 +138,15 @@ func (b Bridge) SyncOnce(ctx context.Context, offset int64) (int64, error) {
 		outboundProgress = true
 	}
 	return next, nil
+}
+
+type permanentTelegramFailure interface {
+	PermanentTelegramFailure() bool
+}
+
+func isPermanentTelegramFailure(err error) bool {
+	var terminal permanentTelegramFailure
+	return errors.As(err, &terminal) && terminal.PermanentTelegramFailure()
 }
 
 func (b Bridge) logEvent(class string, fields ...string) {

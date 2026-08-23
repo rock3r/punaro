@@ -94,6 +94,60 @@ func TestGatewayRetriesUnrecordedUpdateAfterRelayFailure(t *testing.T) {
 	}
 }
 
+type permanentRelayTestError struct{}
+
+func (permanentRelayTestError) Error() string               { return "private relay response" }
+func (permanentRelayTestError) PermanentRelayFailure() bool { return true }
+
+func TestGatewayDropsPermanentRelayRejectionAndContinuesPage(t *testing.T) {
+	t.Parallel()
+	state, err := Open(filepath.Join(t.TempDir(), "telegram.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = state.Close() })
+	if err := state.SetRoute(100, 7, "conversation-1"); err != nil {
+		t.Fatal(err)
+	}
+	var submitted []string
+	var logs []string
+	runner := Runner{
+		Poller: fakePoller{updates: []Update{
+			{ID: 10, UserID: 55, ChatID: 100, ThreadID: 7, Text: "poison"},
+			{ID: 11, UserID: 55, ChatID: 100, ThreadID: 7, Text: "later"},
+		}},
+		Gateway: Gateway{
+			AllowedUserID: 55,
+			State:         state,
+			Submit: func(_ context.Context, submission Submission) error {
+				submitted = append(submitted, submission.Text)
+				if submission.Text == "poison" {
+					return permanentRelayTestError{}
+				}
+				return nil
+			},
+			Log: func(format string, args ...any) { logs = append(logs, fmt.Sprintf(format, args...)) },
+		},
+	}
+	next, err := runner.RunOnce(context.Background(), 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if next != 12 || len(submitted) != 2 || submitted[1] != "later" {
+		t.Fatalf("next=%d submitted=%#v", next, submitted)
+	}
+	for _, updateID := range []int64{10, 11} {
+		processed, err := state.Processed(updateID)
+		if err != nil || !processed {
+			t.Fatalf("update %d processed=%v err=%v", updateID, processed, err)
+		}
+	}
+	joined := strings.Join(logs, "\n")
+	if !strings.Contains(joined, "telegram_update_dropped") || strings.Contains(joined, "private relay response") {
+		t.Fatalf("logs=%#v", logs)
+	}
+}
+
 func TestGatewayStartAndListAreOperatorCommands(t *testing.T) {
 	t.Parallel()
 	state, err := Open(filepath.Join(t.TempDir(), "telegram.db"))

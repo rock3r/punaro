@@ -40,6 +40,29 @@ func TestClientFetchesMinimalTopicUpdateWithoutLeakingToken(t *testing.T) {
 	}
 }
 
+func TestClientPreservesMessageLessUpdateIDsForOffsetProgress(t *testing.T) {
+	t.Parallel()
+	server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"ok":true,"result":[` +
+			`{"update_id":10,"edited_message":{"message_id":3}},` +
+			`{"update_id":11,"message":{"message_id":4,"from":{"id":55},"chat":{"id":100},"message_thread_id":7,"text":"later"}}` +
+			`]}`))
+	}))
+	defer server.Close()
+	client, err := NewClient(server.URL, "secret", server.Client())
+	if err != nil {
+		t.Fatal(err)
+	}
+	updates, err := client.Updates(context.Background(), 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(updates) != 2 || updates[0].ID != 10 || updates[0].Text != "" || updates[1].ID != 11 || updates[1].Text != "later" {
+		t.Fatalf("updates=%#v", updates)
+	}
+}
+
 func TestClientDoctorUsesNonMutatingGetMeAndRedactsProviderResponse(t *testing.T) {
 	t.Parallel()
 	server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
