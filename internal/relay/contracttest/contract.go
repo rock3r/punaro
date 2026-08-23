@@ -1379,3 +1379,127 @@ func RunDirectMessages(t *testing.T, backend relay.Backend, namespace string) {
 		t.Fatalf("named append=%#v duplicate=%t err=%v", namedMessage, duplicate, err)
 	}
 }
+
+// RunDurableRoleAddressingE2E proves the parent #143 discover, resolve,
+// offline send, receive, and rebind outcome against every durable backend.
+func RunDurableRoleAddressingE2E(t *testing.T, backend relay.Backend, namespace string) {
+	t.Helper()
+	profiles, ok := backend.(relay.RoleProfileBackend)
+	if !ok {
+		t.Fatal("backend does not implement durable role profiles")
+	}
+	bindings, ok := backend.(relay.RoleBindingBackend)
+	if !ok {
+		t.Fatal("backend does not implement durable role bindings")
+	}
+	direct, ok := backend.(relay.DirectMessageBackend)
+	if !ok {
+		t.Fatal("backend does not implement direct messages")
+	}
+	now := time.Date(2026, time.August, 23, 10, 0, 0, 0, time.UTC)
+	machineA, machineB := namespace+"-a", namespace+"-b"
+	machineC, machineD := namespace+"-c", namespace+"-d"
+	endpointA := "agent/" + namespace + "/reviewer"
+	endpointB1, endpointB2 := "agent/"+namespace+"/implementer-1", "agent/"+namespace+"/implementer-2"
+	fromRole := "role/" + machineA + "/source-e2e"
+	toRole := "role/" + machineB + "/target-e2e"
+	ambiguousRole := "role/" + machineC + "/target-e2e"
+	hiddenRole := "role/" + machineD + "/hidden"
+	if err := backend.AdvertiseEndpoints(machineA, []string{endpointA}, now, time.Hour); err != nil {
+		t.Fatal(err)
+	}
+	registrations := []relay.RegisterRoleInput{
+		{MachineID: machineA, Role: fromRole, DisplayName: "Reviewer", DirectAddressable: true, IdempotencyKey: namespace + "-register-a", Now: now},
+		{MachineID: machineB, Role: toRole, DisplayName: "Implementer", DirectAddressable: true, IdempotencyKey: namespace + "-register-b", Now: now},
+		{MachineID: machineC, Role: ambiguousRole, DisplayName: "Other implementer", DirectAddressable: true, IdempotencyKey: namespace + "-register-c", Now: now},
+		{MachineID: machineD, Role: hiddenRole, DisplayName: "Hidden", DirectAddressable: false, IdempotencyKey: namespace + "-register-d", Now: now},
+	}
+	for _, input := range registrations {
+		if _, created, err := profiles.RegisterRoleProfile(input); err != nil || !created {
+			t.Fatalf("register role %q created=%t err=%v", input.Role, created, err)
+		}
+	}
+	if err := bindings.BindRoleToSession(machineA, fromRole, endpointA, now, time.Hour); err != nil {
+		t.Fatal(err)
+	}
+
+	page, err := profiles.ListAddressableRoles(relay.RoleListInput{Limit: 50, Now: now})
+	if err != nil || len(page.Roles) < 3 || page.NextCursor != "" {
+		t.Fatalf("addressable roles=%#v err=%v", page, err)
+	}
+	listed := make(map[string]relay.RoleContact, len(page.Roles))
+	for _, contact := range page.Roles {
+		listed[contact.Role] = contact
+	}
+	if listed[fromRole].Role == "" || !listed[fromRole].Online || listed[toRole].Role == "" || listed[toRole].Online || listed[ambiguousRole].Role == "" {
+		t.Fatalf("addressable roles=%#v", page.Roles)
+	}
+	if _, found := listed[hiddenRole]; found {
+		t.Fatalf("opted-out role was listed: %#v", page.Roles)
+	}
+	qualified, err := profiles.ResolveAddressableRole(relay.RoleResolveInput{Name: toRole, Now: now})
+	if err != nil || qualified.Status != relay.RoleResolveResolved || qualified.Role != toRole || qualified.Online {
+		t.Fatalf("qualified resolve=%#v err=%v", qualified, err)
+	}
+	unique, err := profiles.ResolveAddressableRole(relay.RoleResolveInput{Name: "source-e2e", Now: now})
+	if err != nil || unique.Status != relay.RoleResolveResolved || unique.Role != fromRole || !unique.Online {
+		t.Fatalf("unique resolve=%#v err=%v", unique, err)
+	}
+	ambiguous, err := profiles.ResolveAddressableRole(relay.RoleResolveInput{Name: "target-e2e", Now: now})
+	if err != nil || ambiguous.Status != relay.RoleResolveAmbiguous || len(ambiguous.Matches) != 2 {
+		t.Fatalf("ambiguous resolve=%#v err=%v", ambiguous, err)
+	}
+	hidden, err := profiles.ResolveAddressableRole(relay.RoleResolveInput{Name: hiddenRole, Now: now})
+	if err != nil || hidden.Status != relay.RoleResolveNotFound {
+		t.Fatalf("hidden resolve=%#v err=%v", hidden, err)
+	}
+	if _, _, err := direct.SendDirectMessage(relay.DirectMessageInput{
+		SenderMachineID: machineA, FromRole: fromRole, ToRole: hiddenRole, Body: "must fail", IdempotencyKey: namespace + "-hidden-send", Now: now,
+	}); !errors.Is(err, relay.ErrForbidden) {
+		t.Fatalf("opted-out direct send err=%v", err)
+	}
+
+	first, duplicate, err := direct.SendDirectMessage(relay.DirectMessageInput{
+		SenderMachineID: machineA, FromRole: fromRole, ToRole: toRole, Body: "sent while offline", IdempotencyKey: namespace + "-offline-send", Now: now,
+	})
+	if err != nil || duplicate || first.ConversationID == "" {
+		t.Fatalf("offline send=%#v duplicate=%t err=%v", first, duplicate, err)
+	}
+	boundAt := now.Add(time.Minute)
+	if err := backend.AdvertiseEndpoints(machineB, []string{endpointB1}, boundAt, time.Hour); err != nil {
+		t.Fatal(err)
+	}
+	if err := bindings.BindRoleToSession(machineB, toRole, endpointB1, boundAt, time.Hour); err != nil {
+		t.Fatal(err)
+	}
+	firstPage, err := backend.LeaseDeliveries(machineB, namespace+"-consumer-1", endpointB1, first.ConversationID, boundAt, time.Minute, 10)
+	if err != nil || len(firstPage.Deliveries) != 1 || firstPage.Deliveries[0].Message.ID != first.ID || firstPage.Deliveries[0].RecipientRole != toRole {
+		t.Fatalf("offline receive=%#v err=%v", firstPage, err)
+	}
+	firstDelivery := firstPage.Deliveries[0]
+	if err := backend.AckDelivery(machineB, endpointB1, firstDelivery.ID, firstDelivery.LeaseToken, firstDelivery.LeaseGeneration, boundAt); err != nil {
+		t.Fatal(err)
+	}
+
+	reboundAt := boundAt.Add(2 * time.Minute)
+	if err := backend.AdvertiseEndpoints(machineB, []string{endpointB2}, reboundAt, time.Hour); err != nil {
+		t.Fatal(err)
+	}
+	if err := bindings.BindRoleToSession(machineB, toRole, endpointB2, reboundAt, time.Hour); err != nil {
+		t.Fatal(err)
+	}
+	second, duplicate, err := direct.SendDirectMessage(relay.DirectMessageInput{
+		SenderMachineID: machineA, FromRole: fromRole, ToRole: toRole, Body: "same address after rebind", IdempotencyKey: namespace + "-rebound-send", Now: reboundAt,
+	})
+	if err != nil || duplicate || second.ConversationID != first.ConversationID {
+		t.Fatalf("rebound send=%#v first=%#v duplicate=%t err=%v", second, first, duplicate, err)
+	}
+	secondPage, err := backend.LeaseDeliveries(machineB, namespace+"-consumer-2", endpointB2, second.ConversationID, reboundAt, time.Minute, 10)
+	if err != nil || len(secondPage.Deliveries) != 1 || secondPage.Deliveries[0].Message.ID != second.ID || secondPage.Deliveries[0].RecipientRole != toRole {
+		t.Fatalf("rebound receive=%#v err=%v", secondPage, err)
+	}
+	secondDelivery := secondPage.Deliveries[0]
+	if err := backend.AckDelivery(machineB, endpointB2, secondDelivery.ID, secondDelivery.LeaseToken, secondDelivery.LeaseGeneration, reboundAt); err != nil {
+		t.Fatalf("ack rebound delivery: %v", err)
+	}
+}

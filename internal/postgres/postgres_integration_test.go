@@ -1589,6 +1589,7 @@ func testRelayIntegration(t *testing.T, app *Database) {
 	contracttest.RunRoleTargeting(t, app, "postgres-target")
 	contracttest.RunRoleProfiles(t, app, "postgres-profile")
 	contracttest.RunDirectMessages(t, app, "postgres-direct")
+	contracttest.RunDurableRoleAddressingE2E(t, app, "postgres-addressing")
 	contracttest.RunNamedOccupancy(t, app, "postgres-occupancy")
 	testPostgresTelegramClaimReserveOccupancy(t, app)
 	testPostgresTelegramClaimBindsEnsureKeyToExistingClaim(t, app)

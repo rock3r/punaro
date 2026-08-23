@@ -18,5 +18,6 @@ func TestSQLiteStoreConformance(t *testing.T) {
 	contracttest.RunRoleTargeting(t, store, "sqlite-target")
 	contracttest.RunRoleProfiles(t, store, "sqlite-profile")
 	contracttest.RunDirectMessages(t, store, "sqlite-direct")
+	contracttest.RunDurableRoleAddressingE2E(t, store, "sqlite-addressing")
 	contracttest.RunNamedOccupancy(t, store, "sqlite-occupancy")
 }
