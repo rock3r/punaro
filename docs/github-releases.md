@@ -194,9 +194,16 @@ an explicit higher `--minimum-safe-sequence` or repeatable `--critical-block
 SEQUENCE`. Declare every direct rolling-upgrade source with repeatable
 `--supported-from RELEASE`; the workflow accepts the same set through its
 comma-separated `supported_from` input. The GitHub
-workflow downloads the live catalog and supplies this argument automatically,
-while the offline publisher verifies the signed replacement against the
-independently verified live pair before mutation.
+workflow downloads the live catalog and supplies this argument automatically.
+Before dispatching the second or any later release, configure the repository
+Actions variable `PUNARO_RELEASE_PUBLIC_KEYS` with the exact JSON contents of
+the independently distributed `punaro-release.pub` trust root. If a published
+live catalog exists, the workflow downloads both `punaro-catalog.json` and
+`punaro-catalog.sig` and fails closed unless that pair verifies against the
+configured trust root. The first release does not require this variable because
+there is no inherited live catalog. The offline publisher separately verifies
+the signed replacement against the independently verified live pair before
+mutation.
 
 `assemble` hashes the exact generated `compose.operator.yaml` template installed
 by `punaro init` and staged by `punaro update`, plus the embedded migration

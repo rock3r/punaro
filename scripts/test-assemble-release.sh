@@ -60,6 +60,13 @@ if ! grep -Fq -- '--previous-catalog' "$repo_dir/.github/workflows/release.yml" 
 	printf '%s\n' 'release workflow cannot maintain retained live catalog releases' >&2
 	exit 1
 fi
+if ! grep -Fq 'vars.PUNARO_RELEASE_PUBLIC_KEYS' "$repo_dir/.github/workflows/release.yml" ||
+	! grep -Fq 'gh release download catalog --pattern punaro-catalog.sig' "$repo_dir/.github/workflows/release.yml" ||
+	! grep -Fq 'punaro-release verify' "$repo_dir/.github/workflows/release.yml" ||
+	! grep -Fq -- '--keys-file "$keys_file"' "$repo_dir/.github/workflows/release.yml"; then
+	printf '%s\n' 'release workflow does not authenticate the inherited live catalog' >&2
+	exit 1
+fi
 if grep -Eq 'inputs\.draft|DRAFT:' "$repo_dir/.github/workflows/release.yml" ||
 	! grep -Fq 'gh release create "$RELEASE" --target "$GITHUB_SHA" --draft' "$repo_dir/.github/workflows/release.yml"; then
 	printf '%s\n' 'unsigned workflow can publish a non-draft candidate' >&2
