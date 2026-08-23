@@ -5,6 +5,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -121,6 +122,19 @@ func TestSpoolEnqueueReclaimsTemporaryFileLeftByCrash(t *testing.T) {
 	}
 	if _, err := os.Lstat(orphan); !errors.Is(err, os.ErrNotExist) {
 		t.Fatalf("orphan temporary still exists: %v", err)
+	}
+}
+
+func TestWindowsSpoolSyncFlushesPublishedDirectoryEntry(t *testing.T) {
+	payload, err := os.ReadFile("spool_sync_windows.go")
+	if err != nil {
+		t.Fatal(err)
+	}
+	source := string(payload)
+	for _, required := range []string{"CreateFile", "FILE_FLAG_BACKUP_SEMANTICS", "FlushFileBuffers"} {
+		if !strings.Contains(source, required) {
+			t.Fatalf("Windows spool publication sync is missing %q", required)
+		}
 	}
 }
 

@@ -74,9 +74,9 @@ and returns. One cross-process worker drains the bounded 4,096-event spool and
 retries the queued event with its original ID until the collector acknowledges
 it. Separate identical provider invocations receive distinct IDs. Individual
 HTTP attempts are bounded, and a rejected event remains queued without starving
-independent events behind it. A crashed worker leaves its events queued and a
-stale worker lock is recoverable. The short-lived enqueue lock is heartbeated
-while held, so a slow durable write cannot be mistaken for a crashed writer.
+independent events behind it. A crashed worker leaves its events queued and its
+kernel-held lock is released automatically. Enqueue, drain, and supervisor locks
+cannot be reclaimed from a live process by stale timestamps or wall-clock jumps.
 Missing configuration, malformed provider input, spool or process-launch
 failure, token-file failure, network failure, and collector rejection all leave
 the coding agent unblocked and produce no provider-visible output.
@@ -85,8 +85,10 @@ All collector routes require the same bearer token. Bodies, batches, headers,
 dedupe memory, and grid capacity are bounded. Loopback may use HTTP. A
 non-loopback listener must be a concrete private/link-local IP, requires
 `--allow-lan`, and requires a TLS certificate and private key; wildcard,
-public, and plaintext LAN binds are rejected. The token path must name a
-current-user-owned regular file
+public, and plaintext LAN binds are rejected. The TLS private key is loaded
+through the same no-follow, stable-identity, current-user-only checks as the
+bearer token before the server starts; `ServeTLS` never reopens its path. The
+token path must name a current-user-owned regular file
 with owner-only access (or an equivalent protected current-user ACL on Windows);
 symlinks and files replaced during open are rejected. The collector, Claude
 adapter, and simulator all use this same protected loader. Adapter and simulator
@@ -116,19 +118,20 @@ listener with that concrete private IP, and provide absolute
 `--tls-cert-file` and `--tls-key-file` paths. LAN clients must use HTTPS and
 verify that certificate. Useful configuration flags are
 `--columns`, `--rows`, `--working-ttl`, `--done-retention`,
-`--max-live-records`, `--max-future-skew`, `--relative-time-bucket`, and
-`--title`. Grid dimensions are constrained to 1–2 columns and 1–6 rows so every
-accepted shape remains legible on the fixed panel. New agent identities are
-rejected at the configured live-record ceiling, while updates to known
+`--max-live-records`, `--max-state-bytes`, `--max-future-skew`,
+`--relative-time-bucket`, and `--title`. Grid dimensions are constrained to 1–2
+columns and 1–6 rows so every accepted shape remains legible on the fixed panel.
+New agent identities are rejected at the configured live-record ceiling, while updates to known
 identities remain admissible. Activity times beyond the configured
 future-clock-skew window are rejected before they can fence later correct
 updates or evade expiry. Expired records are durably purged using the real
 current time before capacity admission and reads, independently of the
 relative-time render bucket. An offline panel therefore cannot leave the store
 stuck at its ceiling. Expiry is transactional: if its state-file update fails,
-the acknowledged record remains visible under the unchanged revision. Startup
-checks a configured maximum state-file representation before allocating or
-decoding it; the calculation includes worst-case JSON escaping. Each serialized
+the acknowledged record remains visible under the unchanged revision. Admission
+checks a configured aggregate serialized-state budget before acknowledging an
+event, and startup rejects a larger state file before allocating or decoding it.
+Snapshot JSON is bounded by that same state invariant. Each serialized
 state update also reclaims crash-left snapshots in a namespace derived from that
 state file before writing a new temporary, without touching another collector's
 state-file namespace in the same directory. The state path must be absolute and
@@ -138,7 +141,9 @@ uses protected current-user-only DACLs and no-reparse opens for the equivalent
 directory and file checks. Windows replacement creates a durable hard-link
 backup of the prior state, publishes the flushed replacement with write-through
 move semantics, flushes the directory, and recovers the backup on startup if an
-interrupted replacement left the target absent.
+interrupted replacement left the target absent. A kernel-held lifetime lock per
+state path rejects overlapping collector writers and is released by `Close` or
+process exit.
 
 In another terminal, generate the selected 3 waiting / 4 done / 12 working
 overflow state:

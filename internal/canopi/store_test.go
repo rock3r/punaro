@@ -133,6 +133,9 @@ func TestPersistentStoreSurvivesRestartAndKeepsDedupe(t *testing.T) {
 	if result, err := store.Apply(input); err != nil || !result.Applied {
 		t.Fatalf("Apply() = %+v, %v", result, err)
 	}
+	if err := store.Close(); err != nil {
+		t.Fatal(err)
+	}
 	reopened, err := OpenStore(path, DefaultConfig())
 	if err != nil {
 		t.Fatal(err)
@@ -154,6 +157,9 @@ func TestPersistentStorePreservesLargeNumericMetadata(t *testing.T) {
 	if _, err := store.Apply(input); err != nil {
 		t.Fatal(err)
 	}
+	if err := store.Close(); err != nil {
+		t.Fatal(err)
+	}
 	reopened, err := OpenStore(path, DefaultConfig())
 	if err != nil {
 		t.Fatal(err)
@@ -169,12 +175,12 @@ func TestPersistentStorePreservesLargeNumericMetadata(t *testing.T) {
 
 func TestOpenStoreRejectsStateFileBeyondConfiguredBoundBeforeReading(t *testing.T) {
 	config := DefaultConfig()
-	config.MaxLiveRecords = 1
+	config.MaxStateBytes = 2 << 10
 	path := filepath.Join(t.TempDir(), "oversized-state.json")
 	if err := os.WriteFile(path, nil, 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.Truncate(path, maxStateFileBytes(config.MaxLiveRecords)+1); err != nil {
+	if err := os.Truncate(path, config.MaxStateBytes+1); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := OpenStore(path, config); err == nil || !strings.Contains(err.Error(), "exceeds limit") {
@@ -182,12 +188,46 @@ func TestOpenStoreRejectsStateFileBeyondConfiguredBoundBeforeReading(t *testing.
 	}
 }
 
-func TestMaxStateFileBytesAccountsForWorstCaseJSONEscaping(t *testing.T) {
-	wantMinimum := int64(persistedStateEnvelopeBytes) +
-		int64(maxPersistedEventBytes*maxJSONEncodedExpansion) +
-		int64(maxRememberedEventIDs*maxSerializedEventIDBytes)
-	if got := maxStateFileBytes(1); got < wantMinimum {
-		t.Fatalf("maxStateFileBytes(1) = %d, want at least %d", got, wantMinimum)
+func TestApplyRejectsAggregateStateBeyondByteBudgetWithoutMutation(t *testing.T) {
+	now := time.Date(2026, 8, 23, 12, 0, 0, 0, time.UTC)
+	config := DefaultConfig()
+	config.MaxStateBytes = 2 << 10
+	store := NewStore(config)
+	store.now = func() time.Time { return now }
+	if result, err := store.Apply(event("small", "small", protocol.StateWorking, now)); err != nil || !result.Applied {
+		t.Fatalf("small Apply() = %+v, %v", result, err)
+	}
+	large := event("large", "large", protocol.StateWorking, now)
+	large.Task.Repository = strings.Repeat("r", 300)
+	large.Task.WorkingDirectory = strings.Repeat("w", 1000)
+	large.Metadata = map[string]any{"simulated": strings.Repeat("m", 500)}
+	if result, err := store.Apply(large); !errors.Is(err, ErrStateByteLimit) || result != (ApplyResult{}) {
+		t.Fatalf("large Apply() = %+v, %v; want ErrStateByteLimit", result, err)
+	}
+	snapshot := store.Snapshot(now)
+	if snapshot.Revision != 1 || len(snapshot.Agents) != 1 || snapshot.Agents[0].EventID != "small" {
+		t.Fatalf("state after rejected Apply() = %#v", snapshot)
+	}
+}
+
+func TestOpenStoreExcludesSecondWriterForSameStateFile(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "state.json")
+	first, err := OpenStore(path, DefaultConfig())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if second, err := OpenStore(path, DefaultConfig()); !errors.Is(err, ErrStateStoreLocked) || second != nil {
+		t.Fatalf("second OpenStore() = %#v, %v; want ErrStateStoreLocked", second, err)
+	}
+	if err := first.Close(); err != nil {
+		t.Fatal(err)
+	}
+	reopened, err := OpenStore(path, DefaultConfig())
+	if err != nil {
+		t.Fatalf("OpenStore() after Close = %v", err)
+	}
+	if err := reopened.Close(); err != nil {
+		t.Fatal(err)
 	}
 }
 
@@ -198,7 +238,7 @@ func TestPersistStoreReclaimsCrashLeftTemporary(t *testing.T) {
 	if err := os.WriteFile(orphan, []byte("partial"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if err := persistStore(path, persistedStore{}); err != nil {
+	if err := persistStore(path, persistedStore{}, defaultMaxStateBytes); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := os.Lstat(orphan); !errors.Is(err, os.ErrNotExist) {
@@ -214,7 +254,7 @@ func TestPersistStoreDoesNotReclaimAnotherStateFilesTemporary(t *testing.T) {
 	if err := os.WriteFile(secondTemporary, []byte("in progress"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if err := persistStore(firstPath, persistedStore{}); err != nil {
+	if err := persistStore(firstPath, persistedStore{}, defaultMaxStateBytes); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := os.Lstat(secondTemporary); err != nil {

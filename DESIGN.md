@@ -1781,9 +1781,10 @@ dedupe set, so an exact retry still attempts persistence. Non-terminal TTL
 expiry archives/hides abandoned work and never converts it to success; done
 retention is independent. Expiry commits transactionally; a failed state-file
 write leaves the acknowledged record visible under the unchanged revision.
-Startup rejects a state file beyond a bound derived from configured live-record,
-per-event, worst-case JSON-encoding, and durable-dedupe ceilings before
-allocating or decoding its body. Serialized updates reclaim crash-left state
+The configured aggregate serialized-state budget is checked transactionally
+before an event is acknowledged; startup rejects a larger state file before
+allocating or decoding its body, and snapshot JSON is bounded by the same
+invariant. Serialized updates reclaim crash-left state
 temporaries in per-target namespaces and bounded directory batches before
 creating a replacement, without racing another state file in the same parent.
 The state path is absolute and clean. Its parent must be current-user-owned and
@@ -1794,6 +1795,8 @@ directory, existing state, and replacement temporary. Windows replacement
 hard-links the old target as a recovery copy, flushes that directory entry,
 publishes with `MoveFileEx` replacement plus write-through semantics, flushes
 the directory again, and restores the backup at startup if the target is absent.
+A kernel-held lifetime lock keyed by the state path excludes overlapping
+collector writers and is released by orderly close or process exit.
 Snapshot and image ETags change only with state revision or rendered response
 content. Snapshot responses use a weak revision validator because their
 generation timestamp changes without a semantic state change; rendered PNGs
@@ -1829,6 +1832,9 @@ host. A persistent
 `supervise` mode runs under the host service manager, holds a singleton lease,
 polls even while the spool is empty, and provides a durable wake/restart path
 when a detached kick or worker crashes during a quiet session.
+On Windows, each hard-link publication and acknowledgement removal is followed
+by a directory `FlushFileBuffers`, matching the Unix directory-sync durability
+contract before the provider hook is told enqueueing succeeded.
 
 Structurally valid event batches continue across per-event admission failures
 and return ordered per-event status records with HTTP 207 when mixed; only a
@@ -1862,7 +1868,10 @@ This shared-token LAN MVP is not yet Punaro device-authenticated and must not be
 mounted on the public Punaro origin. Its bearer token must be a protected,
 current-user-owned regular file (or equivalent current-user-only Windows ACL),
 opened without following symlinks and rejected if its identity changes during
-open. Collector, provider adapter, and simulator share the same loader.
+open. The collector loads its TLS private key through that protected loader and
+constructs the in-memory certificate before serving, so the HTTP server never
+reopens a replaceable key path. Collector, provider adapter, and simulator share
+the same bearer-token loader.
 
 Simulator event IDs include a random per-process run identity, preventing a
 restart from colliding with the collector's durable dedupe window. A failed

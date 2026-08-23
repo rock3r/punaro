@@ -71,6 +71,9 @@ func TestWindowsOpenStoreRecoversInterruptedStateReplacement(t *testing.T) {
 	if err := os.Remove(path); err != nil {
 		t.Fatal(err)
 	}
+	if err := store.Close(); err != nil {
+		t.Fatal(err)
+	}
 	recovered, err := OpenStore(path, DefaultConfig())
 	if err != nil {
 		t.Fatal(err)
@@ -94,6 +97,9 @@ func TestWindowsStateReplacementSurvivesRestart(t *testing.T) {
 		if _, err := store.Apply(input); err != nil {
 			t.Fatal(err)
 		}
+	}
+	if err := store.Close(); err != nil {
+		t.Fatal(err)
 	}
 	reopened, err := OpenStore(path, DefaultConfig())
 	if err != nil {

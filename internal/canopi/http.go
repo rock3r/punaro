@@ -112,7 +112,7 @@ func (h *Handler) ingest(response http.ResponseWriter, request *http.Request) {
 			writeError(response, http.StatusBadRequest, err)
 			return
 		}
-		if errors.Is(err, ErrLiveRecordLimit) {
+		if errors.Is(err, ErrLiveRecordLimit) || errors.Is(err, ErrStateByteLimit) {
 			writeError(response, http.StatusTooManyRequests, err)
 			return
 		}
@@ -179,7 +179,7 @@ func (h *Handler) ingestBatch(response http.ResponseWriter, request *http.Reques
 				hasRejection = true
 				continue
 			}
-			if errors.Is(err, ErrLiveRecordLimit) {
+			if errors.Is(err, ErrLiveRecordLimit) || errors.Is(err, ErrStateByteLimit) {
 				results = append(results, batchResult{Status: http.StatusTooManyRequests, Error: err.Error()})
 				hasRejection = true
 				continue
@@ -206,6 +206,10 @@ func (h *Handler) snapshot(response http.ResponseWriter, request *http.Request) 
 	payload, err := json.Marshal(snapshot)
 	if err != nil {
 		writeError(response, http.StatusInternalServerError, errors.New("encode snapshot"))
+		return
+	}
+	if int64(len(payload)) > h.store.config.MaxStateBytes+persistedStateEnvelopeBytes {
+		writeError(response, http.StatusInternalServerError, errors.New("snapshot exceeds state byte limit"))
 		return
 	}
 	etag := fmt.Sprintf(`W/"snapshot-%d"`, snapshot.Revision)

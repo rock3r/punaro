@@ -10,28 +10,40 @@ import (
 	"strings"
 )
 
-// ReadToken returns one bounded token from an absolute, clean, current-user
+// ReadPrivateFile returns bounded bytes from an absolute, clean, current-user
 // owned private regular file whose identity remains stable across open.
-func ReadToken(path string) (string, error) {
+func ReadPrivateFile(path string, maxBytes int64) ([]byte, error) {
+	if maxBytes <= 0 {
+		return nil, errors.New("private file byte limit must be positive")
+	}
 	if !filepath.IsAbs(path) || filepath.Clean(path) != path {
-		return "", errors.New("token file path must be absolute and clean")
+		return nil, errors.New("private file path must be absolute and clean")
 	}
 	before, err := os.Lstat(path)
 	if err != nil || !privateTokenFile(path, before) {
-		return "", errors.New("token file must be a private current-user-owned regular file")
+		return nil, errors.New("file must be a private current-user-owned regular file")
 	}
 	file, err := openTokenFile(path)
 	if err != nil {
-		return "", errors.New("token file must be a private current-user-owned regular file")
+		return nil, errors.New("file must be a private current-user-owned regular file")
 	}
 	defer func() { _ = file.Close() }()
 	after, err := file.Stat()
 	if err != nil || !os.SameFile(before, after) || !privateTokenFile(path, after) {
-		return "", errors.New("token file changed while opening")
+		return nil, errors.New("private file changed while opening")
 	}
-	payload, err := io.ReadAll(io.LimitReader(file, 4097))
+	payload, err := io.ReadAll(io.LimitReader(file, maxBytes+1))
+	if err != nil || int64(len(payload)) > maxBytes {
+		return nil, errors.New("invalid private file")
+	}
+	return payload, nil
+}
+
+// ReadToken returns one bounded bearer token from a protected file.
+func ReadToken(path string) (string, error) {
+	payload, err := ReadPrivateFile(path, 4096)
 	token := strings.TrimSpace(string(payload))
-	if err != nil || len(payload) > 4096 || len(token) < 16 {
+	if err != nil || len(token) < 16 {
 		return "", errors.New("invalid token file")
 	}
 	return token, nil

@@ -20,24 +20,22 @@ import (
 )
 
 const (
-	maxRememberedEventIDs       = 50_000
-	maxPersistedEventBytes      = 64 << 10
-	maxJSONEncodedExpansion     = 6
-	maxSerializedEventIDBytes   = 6*200 + 3
-	persistedStateEnvelopeBytes = 4 << 10
+	maxRememberedEventIDs             = 50_000
+	defaultMaxStateBytes        int64 = 8 << 20
+	minMaxStateBytes            int64 = 2 << 10
+	maxMaxStateBytes            int64 = 64 << 20
+	persistedStateEnvelopeBytes       = 512
 )
-
-func maxStateFileBytes(maxLiveRecords int) int64 {
-	return persistedStateEnvelopeBytes +
-		int64(maxLiveRecords)*maxPersistedEventBytes*maxJSONEncodedExpansion +
-		int64(maxRememberedEventIDs)*maxSerializedEventIDBytes
-}
 
 var (
 	// ErrLiveRecordLimit reports bounded admission of a new agent identity.
 	ErrLiveRecordLimit = errors.New("canopi live record limit reached")
 	// ErrFutureActivity reports an untrusted activity timestamp beyond allowed skew.
 	ErrFutureActivity = errors.New("canopi activity timestamp is too far in the future")
+	// ErrStateByteLimit reports bounded aggregate serialized state admission.
+	ErrStateByteLimit = errors.New("canopi serialized state byte limit reached")
+	// ErrStateStoreLocked reports another collector using the same state file.
+	ErrStateStoreLocked = errors.New("canopi state file is already in use")
 )
 
 // Config controls lifecycle expiry and completed-agent retention.
@@ -45,6 +43,7 @@ type Config struct {
 	WorkingTTL     time.Duration
 	DoneRetention  time.Duration
 	MaxLiveRecords int
+	MaxStateBytes  int64
 	MaxFutureSkew  time.Duration
 }
 
@@ -54,6 +53,7 @@ func DefaultConfig() Config {
 		WorkingTTL:     30 * time.Minute,
 		DoneRetention:  2 * time.Hour,
 		MaxLiveRecords: 2_048,
+		MaxStateBytes:  defaultMaxStateBytes,
 		MaxFutureSkew:  5 * time.Minute,
 	}
 }
@@ -66,6 +66,9 @@ func (c Config) normalized() (Config, error) {
 	if c.MaxFutureSkew == 0 {
 		c.MaxFutureSkew = defaults.MaxFutureSkew
 	}
+	if c.MaxStateBytes == 0 {
+		c.MaxStateBytes = defaults.MaxStateBytes
+	}
 	if c.WorkingTTL <= 0 {
 		return Config{}, errors.New("working TTL must be positive")
 	}
@@ -74,6 +77,9 @@ func (c Config) normalized() (Config, error) {
 	}
 	if c.MaxLiveRecords <= 0 || c.MaxLiveRecords > 100_000 {
 		return Config{}, errors.New("max live records must be between 1 and 100000")
+	}
+	if c.MaxStateBytes < minMaxStateBytes || c.MaxStateBytes > maxMaxStateBytes {
+		return Config{}, fmt.Errorf("max state bytes must be between %d and %d", minMaxStateBytes, maxMaxStateBytes)
 	}
 	if c.MaxFutureSkew <= 0 || c.MaxFutureSkew > time.Hour {
 		return Config{}, errors.New("max future skew must be between zero and one hour")
@@ -113,6 +119,9 @@ type Store struct {
 	revision  uint64
 	now       func() time.Time
 	persist   func(persistedStore) error
+	release   func() error
+	closeOnce sync.Once
+	closeErr  error
 }
 
 type persistedStore struct {
@@ -146,22 +155,34 @@ func OpenStore(path string, config Config) (*Store, error) {
 		return nil, err
 	}
 	store := NewStore(normalized)
-	store.persist = func(state persistedStore) error { return persistStore(path, state) }
+	store.persist = func(state persistedStore) error { return persistStore(path, state, normalized.MaxStateBytes) }
 	if err := prepareStateDirectory(filepath.Dir(path)); err != nil {
 		return nil, fmt.Errorf("protect Canopi state directory: %w", err)
 	}
+	release, err := acquireStateStoreLock(path)
+	if err != nil {
+		return nil, fmt.Errorf("lock Canopi state: %w", err)
+	}
+	store.release = release
+	keepOpen := false
+	defer func() {
+		if !keepOpen {
+			_ = store.Close()
+		}
+	}()
 	if err := recoverStateReplacement(path); err != nil {
 		return nil, fmt.Errorf("recover Canopi state replacement: %w", err)
 	}
 	file, err := openPrivateStateFile(path)
 	if errors.Is(err, os.ErrNotExist) {
+		keepOpen = true
 		return store, nil
 	}
 	if err != nil {
 		return nil, fmt.Errorf("read Canopi state: %w", err)
 	}
 	defer func() { _ = file.Close() }()
-	limit := maxStateFileBytes(store.config.MaxLiveRecords)
+	limit := store.config.MaxStateBytes
 	info, err := file.Stat()
 	if err != nil {
 		return nil, fmt.Errorf("inspect Canopi state: %w", err)
@@ -193,6 +214,9 @@ func OpenStore(path string, config Config) (*Store, error) {
 	if len(persisted.Records) > store.config.MaxLiveRecords {
 		return nil, errors.New("persisted Canopi live record set exceeds limit")
 	}
+	if err := ensurePersistedStateWithinBudget(persisted, store.config.MaxStateBytes); err != nil {
+		return nil, err
+	}
 	for _, event := range persisted.Records {
 		if err := event.Validate(); err != nil {
 			return nil, fmt.Errorf("invalid persisted event %q: %w", event.EventID, err)
@@ -207,7 +231,21 @@ func OpenStore(path string, config Config) (*Store, error) {
 		store.seenOrder = append(store.seenOrder, eventID)
 	}
 	store.revision = persisted.Revision
+	keepOpen = true
 	return store, nil
+}
+
+// Close releases this persisted store's lifetime writer lock. It is safe to call repeatedly.
+func (s *Store) Close() error {
+	if s == nil {
+		return nil
+	}
+	s.closeOnce.Do(func() {
+		if s.release != nil {
+			s.closeErr = s.release()
+		}
+	})
+	return s.closeErr
 }
 
 // Apply validates and idempotently incorporates one lifecycle event.
@@ -245,7 +283,11 @@ func (s *Store) Apply(event protocol.Event) (ApplyResult, error) {
 		nextRevision++
 		result.Applied = true
 	}
-	if err := s.persist(persistedState(nextRevision, nextRecords, nextSeenOrder)); err != nil {
+	nextState := persistedState(nextRevision, nextRecords, nextSeenOrder)
+	if err := ensurePersistedStateWithinBudget(nextState, s.config.MaxStateBytes); err != nil {
+		return ApplyResult{}, err
+	}
+	if err := s.persist(nextState); err != nil {
 		return ApplyResult{}, err
 	}
 	s.records = nextRecords
@@ -399,7 +441,7 @@ func persistedState(revision uint64, records map[string]protocol.Event, seenOrde
 	return persistedStore{Revision: revision, Records: orderedRecords, SeenOrder: append([]string(nil), seenOrder...)}
 }
 
-func persistStore(path string, state persistedStore) error {
+func persistStore(path string, state persistedStore, maxBytes int64) error {
 	directory := filepath.Dir(path)
 	if err := prepareStateDirectory(directory); err != nil {
 		return fmt.Errorf("protect Canopi state directory: %w", err)
@@ -408,9 +450,15 @@ func persistStore(path string, state persistedStore) error {
 	if err := removeStateTemporaries(directory, filepath.Base(path), temporaryPrefix); err != nil {
 		return fmt.Errorf("reclaim Canopi state temporaries: %w", err)
 	}
+	if err := ensurePersistedStateWithinBudget(state, maxBytes); err != nil {
+		return err
+	}
 	payload, err := json.Marshal(state)
 	if err != nil {
 		return fmt.Errorf("encode Canopi state: %w", err)
+	}
+	if int64(len(payload)) > maxBytes {
+		return ErrStateByteLimit
 	}
 	temporary, err := os.CreateTemp(directory, temporaryPrefix+"*")
 	if err != nil {
@@ -435,6 +483,31 @@ func persistStore(path string, state persistedStore) error {
 	}
 	if err := replaceStateFile(temporaryName, path); err != nil {
 		return fmt.Errorf("replace Canopi state: %w", err)
+	}
+	return nil
+}
+
+func ensurePersistedStateWithinBudget(state persistedStore, maxBytes int64) error {
+	used := int64(persistedStateEnvelopeBytes)
+	for _, event := range state.Records {
+		payload, err := json.Marshal(event)
+		if err != nil {
+			return fmt.Errorf("encode Canopi event for state budget: %w", err)
+		}
+		used += int64(len(payload) + 1)
+		if used > maxBytes {
+			return ErrStateByteLimit
+		}
+	}
+	for _, eventID := range state.SeenOrder {
+		payload, err := json.Marshal(eventID)
+		if err != nil {
+			return fmt.Errorf("encode Canopi event ID for state budget: %w", err)
+		}
+		used += int64(len(payload) + 1)
+		if used > maxBytes {
+			return ErrStateByteLimit
+		}
 	}
 	return nil
 }

@@ -2,6 +2,17 @@
 
 package canopiadapter
 
-// Windows does not expose portable directory fsync through os.File. Event
-// contents are still flushed before their atomic hard-link publication.
-func syncDirectory(string) error { return nil }
+import "golang.org/x/sys/windows"
+
+func syncDirectory(path string) error {
+	name, err := windows.UTF16PtrFromString(path)
+	if err != nil {
+		return err
+	}
+	handle, err := windows.CreateFile(name, windows.GENERIC_WRITE, windows.FILE_SHARE_READ|windows.FILE_SHARE_WRITE|windows.FILE_SHARE_DELETE, nil, windows.OPEN_EXISTING, windows.FILE_FLAG_BACKUP_SEMANTICS, 0)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = windows.CloseHandle(handle) }()
+	return windows.FlushFileBuffers(handle)
+}

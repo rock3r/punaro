@@ -152,6 +152,43 @@ func TestHandlerRejectsFutureActivityAndLiveRecordOverflow(t *testing.T) {
 	}
 }
 
+func TestHandlerRejectsAggregateStateByteOverflow(t *testing.T) {
+	now := time.Date(2026, 8, 23, 12, 0, 0, 0, time.UTC)
+	config := DefaultConfig()
+	config.MaxStateBytes = 2 << 10
+	store := NewStore(config)
+	store.now = func() time.Time { return now }
+	handler, err := NewHandler(HandlerConfig{Store: store, Token: "secret", Now: func() time.Time { return now }, Render: DefaultRenderConfig()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	post := func(input protocol.Event) int {
+		payload, _ := json.Marshal(input)
+		request := httptest.NewRequestWithContext(context.Background(), http.MethodPost, "/v1/events", bytes.NewReader(payload))
+		request.Header.Set("Authorization", "Bearer secret")
+		response := httptest.NewRecorder()
+		handler.ServeHTTP(response, request)
+		return response.Code
+	}
+	if got := post(event("small", "agent", protocol.StateWorking, now)); got != http.StatusAccepted {
+		t.Fatalf("small event status = %d, want %d", got, http.StatusAccepted)
+	}
+	large := event("large", "agent", protocol.StateWorking, now.Add(time.Second))
+	large.Task.Repository = strings.Repeat("r", 300)
+	large.Task.WorkingDirectory = strings.Repeat("w", 1000)
+	large.Metadata = map[string]any{"simulated": strings.Repeat("m", 500)}
+	if got := post(large); got != http.StatusTooManyRequests {
+		t.Fatalf("aggregate overflow status = %d, want %d", got, http.StatusTooManyRequests)
+	}
+	request := httptest.NewRequestWithContext(context.Background(), http.MethodGet, "/v1/snapshot", nil)
+	request.Header.Set("Authorization", "Bearer secret")
+	response := httptest.NewRecorder()
+	handler.ServeHTTP(response, request)
+	if response.Code != http.StatusOK || int64(response.Body.Len()) > config.MaxStateBytes+persistedStateEnvelopeBytes {
+		t.Fatalf("bounded snapshot status/bytes = %d/%d", response.Code, response.Body.Len())
+	}
+}
+
 func TestHandlerBatchContinuesAfterPermanentEventRejection(t *testing.T) {
 	now := time.Date(2026, 8, 23, 12, 0, 0, 0, time.UTC)
 	config := DefaultConfig()

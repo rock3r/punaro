@@ -4,6 +4,7 @@ package main
 
 import (
 	"context"
+	"crypto/tls"
 	"errors"
 	"flag"
 	"fmt"
@@ -33,6 +34,7 @@ type serverConfig struct {
 	workingTTL         time.Duration
 	doneRetention      time.Duration
 	maxLiveRecords     int
+	maxStateBytes      int64
 	maxFutureSkew      time.Duration
 	relativeTimeBucket time.Duration
 	title              string
@@ -53,14 +55,25 @@ func run(args []string, stderr io.Writer) int {
 		_, _ = fmt.Fprintln(stderr, "canopi configuration error: protected token is unavailable")
 		return 2
 	}
+	var tlsCertificate *tls.Certificate
+	if config.tlsCertFile != "" {
+		certificate, err := loadTLSCertificate(config.tlsCertFile, config.tlsKeyFile)
+		if err != nil {
+			_, _ = fmt.Fprintln(stderr, "canopi configuration error: protected TLS credentials are unavailable")
+			return 2
+		}
+		tlsCertificate = &certificate
+	}
 	store, err := canopi.OpenStore(config.stateFile, canopi.Config{
 		WorkingTTL: config.workingTTL, DoneRetention: config.doneRetention,
-		MaxLiveRecords: config.maxLiveRecords, MaxFutureSkew: config.maxFutureSkew,
+		MaxLiveRecords: config.maxLiveRecords, MaxStateBytes: config.maxStateBytes,
+		MaxFutureSkew: config.maxFutureSkew,
 	})
 	if err != nil {
 		_, _ = fmt.Fprintf(stderr, "canopi state error: %v\n", err)
 		return 1
 	}
+	defer func() { _ = store.Close() }()
 	handler, err := canopi.NewHandler(canopi.HandlerConfig{
 		Store: store,
 		Token: token,
@@ -87,6 +100,12 @@ func run(args []string, stderr io.Writer) int {
 		IdleTimeout:       30 * time.Second,
 		MaxHeaderBytes:    16 << 10,
 	}
+	if tlsCertificate != nil {
+		server.TLSConfig = &tls.Config{
+			MinVersion:   tls.VersionTLS12,
+			Certificates: []tls.Certificate{*tlsCertificate},
+		}
+	}
 	shutdownSignals := make(chan os.Signal, 1)
 	signal.Notify(shutdownSignals, os.Interrupt, syscall.SIGTERM)
 	go func() {
@@ -98,7 +117,7 @@ func run(args []string, stderr io.Writer) int {
 	serve := server.Serve
 	if config.tlsCertFile != "" {
 		serve = func(listener net.Listener) error {
-			return server.ServeTLS(listener, config.tlsCertFile, config.tlsKeyFile)
+			return server.ServeTLS(listener, "", "")
 		}
 	}
 	if err := serve(networkListener); err != nil && !errors.Is(err, http.ErrServerClosed) {
@@ -124,6 +143,7 @@ func parseConfig(args []string) (serverConfig, error) {
 	flags.DurationVar(&config.workingTTL, "working-ttl", defaults.WorkingTTL, "non-terminal agent expiry")
 	flags.DurationVar(&config.doneRetention, "done-retention", defaults.DoneRetention, "terminal agent retention")
 	flags.IntVar(&config.maxLiveRecords, "max-live-records", defaults.MaxLiveRecords, "maximum current agent identities")
+	flags.Int64Var(&config.maxStateBytes, "max-state-bytes", defaults.MaxStateBytes, "maximum serialized state bytes")
 	flags.DurationVar(&config.maxFutureSkew, "max-future-skew", defaults.MaxFutureSkew, "maximum accepted future activity timestamp")
 	flags.DurationVar(&config.relativeTimeBucket, "relative-time-bucket", time.Minute, "relative-time render bucket")
 	flags.StringVar(&config.title, "title", "CANOPI", "provisional display title")
@@ -169,6 +189,9 @@ func parseConfig(args []string) (serverConfig, error) {
 	if config.maxLiveRecords <= 0 || config.maxLiveRecords > 100_000 {
 		return serverConfig{}, errors.New("max-live-records must be between 1 and 100000")
 	}
+	if config.maxStateBytes < 2<<10 || config.maxStateBytes > 64<<20 {
+		return serverConfig{}, errors.New("max-state-bytes must be between 2048 and 67108864")
+	}
 	if config.maxFutureSkew <= 0 || config.maxFutureSkew > time.Hour {
 		return serverConfig{}, errors.New("max-future-skew must be between zero and one hour")
 	}
@@ -180,4 +203,26 @@ func parseConfig(args []string) (serverConfig, error) {
 
 func loadToken(path string) (string, error) {
 	return canopicredential.ReadToken(path)
+}
+
+func loadTLSKey(path string) ([]byte, error) {
+	return canopicredential.ReadPrivateFile(path, 1<<20)
+}
+
+func loadTLSCertificate(certPath, keyPath string) (tls.Certificate, error) {
+	certificateFile, err := os.Open(certPath) // #nosec G304 -- absolute operator-selected path is validated by parseConfig.
+	if err != nil {
+		return tls.Certificate{}, err
+	}
+	certificatePEM, readErr := io.ReadAll(io.LimitReader(certificateFile, (1<<20)+1))
+	closeErr := certificateFile.Close()
+	if readErr != nil || closeErr != nil || len(certificatePEM) > 1<<20 {
+		return tls.Certificate{}, errors.New("invalid TLS certificate file")
+	}
+	keyPEM, err := loadTLSKey(keyPath)
+	if err != nil {
+		return tls.Certificate{}, err
+	}
+	defer clear(keyPEM)
+	return tls.X509KeyPair(certificatePEM, keyPEM)
 }

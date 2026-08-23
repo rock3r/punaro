@@ -35,3 +35,31 @@ func TestLoadTokenRequiresPrivateRegularFile(t *testing.T) {
 		t.Fatal("loadToken() followed a symlink")
 	}
 }
+
+func TestLoadTLSKeyRequiresPrivateRegularFile(t *testing.T) {
+	directory := t.TempDir()
+	keyPath := filepath.Join(directory, "server.key")
+	if err := os.WriteFile(keyPath, []byte("private-key-material"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if payload, err := loadTLSKey(keyPath); err != nil || string(payload) != "private-key-material" {
+		t.Fatalf("loadTLSKey(private) = %q, %v", payload, err)
+	}
+	// #nosec G302 -- deliberately unsafe permissions verify rejection.
+	if err := os.Chmod(keyPath, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := loadTLSKey(keyPath); err == nil {
+		t.Fatal("loadTLSKey() accepted a group/world-readable key")
+	}
+	if err := os.Chmod(keyPath, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	linkPath := filepath.Join(directory, "server-link.key")
+	if err := os.Symlink(keyPath, linkPath); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := loadTLSKey(linkPath); err == nil {
+		t.Fatal("loadTLSKey() followed a symlink")
+	}
+}
