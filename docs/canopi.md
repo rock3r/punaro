@@ -131,6 +131,8 @@ stuck at its ceiling. Expiry is transactional: if its state-file update fails,
 the acknowledged record remains visible under the unchanged revision. Admission
 checks a configured aggregate serialized-state budget before acknowledging an
 event, and startup rejects a larger state file before allocating or decoding it.
+Oldest dedupe IDs are evicted as needed while the newly acknowledged ID is
+always retained; record data that cannot fit is rejected transactionally.
 Snapshot JSON is bounded by that same state invariant. Each serialized
 state update also reclaims crash-left snapshots in a namespace derived from that
 state file before writing a new temporary, without touching another collector's
@@ -143,7 +145,7 @@ backup of the prior state, publishes the flushed replacement with write-through
 move semantics, flushes the directory, and recovers the backup on startup if an
 interrupted replacement left the target absent. A kernel-held lifetime lock per
 state path rejects overlapping collector writers and is released by `Close` or
-process exit.
+process exit. Windows canonicalizes case aliases before deriving the lock path.
 
 In another terminal, generate the selected 3 waiting / 4 done / 12 working
 overflow state:

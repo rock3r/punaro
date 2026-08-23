@@ -3,6 +3,7 @@ package canopi
 import (
 	"encoding/json"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -210,6 +211,30 @@ func TestApplyRejectsAggregateStateBeyondByteBudgetWithoutMutation(t *testing.T)
 	}
 }
 
+func TestApplyEvictsOldestDedupeIDsToStayWithinByteBudget(t *testing.T) {
+	now := time.Date(2026, 8, 23, 12, 0, 0, 0, time.UTC)
+	config := DefaultConfig()
+	config.MaxStateBytes = 2 << 10
+	store := NewStore(config)
+	store.now = func() time.Time { return now }
+	var latest protocol.Event
+	for index := range 20 {
+		latest = event(fmt.Sprintf("%03d-%s", index, strings.Repeat("x", 190)), "agent", protocol.StateWorking, now.Add(time.Duration(index)*time.Second))
+		if result, err := store.Apply(latest); err != nil || !result.Applied {
+			t.Fatalf("Apply(%d) = %+v, %v", index, result, err)
+		}
+	}
+	if len(store.seenOrder) >= 20 {
+		t.Fatalf("dedupe IDs retained = %d, want byte-budget eviction", len(store.seenOrder))
+	}
+	if _, retained := store.seen[latest.EventID]; !retained {
+		t.Fatal("latest acknowledged event ID was evicted")
+	}
+	if result, err := store.Apply(latest); err != nil || !result.Duplicate {
+		t.Fatalf("latest duplicate after eviction = %+v, %v", result, err)
+	}
+}
+
 func TestOpenStoreExcludesSecondWriterForSameStateFile(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "state.json")
 	first, err := OpenStore(path, DefaultConfig())
@@ -272,6 +297,16 @@ func TestWindowsStateReplacementContractUsesWriteThroughRecovery(t *testing.T) {
 		if !strings.Contains(source, required) {
 			t.Fatalf("Windows state replacement is missing %q", required)
 		}
+	}
+}
+
+func TestWindowsStateLockIdentityContractIsCaseInsensitive(t *testing.T) {
+	payload, err := os.ReadFile("store_lock_identity_windows.go")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(payload), "strings.ToLower") {
+		t.Fatal("Windows state lock identity does not canonicalize path case")
 	}
 }
 

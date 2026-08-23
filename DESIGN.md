@@ -1784,7 +1784,9 @@ write leaves the acknowledged record visible under the unchanged revision.
 The configured aggregate serialized-state budget is checked transactionally
 before an event is acknowledged; startup rejects a larger state file before
 allocating or decoding its body, and snapshot JSON is bounded by the same
-invariant. Serialized updates reclaim crash-left state
+invariant. Admission evicts the oldest dedupe IDs until the candidate fits but
+never evicts the newly acknowledged ID; record overflow still fails
+transactionally. Serialized updates reclaim crash-left state
 temporaries in per-target namespaces and bounded directory batches before
 creating a replacement, without racing another state file in the same parent.
 The state path is absolute and clean. Its parent must be current-user-owned and
@@ -1796,7 +1798,8 @@ hard-links the old target as a recovery copy, flushes that directory entry,
 publishes with `MoveFileEx` replacement plus write-through semantics, flushes
 the directory again, and restores the backup at startup if the target is absent.
 A kernel-held lifetime lock keyed by the state path excludes overlapping
-collector writers and is released by orderly close or process exit.
+collector writers and is released by orderly close or process exit. Windows
+canonicalizes case aliases before deriving that lock key.
 Snapshot and image ETags change only with state revision or rendered response
 content. Snapshot responses use a weak revision validator because their
 generation timestamp changes without a semantic state change; rendered PNGs

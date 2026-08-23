@@ -53,6 +53,7 @@ func acquireStateStoreLock(statePath string) (func() error, error) {
 }
 
 func stateStoreLockPath(statePath string) string {
-	digest := sha256.Sum256([]byte(filepath.Base(statePath)))
-	return filepath.Join(filepath.Dir(statePath), ".canopi-lock-"+hex.EncodeToString(digest[:8]))
+	identity := canonicalStateLockIdentity(statePath)
+	digest := sha256.Sum256([]byte(identity))
+	return filepath.Join(filepath.Dir(identity), ".canopi-lock-"+hex.EncodeToString(digest[:8]))
 }

@@ -284,6 +284,10 @@ func (s *Store) Apply(event protocol.Event) (ApplyResult, error) {
 		result.Applied = true
 	}
 	nextState := persistedState(nextRevision, nextRecords, nextSeenOrder)
+	if err := trimSeenOrderToBudget(nextState.Records, nextSeen, &nextSeenOrder, s.config.MaxStateBytes); err != nil {
+		return ApplyResult{}, err
+	}
+	nextState.SeenOrder = append([]string(nil), nextSeenOrder...)
 	if err := ensurePersistedStateWithinBudget(nextState, s.config.MaxStateBytes); err != nil {
 		return ApplyResult{}, err
 	}
@@ -488,16 +492,12 @@ func persistStore(path string, state persistedStore, maxBytes int64) error {
 }
 
 func ensurePersistedStateWithinBudget(state persistedStore, maxBytes int64) error {
-	used := int64(persistedStateEnvelopeBytes)
-	for _, event := range state.Records {
-		payload, err := json.Marshal(event)
-		if err != nil {
-			return fmt.Errorf("encode Canopi event for state budget: %w", err)
-		}
-		used += int64(len(payload) + 1)
-		if used > maxBytes {
-			return ErrStateByteLimit
-		}
+	used, err := serializedRecordStateBytes(state.Records)
+	if err != nil {
+		return err
+	}
+	if used > maxBytes {
+		return ErrStateByteLimit
 	}
 	for _, eventID := range state.SeenOrder {
 		payload, err := json.Marshal(eventID)
@@ -510,6 +510,57 @@ func ensurePersistedStateWithinBudget(state persistedStore, maxBytes int64) erro
 		}
 	}
 	return nil
+}
+
+func trimSeenOrderToBudget(records []protocol.Event, seen map[string]struct{}, order *[]string, maxBytes int64) error {
+	used, err := serializedRecordStateBytes(records)
+	if err != nil {
+		return err
+	}
+	if used > maxBytes {
+		return ErrStateByteLimit
+	}
+	if len(*order) == 0 {
+		return nil
+	}
+	latestPayload, err := json.Marshal((*order)[len(*order)-1])
+	if err != nil {
+		return fmt.Errorf("encode Canopi event ID for state budget: %w", err)
+	}
+	used += int64(len(latestPayload) + 1)
+	if used > maxBytes {
+		return ErrStateByteLimit
+	}
+	firstRetained := len(*order) - 1
+	for firstRetained > 0 {
+		payload, err := json.Marshal((*order)[firstRetained-1])
+		if err != nil {
+			return fmt.Errorf("encode Canopi event ID for state budget: %w", err)
+		}
+		next := used + int64(len(payload)+1)
+		if next > maxBytes {
+			break
+		}
+		used = next
+		firstRetained--
+	}
+	for _, eventID := range (*order)[:firstRetained] {
+		delete(seen, eventID)
+	}
+	*order = append([]string(nil), (*order)[firstRetained:]...)
+	return nil
+}
+
+func serializedRecordStateBytes(records []protocol.Event) (int64, error) {
+	used := int64(persistedStateEnvelopeBytes)
+	for _, event := range records {
+		payload, err := json.Marshal(event)
+		if err != nil {
+			return 0, fmt.Errorf("encode Canopi event for state budget: %w", err)
+		}
+		used += int64(len(payload) + 1)
+	}
+	return used, nil
 }
 
 func stateTemporaryPrefix(path string) string {
