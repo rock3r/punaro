@@ -216,3 +216,18 @@ func TestApplyRejectsActivityBeyondConfiguredClockSkew(t *testing.T) {
 		t.Fatalf("boundary event = %+v, %v", result, err)
 	}
 }
+
+func TestApplyAcknowledgesDurableDuplicateAfterClockRollback(t *testing.T) {
+	now := time.Date(2026, 8, 23, 12, 0, 0, 0, time.UTC)
+	config := DefaultConfig()
+	store := NewStore(config)
+	store.now = func() time.Time { return now }
+	input := event("boundary", "agent", protocol.StateWorking, now.Add(config.MaxFutureSkew))
+	if result, err := store.Apply(input); err != nil || !result.Applied {
+		t.Fatalf("initial Apply() = %+v, %v", result, err)
+	}
+	now = now.Add(-time.Minute)
+	if result, err := store.Apply(input); err != nil || !result.Duplicate {
+		t.Fatalf("duplicate after rollback = %+v, %v", result, err)
+	}
+}

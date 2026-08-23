@@ -27,6 +27,8 @@ type serverConfig struct {
 	allowLAN           bool
 	tokenFile          string
 	stateFile          string
+	tlsCertFile        string
+	tlsKeyFile         string
 	grid               canopi.GridConfig
 	workingTTL         time.Duration
 	doneRetention      time.Duration
@@ -93,7 +95,13 @@ func run(args []string, stderr io.Writer) int {
 		defer cancel()
 		_ = server.Shutdown(ctx)
 	}()
-	if err := server.Serve(networkListener); err != nil && !errors.Is(err, http.ErrServerClosed) {
+	serve := server.Serve
+	if config.tlsCertFile != "" {
+		serve = func(listener net.Listener) error {
+			return server.ServeTLS(listener, config.tlsCertFile, config.tlsKeyFile)
+		}
+	}
+	if err := serve(networkListener); err != nil && !errors.Is(err, http.ErrServerClosed) {
 		_, _ = fmt.Fprintf(stderr, "canopi server error: %v\n", err)
 		return 1
 	}
@@ -109,6 +117,8 @@ func parseConfig(args []string) (serverConfig, error) {
 	flags.BoolVar(&config.allowLAN, "allow-lan", false, "explicitly allow a private LAN listener")
 	flags.StringVar(&config.tokenFile, "token-file", "", "absolute private bearer-token file")
 	flags.StringVar(&config.stateFile, "state-file", "./data/canopi-state.json", "durable state snapshot file")
+	flags.StringVar(&config.tlsCertFile, "tls-cert-file", "", "absolute TLS certificate-chain file")
+	flags.StringVar(&config.tlsKeyFile, "tls-key-file", "", "absolute TLS private-key file")
 	flags.IntVar(&config.grid.Columns, "columns", 2, "panel grid columns")
 	flags.IntVar(&config.grid.Rows, "rows", 6, "panel grid rows")
 	flags.DurationVar(&config.workingTTL, "working-ttl", defaults.WorkingTTL, "non-terminal agent expiry")
@@ -138,6 +148,17 @@ func parseConfig(args []string) (serverConfig, error) {
 			return serverConfig{}, errors.New("state-file is invalid")
 		}
 		config.stateFile = absolute
+	}
+	if (config.tlsCertFile == "") != (config.tlsKeyFile == "") {
+		return serverConfig{}, errors.New("tls-cert-file and tls-key-file must be provided together")
+	}
+	for _, path := range []string{config.tlsCertFile, config.tlsKeyFile} {
+		if path != "" && (!filepath.IsAbs(path) || filepath.Clean(path) != path) {
+			return serverConfig{}, errors.New("TLS file paths must be absolute and clean")
+		}
+	}
+	if !endpoint.Address.IsLoopback() && config.tlsCertFile == "" {
+		return serverConfig{}, errors.New("non-loopback listeners require TLS")
 	}
 	if err := config.grid.Validate(); err != nil {
 		return serverConfig{}, err

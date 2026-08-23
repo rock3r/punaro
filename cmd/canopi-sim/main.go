@@ -54,28 +54,12 @@ func run(args []string, stderr io.Writer) int {
 		return 1
 	}
 	client := &http.Client{Timeout: 3 * time.Second}
-	stop := make(chan os.Signal, 1)
-	signal.Notify(stop, os.Interrupt, syscall.SIGTERM)
-	for tick := 0; ; tick++ {
-		if err := postBatch(client, *endpoint, token, simulator.Events(time.Now().UTC(), tick, runID)); err != nil {
-			_, _ = fmt.Fprintln(stderr, "canopi-sim: collector unavailable")
-			if *once {
-				return 1
-			}
-		}
-		if *once {
-			return 0
-		}
-		timer := time.NewTimer(*interval)
-		select {
-		case <-timer.C:
-		case <-stop:
-			if !timer.Stop() {
-				<-timer.C
-			}
-			return 0
-		}
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
+	if err := runSimulation(ctx, client, *endpoint, token, runID, *interval, *once, stderr); err != nil {
+		return 1
 	}
+	return 0
 }
 
 func newRunID() (string, error) {
@@ -84,6 +68,41 @@ func newRunID() (string, error) {
 		return "", err
 	}
 	return hex.EncodeToString(value[:]), nil
+}
+
+func runSimulation(ctx context.Context, client *http.Client, endpoint, token, runID string, interval time.Duration, once bool, stderr io.Writer) error {
+	tick := 0
+	pending := simulator.Events(time.Now().UTC(), tick, runID)
+	for {
+		err := postBatch(client, endpoint, token, pending)
+		if err != nil {
+			_, _ = fmt.Fprintln(stderr, "canopi-sim: collector unavailable")
+			if once {
+				return err
+			}
+		} else {
+			if once {
+				return nil
+			}
+			tick++
+			pending = nil
+		}
+		timer := time.NewTimer(interval)
+		select {
+		case <-timer.C:
+			if pending == nil {
+				pending = simulator.Events(time.Now().UTC(), tick, runID)
+			}
+		case <-ctx.Done():
+			if !timer.Stop() {
+				select {
+				case <-timer.C:
+				default:
+				}
+			}
+			return nil
+		}
+	}
 }
 
 func postBatch(client *http.Client, endpoint, token string, events []protocol.Event) error {

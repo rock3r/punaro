@@ -12,7 +12,10 @@ func TestParseConfigRequiresExplicitLANBinding(t *testing.T) {
 	if _, err := parseConfig(append(common, "--listen", "192.168.1.20:8090")); err == nil {
 		t.Fatal("parseConfig() accepted LAN bind without --allow-lan")
 	}
-	config, err := parseConfig(append(common, "--listen", "192.168.1.20:8090", "--allow-lan"))
+	if _, err := parseConfig(append(common, "--listen", "192.168.1.20:8090", "--allow-lan")); err == nil {
+		t.Fatal("parseConfig() accepted plaintext LAN listener")
+	}
+	config, err := parseConfig(append(common, "--listen", "192.168.1.20:8090", "--allow-lan", "--tls-cert-file", filepath.Join(directory, "server.crt"), "--tls-key-file", filepath.Join(directory, "server.key")))
 	if err != nil {
 		t.Fatalf("parseConfig() error = %v", err)
 	}
@@ -47,5 +50,8 @@ func TestParseConfigRejectsWildcardAndInvalidCapacity(t *testing.T) {
 	}
 	if _, err := parseConfig(append(base, "--max-future-skew", "0s")); err == nil {
 		t.Fatal("parseConfig() accepted zero future clock skew")
+	}
+	if _, err := parseConfig(append(base, "--tls-cert-file", filepath.Join(directory, "server.crt"))); err == nil {
+		t.Fatal("parseConfig() accepted incomplete TLS configuration")
 	}
 }

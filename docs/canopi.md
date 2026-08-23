@@ -82,9 +82,11 @@ failure, token-file failure, network failure, and collector rejection all leave
 the coding agent unblocked and produce no provider-visible output.
 
 All collector routes require the same bearer token. Bodies, batches, headers,
-dedupe memory, and grid capacity are bounded. A non-loopback listener must be a
-concrete private/link-local IP and requires `--allow-lan`; wildcard and public
-binds are rejected. The token path must name a current-user-owned regular file
+dedupe memory, and grid capacity are bounded. Loopback may use HTTP. A
+non-loopback listener must be a concrete private/link-local IP, requires
+`--allow-lan`, and requires a TLS certificate and private key; wildcard,
+public, and plaintext LAN binds are rejected. The token path must name a
+current-user-owned regular file
 with owner-only access (or an equivalent protected current-user ACL on Windows);
 symlinks and files replaced during open are rejected. The collector, Claude
 adapter, and simulator all use this same protected loader.
@@ -107,8 +109,10 @@ go run ./cmd/canopi \
   --state-file /absolute/private/canopi-state.json
 ```
 
-For a deliberately selected LAN address, add `--allow-lan` and replace the
-listener with that concrete private IP. Useful configuration flags are
+For a deliberately selected LAN address, add `--allow-lan`, replace the
+listener with that concrete private IP, and provide absolute
+`--tls-cert-file` and `--tls-key-file` paths. LAN clients must use HTTPS and
+verify that certificate. Useful configuration flags are
 `--columns`, `--rows`, `--working-ttl`, `--done-retention`,
 `--max-live-records`, `--max-future-skew`, `--relative-time-bucket`, and
 `--title`. Grid dimensions are constrained to 1–2 columns and 1–6 rows so every
@@ -131,7 +135,9 @@ go run ./cmd/canopi-sim \
   --token-file /absolute/private/canopi.token
 ```
 
-One-shot mode is `--once`. Inspect the normalized snapshot or image with:
+One-shot mode is `--once`. On a transient delivery failure, the continuous
+simulator retries the exact pending batch and event IDs before advancing its
+state. Inspect the normalized snapshot or image with:
 
 ```sh
 CANOPI_TOKEN="$(cat /absolute/private/canopi.token)"
@@ -150,6 +156,8 @@ are strong hashes of deterministic PNG bytes. A structurally valid batch
 continues after per-event admission failures and returns `207` with an ordered
 status/result entry for every event, so one permanent rejection cannot starve
 later lifecycle updates. Persistence failure still fails the request.
+An already-durable duplicate event ID is acknowledged before timestamp-skew
+validation, so an exact retry remains idempotent even after a clock correction.
 
 ## Claude Code adapter
 
@@ -246,7 +254,8 @@ e-paper board affected the ESP32-C3 strap pins. The pinned release contains
 Espressif's strap-safe C3 flasher fix. Both tools are installed locally and
 gitignored; no Rosetta installation is required.
 
-The client connects to Wi-Fi, sends the bearer token and retained ETag, and does
+The client connects to Wi-Fi over HTTPS, validates the collector certificate
+against its configured CA, sends the bearer token and retained ETag, and does
 nothing on 304. A 200 response must be `image/png`, have a bounded known length,
 decode successfully, and report exactly 800x480 before `epaper.update()` runs.
 Each decoded RGB565 scanline is thresholded and packed MSB-first into the
@@ -259,11 +268,13 @@ retained validator after a firmware change that requires the panel to redraw.
 
 Physical verification:
 
-1. Run Canopi on a concrete private LAN address with `--allow-lan`, start the
-   simulator, and verify from another LAN machine that the render URL returns a
-   1-bit 800x480 PNG and an ETag.
+1. Run Canopi on a concrete private LAN address with `--allow-lan`,
+   `--tls-cert-file`, and `--tls-key-file`; start the simulator with the HTTPS
+   collector URL, and verify from another LAN machine that the render URL
+   returns a 1-bit 800x480 PNG and an ETag with valid certificate verification.
 2. Copy `firmware/canopi-panel/include/secrets.example.h` to `secrets.h` and set
-   Wi-Fi, the LAN render URL, and the same token. The real file is gitignored.
+   Wi-Fi, the HTTPS LAN render URL, the same token, and the PEM CA certificate
+   that issued the collector certificate. The real file is gitignored.
 3. Connect the panel by USB-C. Keep it USB-powered for the MVP. If the panel was
    assembled separately, seat the fragile FPC with metal contacts facing up.
 4. On Apple Silicon, from `firmware/canopi-panel`, run
@@ -286,13 +297,15 @@ Physical verification:
    cards disappear rather than becoming done. Leave a done card past
    `--done-retention` and confirm it disappears independently.
 
-The physical XIAO panel was built, flashed through built-in JTAG, and exercised
-end to end. The final image used 87,196 of 327,680 RAM bytes and 939,818 of
-1,310,720 flash bytes. Disassembly confirmed the linked image contains no
+The one-bit packing build was flashed to the physical XIAO panel through
+built-in JTAG and exercised end to end. The TLS follow-up was compile-verified;
+its image used 87,292 of 327,680 RAM bytes and 939,830 of 1,310,720 flash bytes.
+Disassembly of the flashed build confirmed the linked image contains no
 floating-point CSR instructions. Serial evidence showed a successful validated
 display refresh, repeated body-free 304 responses with no display update,
 further refreshes after the simulator changed lifecycle state, and 304
-responses again after the simulator stopped.
+responses again after the simulator stopped. Flash the TLS image only after
+configuring the operator's real CA certificate and HTTPS collector URL.
 
 Deployment-specific SSIDs, credentials, network names, firewall identifiers,
 client addresses, and host addresses are intentionally excluded from the

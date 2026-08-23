@@ -2,6 +2,7 @@
 #include <HTTPClient.h>
 #include <PNGdec.h>
 #include <WiFi.h>
+#include <WiFiClientSecure.h>
 #include <memory>
 
 #include "driver.h"
@@ -96,11 +97,18 @@ bool refreshOnce() {
     return false;
   }
 
+  const String renderURL = CANOPI_RENDER_URL;
+  if (!renderURL.startsWith("https://")) {
+    Serial.println("Canopi: refusing plaintext render URL");
+    return false;
+  }
+  WiFiClientSecure transport;
+  transport.setCACert(CANOPI_TLS_CA_CERT);
   HTTPClient http;
   http.setTimeout(DOWNLOAD_TIMEOUT_MS);
   const char *responseHeaders[] = {"ETag", "Content-Type"};
   http.collectHeaders(responseHeaders, 2);
-  if (!http.begin(CANOPI_RENDER_URL)) {
+  if (!http.begin(transport, renderURL)) {
     Serial.println("Canopi: render request setup failed");
     return false;
   }

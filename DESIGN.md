@@ -1767,8 +1767,11 @@ provider adapters normalize lifecycle signals into strict events without
 knowing whether direct HTTP, a local spool, or a future Punaro bridge transports
 them. Punaro message content is never interpreted as Canopi control data.
 
-The MVP collector uses a separate bearer-authenticated HTTP listener, a bounded
-durable state snapshot, and at-least-once event IDs. Duplicate IDs are harmless.
+The MVP collector uses a separate bearer-authenticated loopback HTTP or LAN TLS
+listener, a bounded durable state snapshot, and at-least-once event IDs.
+Duplicate IDs are harmless and an already-durable duplicate is acknowledged
+before future-skew validation, preserving exact-retry idempotency across clock
+corrections.
 For one card, `activity_at` and then `event_id` fence delayed/out-of-order
 updates. Admission durably expires stale records before rejecting new identities
 at a configured live-record ceiling, and rejects activity timestamps beyond
@@ -1824,7 +1827,10 @@ exact dimension validation. The RTC-retained validator is versioned so a
 firmware update that changes image interpretation forces one corrective redraw.
 
 Canopi's first listener is loopback by default. A concrete private/link-local
-listener requires explicit LAN opt-in; wildcard and public binds fail closed.
+listener requires explicit LAN opt-in and an absolute TLS certificate/key pair;
+wildcard, public, and plaintext LAN binds fail closed. The panel accepts only an
+HTTPS render URL and validates the collector certificate against its configured
+CA.
 This shared-token LAN MVP is not yet Punaro device-authenticated and must not be
 mounted on the public Punaro origin. Its bearer token must be a protected,
 current-user-owned regular file (or equivalent current-user-only Windows ACL),
@@ -1832,9 +1838,10 @@ opened without following symlinks and rejected if its identity changes during
 open. Collector, provider adapter, and simulator share the same loader.
 
 Simulator event IDs include a random per-process run identity, preventing a
-restart from colliding with the collector's durable dedupe window. State
-transitions use the current tick timestamp so a resumed working update always
-orders after the preceding wait.
+restart from colliding with the collector's durable dedupe window. A failed
+post retains the exact pending batch and event IDs for retry before the
+simulation advances. State transitions use the current tick timestamp so a
+resumed working update always orders after the preceding wait.
 
 ## Required adversarial acceptance tests
 
