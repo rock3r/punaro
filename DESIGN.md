@@ -1770,9 +1770,13 @@ them. Punaro message content is never interpreted as Canopi control data.
 The MVP collector uses a separate bearer-authenticated HTTP listener, a bounded
 durable state snapshot, and at-least-once event IDs. Duplicate IDs are harmless.
 For one card, `activity_at` and then `event_id` fence delayed/out-of-order
-updates. Non-terminal TTL expiry archives/hides abandoned work and never
-converts it to success; done retention is independent. Snapshot and image ETags
-change only with state revision or the configured relative-time bucket.
+updates. Admission rejects new identities at a configured live-record ceiling
+and rejects activity timestamps beyond configured future clock skew. A failed
+state-file write never mutates the acknowledged in-memory revision, record, or
+dedupe set, so an exact retry still attempts persistence. Non-terminal TTL
+expiry archives/hides abandoned work and never converts it to success; done
+retention is independent. Snapshot and image ETags change only with state
+revision or the configured relative-time bucket.
 
 Prompts, transcripts, assistant messages, tool inputs, and tool outputs are not
 part of the protocol and are rejected from metadata. A provider adapter may use
@@ -1780,6 +1784,12 @@ final text locally for deterministic waiting/done classification but does not
 forward it. Claude retry IDs use a secret-keyed HMAC, never an unkeyed content
 digest. Adapter delivery is detached, bounded, and incapable of blocking or
 controlling the coding agent.
+
+The Claude adapter durably writes each normalized privacy-safe event to a
+bounded owner-only spool before launching a detached delivery process. One
+cross-process worker retries queued events with their original IDs until
+acknowledged; per-attempt network timeouts and recoverable stale worker locks
+keep provider hooks isolated from collector outages.
 
 The renderer always sorts the complete state set waiting, done, working, then
 recent-first inside each state, before applying configurable capacity. The last

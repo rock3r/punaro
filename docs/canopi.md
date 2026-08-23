@@ -26,10 +26,11 @@ pixel-for-pixel comparison and remaining P3 observation.
 ## Architecture and boundaries
 
 ```text
-provider command hook -> detached local adapter -> POST normalized event
-                                                -> Canopi collector/state file
-                                                -> deterministic 800x480 PNG
-                                                -> XIAO conditional GET/panel
+provider command hook -> bounded durable local spool -> detached retry worker
+                                                     -> POST normalized event
+                                                     -> Canopi collector/state file
+                                                     -> deterministic 800x480 PNG
+                                                     -> XIAO conditional GET/panel
 ```
 
 - `canopi/protocol` is the versioned transport-neutral contract.
@@ -62,10 +63,14 @@ optional repository, stable IDs, state, timestamps, and primitive allowlisted
 metadata leave the machine.
 
 The hook-facing Claude process performs no network I/O. It normalizes the event,
-starts a detached delivery child, and returns. The child has a 750 ms HTTP
-timeout. Missing configuration, malformed provider input, process-launch
-failure, token-file failure, network failure, and collector rejection all leave
-the coding agent unblocked and produce no provider-visible output.
+durably enqueues only that privacy-safe event, starts a detached delivery child,
+and returns. One cross-process worker drains the bounded 4,096-event spool and
+retries with the same event ID until the collector acknowledges it. Individual
+HTTP attempts are bounded; a crashed worker leaves its event queued and a stale
+worker lock is recoverable. Missing configuration, malformed provider input,
+spool or process-launch failure, token-file failure, network failure, and
+collector rejection all leave the coding agent unblocked and produce no
+provider-visible output.
 
 All collector routes require the same bearer token. Bodies, batches, headers,
 dedupe memory, and grid capacity are bounded. A non-loopback listener must be a
@@ -93,7 +98,11 @@ go run ./cmd/canopi \
 For a deliberately selected LAN address, add `--allow-lan` and replace the
 listener with that concrete private IP. Useful configuration flags are
 `--columns`, `--rows`, `--working-ttl`, `--done-retention`,
-`--relative-time-bucket`, and `--title`.
+`--max-live-records`, `--max-future-skew`, `--relative-time-bucket`, and
+`--title`. New agent identities are rejected at the configured live-record
+ceiling, while updates to known identities remain admissible. Activity times
+beyond the configured future-clock-skew window are rejected before they can
+fence later correct updates or evade expiry.
 
 In another terminal, generate the selected 3 waiting / 4 done / 12 working
 overflow state:
@@ -138,6 +147,7 @@ that launches Claude Code:
 go build -trimpath -o /absolute/bin/canopi-claude-hook ./cmd/canopi-claude-hook
 export CANOPI_ENDPOINT=http://10.0.0.20:8090
 export CANOPI_TOKEN_FILE=/absolute/private/canopi.token
+export CANOPI_SPOOL_DIR=/absolute/private/canopi-claude-spool
 export CANOPI_MACHINE_ID=studio-m2
 export CANOPI_MACHINE_LABEL=studio-m2
 export CANOPI_TASK_TITLE='Punaro / current task'
@@ -148,6 +158,11 @@ Copy the `hooks` object from
 `canopi/providers/claude-code-hooks.example.json` into project-local
 `.claude/settings.local.json` or the desired Claude settings scope, then replace
 the absolute binary path. Hook stdout and stderr stay empty.
+
+`CANOPI_SPOOL_DIR` is optional; when omitted, the adapter creates
+`canopi-claude-spool` beside the token file. The directory and queued normalized
+events are owner-only. A collector outage never causes the hook-facing process
+to wait for network recovery.
 
 ## Pi evaluation
 

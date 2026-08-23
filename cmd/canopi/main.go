@@ -29,6 +29,8 @@ type serverConfig struct {
 	grid               canopi.GridConfig
 	workingTTL         time.Duration
 	doneRetention      time.Duration
+	maxLiveRecords     int
+	maxFutureSkew      time.Duration
 	relativeTimeBucket time.Duration
 	title              string
 }
@@ -48,7 +50,10 @@ func run(args []string, stderr io.Writer) int {
 		_, _ = fmt.Fprintln(stderr, "canopi configuration error: protected token is unavailable")
 		return 2
 	}
-	store, err := canopi.OpenStore(config.stateFile, canopi.Config{WorkingTTL: config.workingTTL, DoneRetention: config.doneRetention})
+	store, err := canopi.OpenStore(config.stateFile, canopi.Config{
+		WorkingTTL: config.workingTTL, DoneRetention: config.doneRetention,
+		MaxLiveRecords: config.maxLiveRecords, MaxFutureSkew: config.maxFutureSkew,
+	})
 	if err != nil {
 		_, _ = fmt.Fprintf(stderr, "canopi state error: %v\n", err)
 		return 1
@@ -107,6 +112,8 @@ func parseConfig(args []string) (serverConfig, error) {
 	flags.IntVar(&config.grid.Rows, "rows", 6, "panel grid rows")
 	flags.DurationVar(&config.workingTTL, "working-ttl", defaults.WorkingTTL, "non-terminal agent expiry")
 	flags.DurationVar(&config.doneRetention, "done-retention", defaults.DoneRetention, "terminal agent retention")
+	flags.IntVar(&config.maxLiveRecords, "max-live-records", defaults.MaxLiveRecords, "maximum current agent identities")
+	flags.DurationVar(&config.maxFutureSkew, "max-future-skew", defaults.MaxFutureSkew, "maximum accepted future activity timestamp")
 	flags.DurationVar(&config.relativeTimeBucket, "relative-time-bucket", time.Minute, "relative-time render bucket")
 	flags.StringVar(&config.title, "title", "CANOPI", "provisional display title")
 	if err := flags.Parse(args); err != nil || flags.NArg() != 0 {
@@ -136,6 +143,12 @@ func parseConfig(args []string) (serverConfig, error) {
 	}
 	if config.workingTTL <= 0 || config.doneRetention <= 0 || config.relativeTimeBucket <= 0 {
 		return serverConfig{}, errors.New("TTL, retention, and render bucket must be positive")
+	}
+	if config.maxLiveRecords <= 0 || config.maxLiveRecords > 100_000 {
+		return serverConfig{}, errors.New("max-live-records must be between 1 and 100000")
+	}
+	if config.maxFutureSkew <= 0 || config.maxFutureSkew > time.Hour {
+		return serverConfig{}, errors.New("max-future-skew must be between zero and one hour")
 	}
 	if strings.TrimSpace(config.title) == "" {
 		return serverConfig{}, errors.New("title is required")

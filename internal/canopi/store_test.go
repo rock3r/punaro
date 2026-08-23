@@ -1,6 +1,7 @@
 package canopi
 
 import (
+	"errors"
 	"path/filepath"
 	"testing"
 	"time"
@@ -112,5 +113,64 @@ func TestPersistentStoreSurvivesRestartAndKeepsDedupe(t *testing.T) {
 	}
 	if result, err := reopened.Apply(input); err != nil || !result.Duplicate {
 		t.Fatalf("Apply() after restart = %+v, %v", result, err)
+	}
+}
+
+func TestApplyPersistenceFailureDoesNotAcknowledgeOrMutate(t *testing.T) {
+	now := time.Date(2026, 8, 23, 12, 0, 0, 0, time.UTC)
+	store := NewStore(DefaultConfig())
+	persistCalls := 0
+	store.persist = func(persistedStore) error {
+		persistCalls++
+		if persistCalls == 1 {
+			return errors.New("simulated persistence failure")
+		}
+		return nil
+	}
+	input := event("event-retry", "agent", protocol.StateWorking, now)
+	if result, err := store.Apply(input); err == nil || result != (ApplyResult{}) {
+		t.Fatalf("failed Apply() = %+v, %v", result, err)
+	}
+	if store.Revision() != 0 || len(store.Snapshot(now).Agents) != 0 {
+		t.Fatal("failed persistence mutated acknowledged in-memory state")
+	}
+	if result, err := store.Apply(input); err != nil || !result.Applied {
+		t.Fatalf("retry Apply() = %+v, %v", result, err)
+	}
+}
+
+func TestApplyBoundsLiveRecordsButAllowsExistingAgentUpdates(t *testing.T) {
+	now := time.Date(2026, 8, 23, 12, 0, 0, 0, time.UTC)
+	config := DefaultConfig()
+	config.MaxLiveRecords = 2
+	store := NewStore(config)
+	store.now = func() time.Time { return now }
+	for _, input := range []protocol.Event{
+		event("event-a", "agent-a", protocol.StateWorking, now),
+		event("event-b", "agent-b", protocol.StateWorking, now),
+	} {
+		if result, err := store.Apply(input); err != nil || !result.Applied {
+			t.Fatalf("Apply(%s) = %+v, %v", input.EventID, result, err)
+		}
+	}
+	if _, err := store.Apply(event("event-c", "agent-c", protocol.StateWorking, now)); !errors.Is(err, ErrLiveRecordLimit) {
+		t.Fatalf("third agent error = %v, want ErrLiveRecordLimit", err)
+	}
+	if result, err := store.Apply(event("event-a-done", "agent-a", protocol.StateDone, now.Add(time.Second))); err != nil || !result.Applied {
+		t.Fatalf("existing agent update = %+v, %v", result, err)
+	}
+}
+
+func TestApplyRejectsActivityBeyondConfiguredClockSkew(t *testing.T) {
+	now := time.Date(2026, 8, 23, 12, 0, 0, 0, time.UTC)
+	config := DefaultConfig()
+	config.MaxFutureSkew = 5 * time.Minute
+	store := NewStore(config)
+	store.now = func() time.Time { return now }
+	if _, err := store.Apply(event("future", "agent", protocol.StateWorking, now.Add(5*time.Minute+time.Nanosecond))); !errors.Is(err, ErrFutureActivity) {
+		t.Fatalf("future event error = %v, want ErrFutureActivity", err)
+	}
+	if result, err := store.Apply(event("boundary", "agent", protocol.StateWorking, now.Add(5*time.Minute))); err != nil || !result.Applied {
+		t.Fatalf("boundary event = %+v, %v", result, err)
 	}
 }

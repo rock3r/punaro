@@ -8,6 +8,8 @@ import (
 	"net/http/httptest"
 	"testing"
 	"time"
+
+	"github.com/rock3r/punaro/canopi/protocol"
 )
 
 func TestHandlerIngestSnapshotRenderAndConditionalFetch(t *testing.T) {
@@ -85,5 +87,34 @@ func TestHandlerRejectsTrailingBatchJSON(t *testing.T) {
 	handler.ServeHTTP(response, request)
 	if response.Code != http.StatusBadRequest {
 		t.Fatalf("trailing JSON status = %d, body = %s", response.Code, response.Body.String())
+	}
+}
+
+func TestHandlerRejectsFutureActivityAndLiveRecordOverflow(t *testing.T) {
+	now := time.Date(2026, 8, 23, 12, 0, 0, 0, time.UTC)
+	config := DefaultConfig()
+	config.MaxLiveRecords = 1
+	store := NewStore(config)
+	store.now = func() time.Time { return now }
+	handler, err := NewHandler(HandlerConfig{Store: store, Token: "secret", Now: func() time.Time { return now }, Render: DefaultRenderConfig()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	post := func(input protocol.Event) int {
+		payload, _ := json.Marshal(input)
+		request := httptest.NewRequestWithContext(context.Background(), http.MethodPost, "/v1/events", bytes.NewReader(payload))
+		request.Header.Set("Authorization", "Bearer secret")
+		response := httptest.NewRecorder()
+		handler.ServeHTTP(response, request)
+		return response.Code
+	}
+	if got := post(event("future", "future", protocol.StateWorking, now.Add(6*time.Minute))); got != http.StatusBadRequest {
+		t.Fatalf("future activity status = %d, want %d", got, http.StatusBadRequest)
+	}
+	if got := post(event("first", "first", protocol.StateWorking, now)); got != http.StatusAccepted {
+		t.Fatalf("first activity status = %d, want %d", got, http.StatusAccepted)
+	}
+	if got := post(event("overflow", "overflow", protocol.StateWorking, now)); got != http.StatusTooManyRequests {
+		t.Fatalf("overflow status = %d, want %d", got, http.StatusTooManyRequests)
 	}
 }

@@ -3,7 +3,11 @@ package main
 import (
 	"bytes"
 	"errors"
+	"os"
+	"path/filepath"
 	"testing"
+
+	"github.com/rock3r/punaro/internal/canopiadapter"
 )
 
 func TestHookLaunchesDetachedDeliveryWithoutWaitingForNetwork(t *testing.T) {
@@ -14,15 +18,13 @@ func TestHookLaunchesDetachedDeliveryWithoutWaitingForNetwork(t *testing.T) {
 		"CANOPI_MACHINE_ID":    "studio-m2",
 		"CANOPI_TASK_TITLE":    "Punaro / tests",
 		"CANOPI_MACHINE_LABEL": "Studio M2",
+		"CANOPI_SPOOL_DIR":     t.TempDir(),
 	}
 	spawned := false
 	err := runHook(bytes.NewReader(raw), func(key string) string { return environment[key] }, func(string) ([]byte, error) {
 		return []byte("test-secret"), nil
-	}, func(payload []byte) error {
+	}, func() error {
 		spawned = true
-		if bytes.Contains(payload, []byte("private")) {
-			t.Fatal("normalized child payload contains private hook input")
-		}
 		return errors.New("simulated launch failure")
 	})
 	if err != nil {
@@ -30,5 +32,20 @@ func TestHookLaunchesDetachedDeliveryWithoutWaitingForNetwork(t *testing.T) {
 	}
 	if !spawned {
 		t.Fatal("runHook() did not launch detached delivery")
+	}
+	spool := canopiadapter.Spool{Directory: environment["CANOPI_SPOOL_DIR"]}
+	if got, err := spool.Pending(); err != nil || got != 1 {
+		t.Fatalf("durable pending events = %d, %v", got, err)
+	}
+	files, err := filepath.Glob(filepath.Join(environment["CANOPI_SPOOL_DIR"], "*.json"))
+	if err != nil || len(files) != 1 {
+		t.Fatalf("spool files = %v, %v", files, err)
+	}
+	payload, err := os.ReadFile(files[0])
+	if err != nil {
+		t.Fatal(err)
+	}
+	if bytes.Contains(payload, []byte("private")) {
+		t.Fatal("durable normalized payload contains private hook input")
 	}
 }

@@ -13,3 +13,7 @@ Card identity is `(source, machine.id, agent_instance_id)`. `event_id` is the
 at-least-once idempotency key; `activity_at`, then `event_id`, orders updates for
 the same card. `emitted_at` is diagnostic only and does not make delayed events
 newer.
+
+Structural protocol validation is independent of wall-clock and transport.
+Collectors apply their configured future-clock-skew bound at admission so an
+untrusted timestamp cannot permanently fence correct updates or avoid expiry.

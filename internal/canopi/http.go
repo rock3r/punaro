@@ -108,6 +108,14 @@ func (h *Handler) ingest(response http.ResponseWriter, request *http.Request) {
 	}
 	result, err := h.store.Apply(event)
 	if err != nil {
+		if errors.Is(err, ErrFutureActivity) {
+			writeError(response, http.StatusBadRequest, err)
+			return
+		}
+		if errors.Is(err, ErrLiveRecordLimit) {
+			writeError(response, http.StatusTooManyRequests, err)
+			return
+		}
 		writeError(response, http.StatusInternalServerError, errors.New("persist event"))
 		return
 	}
@@ -156,6 +164,14 @@ func (h *Handler) ingestBatch(response http.ResponseWriter, request *http.Reques
 	for _, event := range events {
 		result, err := h.store.Apply(event)
 		if err != nil {
+			if errors.Is(err, ErrFutureActivity) {
+				writeError(response, http.StatusBadRequest, err)
+				return
+			}
+			if errors.Is(err, ErrLiveRecordLimit) {
+				writeError(response, http.StatusTooManyRequests, err)
+				return
+			}
 			writeError(response, http.StatusInternalServerError, errors.New("persist batch"))
 			return
 		}

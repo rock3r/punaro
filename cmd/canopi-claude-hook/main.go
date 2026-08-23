@@ -4,13 +4,12 @@
 package main
 
 import (
-	"bytes"
 	"context"
-	"encoding/json"
 	"io"
 	"net/http"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"strings"
 	"time"
 
@@ -22,13 +21,13 @@ const maxHookBytes = 1 << 20
 
 func main() {
 	if len(os.Args) == 2 && os.Args[1] == "deliver" {
-		_ = runDelivery(os.Stdin, os.Getenv)
+		_ = runDelivery(os.Getenv)
 		return
 	}
 	_ = runHook(os.Stdin, os.Getenv, os.ReadFile, spawnDetached)
 }
 
-func runHook(input io.Reader, getenv func(string) string, readFile func(string) ([]byte, error), spawn func([]byte) error) error {
+func runHook(input io.Reader, getenv func(string) string, readFile func(string) ([]byte, error), spawn func() error) error {
 	if getenv("CANOPI_ENDPOINT") == "" || getenv("CANOPI_TOKEN_FILE") == "" || getenv("CANOPI_MACHINE_ID") == "" {
 		return nil
 	}
@@ -50,21 +49,20 @@ func runHook(input io.Reader, getenv func(string) string, readFile func(string) 
 	if err != nil || !emit {
 		return nil //nolint:nilerr // Invalid or irrelevant hooks are deliberately swallowed.
 	}
-	payload, err := json.Marshal(event)
-	if err != nil {
+	spool, err := deliverySpool(getenv)
+	if err != nil || spool.Enqueue(event) != nil {
 		return nil //nolint:nilerr // Hook failures must never affect Claude Code.
 	}
-	_ = spawn(payload)
+	_ = spawn()
 	return nil
 }
 
-func spawnDetached(payload []byte) error {
+func spawnDetached() error {
 	executable, err := os.Executable()
 	if err != nil {
 		return err
 	}
 	command := exec.CommandContext(context.Background(), executable, "deliver") // #nosec G204 -- os.Executable returns this already-running adapter binary; arguments are fixed.
-	command.Stdin = bytes.NewReader(payload)
 	command.Stdout = io.Discard
 	command.Stderr = io.Discard
 	if err := command.Start(); err != nil {
@@ -73,8 +71,8 @@ func spawnDetached(payload []byte) error {
 	return command.Process.Release()
 }
 
-func runDelivery(input io.Reader, getenv func(string) string) error {
-	event, err := protocol.DecodeEvent(input, maxHookBytes)
+func runDelivery(getenv func(string) string) error {
+	spool, err := deliverySpool(getenv)
 	if err != nil {
 		return err
 	}
@@ -82,8 +80,21 @@ func runDelivery(input io.Reader, getenv func(string) string) error {
 	if err != nil {
 		return err
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), 700*time.Millisecond)
-	defer cancel()
 	client := &http.Client{Timeout: 750 * time.Millisecond}
-	return canopiadapter.Deliver(ctx, client, getenv("CANOPI_ENDPOINT"), strings.TrimSpace(string(tokenBytes)), event)
+	token := strings.TrimSpace(string(tokenBytes))
+	return spool.Drain(context.Background(), func(ctx context.Context, event protocol.Event) error {
+		return canopiadapter.Deliver(ctx, client, getenv("CANOPI_ENDPOINT"), token, event)
+	})
+}
+
+func deliverySpool(getenv func(string) string) (canopiadapter.Spool, error) {
+	directory := strings.TrimSpace(getenv("CANOPI_SPOOL_DIR"))
+	if directory == "" {
+		tokenFile := strings.TrimSpace(getenv("CANOPI_TOKEN_FILE"))
+		if !filepath.IsAbs(tokenFile) {
+			return canopiadapter.Spool{}, os.ErrInvalid
+		}
+		directory = filepath.Join(filepath.Dir(tokenFile), "canopi-claude-spool")
+	}
+	return canopiadapter.Spool{Directory: directory}, nil
 }

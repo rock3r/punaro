@@ -16,25 +16,52 @@ import (
 
 const maxRememberedEventIDs = 50_000
 
+var (
+	// ErrLiveRecordLimit reports bounded admission of a new agent identity.
+	ErrLiveRecordLimit = errors.New("canopi live record limit reached")
+	// ErrFutureActivity reports an untrusted activity timestamp beyond allowed skew.
+	ErrFutureActivity = errors.New("canopi activity timestamp is too far in the future")
+)
+
 // Config controls lifecycle expiry and completed-agent retention.
 type Config struct {
-	WorkingTTL    time.Duration
-	DoneRetention time.Duration
+	WorkingTTL     time.Duration
+	DoneRetention  time.Duration
+	MaxLiveRecords int
+	MaxFutureSkew  time.Duration
 }
 
 // DefaultConfig returns the production MVP retention settings.
 func DefaultConfig() Config {
-	return Config{WorkingTTL: 30 * time.Minute, DoneRetention: 2 * time.Hour}
+	return Config{
+		WorkingTTL:     30 * time.Minute,
+		DoneRetention:  2 * time.Hour,
+		MaxLiveRecords: 2_048,
+		MaxFutureSkew:  5 * time.Minute,
+	}
 }
 
-func (c Config) validate() error {
+func (c Config) normalized() (Config, error) {
+	defaults := DefaultConfig()
+	if c.MaxLiveRecords == 0 {
+		c.MaxLiveRecords = defaults.MaxLiveRecords
+	}
+	if c.MaxFutureSkew == 0 {
+		c.MaxFutureSkew = defaults.MaxFutureSkew
+	}
 	if c.WorkingTTL <= 0 {
-		return errors.New("working TTL must be positive")
+		return Config{}, errors.New("working TTL must be positive")
 	}
 	if c.DoneRetention <= 0 {
-		return errors.New("done retention must be positive")
+		return Config{}, errors.New("done retention must be positive")
 	}
-	return nil
+	if c.MaxLiveRecords <= 0 || c.MaxLiveRecords > 100_000 {
+		return Config{}, errors.New("max live records must be between 1 and 100000")
+	}
+	if c.MaxFutureSkew <= 0 || c.MaxFutureSkew > time.Hour {
+		return Config{}, errors.New("max future skew must be between zero and one hour")
+	}
+	return c, nil
 }
 
 // ApplyResult describes how one event affected current state.
@@ -63,11 +90,12 @@ type Snapshot struct {
 type Store struct {
 	mu        sync.Mutex
 	config    Config
-	path      string
 	records   map[string]protocol.Event
 	seen      map[string]struct{}
 	seenOrder []string
 	revision  uint64
+	now       func() time.Time
+	persist   func(persistedStore) error
 }
 
 type persistedStore struct {
@@ -78,13 +106,16 @@ type persistedStore struct {
 
 // NewStore constructs an in-memory store with validated configuration.
 func NewStore(config Config) *Store {
-	if err := config.validate(); err != nil {
+	normalized, err := config.normalized()
+	if err != nil {
 		panic(err)
 	}
 	return &Store{
-		config:  config,
+		config:  normalized,
 		records: make(map[string]protocol.Event),
 		seen:    make(map[string]struct{}),
+		now:     time.Now,
+		persist: func(persistedStore) error { return nil },
 	}
 }
 
@@ -93,11 +124,12 @@ func OpenStore(path string, config Config) (*Store, error) {
 	if path == "" {
 		return nil, errors.New("state path is required")
 	}
-	if err := config.validate(); err != nil {
+	normalized, err := config.normalized()
+	if err != nil {
 		return nil, err
 	}
-	store := NewStore(config)
-	store.path = path
+	store := NewStore(normalized)
+	store.persist = func(state persistedStore) error { return persistStore(path, state) }
 	payload, err := os.ReadFile(path) // #nosec G304 -- the operator explicitly selects this private state file.
 	if errors.Is(err, os.ErrNotExist) {
 		return store, nil
@@ -111,6 +143,9 @@ func OpenStore(path string, config Config) (*Store, error) {
 	}
 	if len(persisted.SeenOrder) > maxRememberedEventIDs {
 		return nil, errors.New("persisted Canopi dedupe set exceeds limit")
+	}
+	if len(persisted.Records) > store.config.MaxLiveRecords {
+		return nil, errors.New("persisted Canopi live record set exceeds limit")
 	}
 	for _, event := range persisted.Records {
 		if err := event.Validate(); err != nil {
@@ -136,24 +171,38 @@ func (s *Store) Apply(event protocol.Event) (ApplyResult, error) {
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	if event.ActivityAt.After(s.now().Add(s.config.MaxFutureSkew)) {
+		return ApplyResult{}, ErrFutureActivity
+	}
 	if _, duplicate := s.seen[event.EventID]; duplicate {
 		return ApplyResult{Duplicate: true}, nil
 	}
-	s.rememberLocked(event.EventID)
 	existing, exists := s.records[event.Key()]
+	if !exists && len(s.records) >= s.config.MaxLiveRecords {
+		return ApplyResult{}, ErrLiveRecordLimit
+	}
+	nextRecords := cloneRecords(s.records)
+	nextSeen := cloneSeen(s.seen)
+	nextSeenOrder := append([]string(nil), s.seenOrder...)
+	rememberEventID(nextSeen, &nextSeenOrder, event.EventID)
+	nextRevision := s.revision
+	result := ApplyResult{}
 	if exists && (event.ActivityAt.Before(existing.ActivityAt) ||
 		(event.ActivityAt.Equal(existing.ActivityAt) && event.EventID <= existing.EventID)) {
-		if err := s.persistLocked(); err != nil {
-			return ApplyResult{}, err
-		}
-		return ApplyResult{Stale: true}, nil
+		result.Stale = true
+	} else {
+		nextRecords[event.Key()] = event
+		nextRevision++
+		result.Applied = true
 	}
-	s.records[event.Key()] = event
-	s.revision++
-	if err := s.persistLocked(); err != nil {
+	if err := s.persist(persistedState(nextRevision, nextRecords, nextSeenOrder)); err != nil {
 		return ApplyResult{}, err
 	}
-	return ApplyResult{Applied: true}, nil
+	s.records = nextRecords
+	s.seen = nextSeen
+	s.seenOrder = nextSeenOrder
+	s.revision = nextRevision
+	return result, nil
 }
 
 // Revision returns the monotonic revision of visible current state.
@@ -169,6 +218,7 @@ func (s *Store) Snapshot(now time.Time) Snapshot {
 	defer s.mu.Unlock()
 	changed := false
 	agents := make([]protocol.Event, 0, len(s.records))
+	nextRecords := cloneRecords(s.records)
 	for key, event := range s.records {
 		age := now.Sub(event.ActivityAt)
 		expired := event.State == protocol.StateDone && age > s.config.DoneRetention
@@ -176,15 +226,18 @@ func (s *Store) Snapshot(now time.Time) Snapshot {
 			expired = true
 		}
 		if expired {
-			delete(s.records, key)
+			delete(nextRecords, key)
 			changed = true
 			continue
 		}
 		agents = append(agents, event)
 	}
 	if changed {
-		s.revision++
-		_ = s.persistLocked()
+		nextRevision := s.revision + 1
+		if err := s.persist(persistedState(nextRevision, nextRecords, s.seenOrder)); err == nil {
+			s.records = nextRecords
+			s.revision = nextRevision
+		}
 	}
 	SortEvents(agents)
 	snapshot := Snapshot{GeneratedAt: now.UTC(), Revision: s.revision, Agents: agents}
@@ -226,31 +279,48 @@ func stateRank(state protocol.State) int {
 	}
 }
 
-func (s *Store) rememberLocked(eventID string) {
-	if len(s.seenOrder) == maxRememberedEventIDs {
-		oldest := s.seenOrder[0]
-		delete(s.seen, oldest)
-		copy(s.seenOrder, s.seenOrder[1:])
-		s.seenOrder = s.seenOrder[:len(s.seenOrder)-1]
+func rememberEventID(seen map[string]struct{}, order *[]string, eventID string) {
+	if len(*order) == maxRememberedEventIDs {
+		oldest := (*order)[0]
+		delete(seen, oldest)
+		copy(*order, (*order)[1:])
+		*order = (*order)[:len(*order)-1]
 	}
-	s.seen[eventID] = struct{}{}
-	s.seenOrder = append(s.seenOrder, eventID)
+	seen[eventID] = struct{}{}
+	*order = append(*order, eventID)
 }
 
-func (s *Store) persistLocked() error {
-	if s.path == "" {
-		return nil
+func cloneRecords(records map[string]protocol.Event) map[string]protocol.Event {
+	cloned := make(map[string]protocol.Event, len(records))
+	for key, event := range records {
+		cloned[key] = event
 	}
-	directory := filepath.Dir(s.path)
+	return cloned
+}
+
+func cloneSeen(seen map[string]struct{}) map[string]struct{} {
+	cloned := make(map[string]struct{}, len(seen))
+	for eventID := range seen {
+		cloned[eventID] = struct{}{}
+	}
+	return cloned
+}
+
+func persistedState(revision uint64, records map[string]protocol.Event, seenOrder []string) persistedStore {
+	orderedRecords := make([]protocol.Event, 0, len(records))
+	for _, event := range records {
+		orderedRecords = append(orderedRecords, event)
+	}
+	SortEvents(orderedRecords)
+	return persistedStore{Revision: revision, Records: orderedRecords, SeenOrder: append([]string(nil), seenOrder...)}
+}
+
+func persistStore(path string, state persistedStore) error {
+	directory := filepath.Dir(path)
 	if err := os.MkdirAll(directory, 0o700); err != nil {
 		return fmt.Errorf("create Canopi state directory: %w", err)
 	}
-	records := make([]protocol.Event, 0, len(s.records))
-	for _, event := range s.records {
-		records = append(records, event)
-	}
-	SortEvents(records)
-	payload, err := json.Marshal(persistedStore{Revision: s.revision, Records: records, SeenOrder: s.seenOrder})
+	payload, err := json.Marshal(state)
 	if err != nil {
 		return fmt.Errorf("encode Canopi state: %w", err)
 	}
@@ -275,8 +345,8 @@ func (s *Store) persistLocked() error {
 	if err := temporary.Close(); err != nil {
 		return fmt.Errorf("close Canopi state: %w", err)
 	}
-	if err := os.Rename(temporaryName, s.path); err != nil {
+	if err := os.Rename(temporaryName, path); err != nil {
 		return fmt.Errorf("replace Canopi state: %w", err)
 	}
-	return nil
+	return syncStateDirectory(directory)
 }
