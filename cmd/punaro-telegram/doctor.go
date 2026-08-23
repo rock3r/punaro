@@ -119,7 +119,7 @@ func runTelegramDoctor(args []string, stdout, stderr io.Writer) int {
 		checks = append(checks, punarodiagnostic.Pass("bot_api"))
 	}
 
-	snapshot, stateErr := telegram.InspectGatewayState(filepath.Join(cfg.stateDir, "telegram.db"), telegramDoctorNow().UTC())
+	snapshot, stateErr := telegram.InspectGatewayState(ctx, filepath.Join(cfg.stateDir, "telegram.db"), telegramDoctorNow().UTC())
 	if stateErr != nil {
 		checks = append(checks, telegramStateUnavailableChecks()...)
 	} else {

@@ -82,7 +82,7 @@ func TestGatewayHealthSnapshotIsContentFreeAndReadOnly(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	snapshot, err := InspectGatewayState(database, now.Add(2*time.Minute))
+	snapshot, err := InspectGatewayState(t.Context(), database, now.Add(2*time.Minute))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -115,7 +115,7 @@ func TestGatewayHealthSeparatesTerminalFailureClassesAndStuckProgress(t *testing
 	if err := state.Close(); err != nil {
 		t.Fatal(err)
 	}
-	snapshot, err := InspectGatewayState(database, now.Add(10*time.Minute))
+	snapshot, err := InspectGatewayState(t.Context(), database, now.Add(10*time.Minute))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -144,7 +144,7 @@ func TestGatewayHealthClearsTerminalFailuresAfterSuccessfulRecovery(t *testing.T
 	if err := state.Close(); err != nil {
 		t.Fatal(err)
 	}
-	snapshot, err := InspectGatewayState(database, now.Add(time.Minute))
+	snapshot, err := InspectGatewayState(t.Context(), database, now.Add(time.Minute))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -167,8 +167,24 @@ func TestInspectGatewayStateRejectsFutureHealthTimestamps(t *testing.T) {
 	if err := state.Close(); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := InspectGatewayState(database, now); err == nil {
+	if _, err := InspectGatewayState(t.Context(), database, now); err == nil {
 		t.Fatal("future gateway health timestamps were classified as fresh")
+	}
+}
+
+func TestInspectGatewayStateHonorsCanceledContext(t *testing.T) {
+	database := filepath.Join(t.TempDir(), "telegram.db")
+	state, err := Open(database)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := state.Close(); err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(t.Context())
+	cancel()
+	if _, err := InspectGatewayState(ctx, database, testCallbackNow); err == nil {
+		t.Fatal("canceled gateway state inspection continued with a fresh deadline")
 	}
 }
 

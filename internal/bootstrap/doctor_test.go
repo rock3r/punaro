@@ -117,6 +117,18 @@ func TestDoctorCancellationProducesExplicitPartialFailureWithoutMutation(t *test
 	}
 }
 
+func TestHashExactArtifactHonorsCanceledContext(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "punaro-adapter")
+	if err := os.WriteFile(path, []byte("artifact"), 0o755); err != nil { // #nosec G306 -- executable artifact fixture.
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(t.Context())
+	cancel()
+	if digest, ok := hashExactArtifact(ctx, path, int64(len("artifact")), 0o755); ok || digest != "" {
+		t.Fatalf("canceled artifact hashing completed: digest=%q ok=%t", digest, ok)
+	}
+}
+
 func TestReleaseAtLeastUsesSemverPrereleaseOrdering(t *testing.T) {
 	for name, test := range map[string]struct {
 		current string

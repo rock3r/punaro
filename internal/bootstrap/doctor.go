@@ -160,7 +160,7 @@ func Doctor(ctx context.Context, request DoctorRequest) (punarodiagnostic.Report
 		checks = append(checks, punarodiagnostic.OptionalUnavailable("rollback_available", "install_second_signed_release"))
 	}
 
-	runningChecks := doctorRunningState(request, current, currentAdapterDigest)
+	runningChecks := doctorRunningState(ctx, request, current, currentAdapterDigest)
 	checks = append(checks, runningChecks...)
 	return punarodiagnostic.New(punarodiagnostic.ComponentBootstrap, identity, checks)
 }
@@ -263,7 +263,7 @@ func doctorCatalog(ctx context.Context, request DoctorRequest, keys map[string]e
 
 func doctorSlot(ctx context.Context, request DoctorRequest, keys map[string]ed25519.PublicKey, catalog punarorelease.Catalog, catalogOK bool, prefix string, slot slotState, directory string, required bool) (string, []punarodiagnostic.Check) {
 	if slot.Release == localCheckoutRelease {
-		digest, ok := verifyLocalCheckoutSlot(directory, request.GOOS, request.GOARCH, slot.ManifestSHA256)
+		digest, ok := verifyLocalCheckoutSlot(ctx, directory, request.GOOS, request.GOARCH, slot.ManifestSHA256)
 		checks := []punarodiagnostic.Check{
 			punarodiagnostic.Fail(prefix+"_critical_block", "install_signed_release"),
 			punarodiagnostic.Fail(prefix+"_catalog_allowed", "install_signed_release"),
@@ -331,7 +331,7 @@ func doctorSlot(ctx context.Context, request DoctorRequest, keys map[string]ed25
 			boolBootstrapCheck(releaseAtLeast(request.BootstrapRelease, manifest.MinimumBootstrapRelease), "minimum_bootstrap_release", "upgrade_bootstrap_release"),
 		)
 	}
-	digest, integrity := verifySignedSlot(directory, manifest, request.GOOS, request.GOARCH)
+	digest, integrity := verifySignedSlot(ctx, directory, manifest, request.GOOS, request.GOARCH)
 	check := boolBootstrapCheck(integrity, prefix+"_artifact_integrity", "reinstall_signed_release")
 	if !required && !integrity {
 		check.Required = true
@@ -499,7 +499,10 @@ func doctorManifest(ctx context.Context, request DoctorRequest, keys map[string]
 	return manifest, true
 }
 
-func verifySignedSlot(directory string, manifest punarorelease.ReleaseManifest, goos, goarch string) (string, bool) {
+func verifySignedSlot(ctx context.Context, directory string, manifest punarorelease.ReleaseManifest, goos, goarch string) (string, bool) {
+	if ctx.Err() != nil {
+		return "", false
+	}
 	artifacts := platformArtifacts(manifest.Artifacts, goos, goarch)
 	if len(artifacts) == 0 || !platformHasAdapter(artifacts, goos, goarch) || len(artifacts)+1 > maximumDoctorSlotEntries {
 		return "", false
@@ -518,6 +521,9 @@ func verifySignedSlot(directory string, manifest punarorelease.ReleaseManifest, 
 	}
 	var adapterDigest string
 	for _, entry := range entries {
+		if ctx.Err() != nil {
+			return "", false
+		}
 		if entry.Name() == slotRecord {
 			continue
 		}
@@ -525,7 +531,7 @@ func verifySignedSlot(directory string, manifest punarorelease.ReleaseManifest, 
 		if !ok {
 			return "", false
 		}
-		digest, ok := hashExactArtifact(filepath.Join(directory, entry.Name()), artifact.Length, artifact.Mode)
+		digest, ok := hashExactArtifact(ctx, filepath.Join(directory, entry.Name()), artifact.Length, artifact.Mode)
 		if !ok || digest != artifact.SHA256 {
 			return "", false
 		}
@@ -536,17 +542,20 @@ func verifySignedSlot(directory string, manifest punarorelease.ReleaseManifest, 
 	return adapterDigest, adapterDigest != ""
 }
 
-func verifyLocalCheckoutSlot(directory, goos, goarch, expectedDigest string) (string, bool) {
+func verifyLocalCheckoutSlot(ctx context.Context, directory, goos, goarch, expectedDigest string) (string, bool) {
 	name := artifactName(adapterComponent, goos, goarch)
 	entries, err := os.ReadDir(directory)
 	if err != nil || len(entries) != 2 {
 		return "", false
 	}
-	digest, ok := hashExactArtifact(filepath.Join(directory, name), -1, 0o755)
+	digest, ok := hashExactArtifact(ctx, filepath.Join(directory, name), -1, 0o755)
 	return digest, ok && digest == expectedDigest
 }
 
-func hashExactArtifact(path string, expectedLength int64, expectedMode int) (string, bool) {
+func hashExactArtifact(ctx context.Context, path string, expectedLength int64, expectedMode int) (string, bool) {
+	if ctx.Err() != nil {
+		return "", false
+	}
 	info, err := os.Lstat(path) // #nosec G703 -- fixed manifest-selected slot child.
 	if err != nil || !info.Mode().IsRegular() || info.Mode()&os.ModeSymlink != 0 || expectedLength >= 0 && info.Size() != expectedLength || runtime.GOOS != "windows" && int(info.Mode().Perm()) != expectedMode {
 		return "", false
@@ -557,17 +566,29 @@ func hashExactArtifact(path string, expectedLength int64, expectedMode int) (str
 	}
 	defer func() { _ = file.Close() }()
 	hash := sha256.New()
-	written, err := io.Copy(hash, file)
+	written, err := io.Copy(hash, bootstrapDoctorContextReader{ctx: ctx, reader: file})
 	if err != nil || written != info.Size() {
 		return "", false
 	}
 	return hex.EncodeToString(hash.Sum(nil)), true
 }
 
-func doctorRunningState(request DoctorRequest, current slotState, currentDigest string) []punarodiagnostic.Check {
+type bootstrapDoctorContextReader struct {
+	ctx    context.Context
+	reader io.Reader
+}
+
+func (reader bootstrapDoctorContextReader) Read(buffer []byte) (int, error) {
+	if err := reader.ctx.Err(); err != nil {
+		return 0, err
+	}
+	return reader.reader.Read(buffer)
+}
+
+func doctorRunningState(ctx context.Context, request DoctorRequest, current slotState, currentDigest string) []punarodiagnostic.Check {
 	checks := make([]punarodiagnostic.Check, 0, 3)
 	runningPath := filepath.Join(request.Directory, runningSlot, artifactName(adapterComponent, request.GOOS, request.GOARCH))
-	runningDigest, runningOK := hashExactArtifact(runningPath, -1, 0o755)
+	runningDigest, runningOK := hashExactArtifact(ctx, runningPath, -1, 0o755)
 	runningOK = runningOK && currentDigest != "" && runningDigest == currentDigest
 	checks = append(checks, boolBootstrapCheck(runningOK, "running_artifact", "restart_adapter_service"))
 	record, err := loadRunPID(request.Directory)

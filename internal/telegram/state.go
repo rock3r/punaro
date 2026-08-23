@@ -224,8 +224,8 @@ func (s *State) RecordGatewayCycle(record GatewayCycleRecord) error {
 
 // InspectGatewayState opens the database read-only and returns bounded
 // aggregates. It does not initialize, migrate, checkpoint, or repair state.
-func InspectGatewayState(database string, now time.Time) (GatewayStateSnapshot, error) {
-	if !filepath.IsAbs(database) || now.IsZero() {
+func InspectGatewayState(parent context.Context, database string, now time.Time) (GatewayStateSnapshot, error) {
+	if parent == nil || !filepath.IsAbs(database) || now.IsZero() {
 		return GatewayStateSnapshot{}, fmt.Errorf("invalid gateway state inspection")
 	}
 	uri := (&url.URL{Scheme: "file", Path: database, RawQuery: "mode=ro"}).String()
@@ -234,7 +234,7 @@ func InspectGatewayState(database string, now time.Time) (GatewayStateSnapshot, 
 		return GatewayStateSnapshot{}, fmt.Errorf("gateway state unavailable")
 	}
 	defer func() { _ = db.Close() }()
-	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	ctx, cancel := context.WithTimeout(parent, 2*time.Second)
 	defer cancel()
 	if _, err := db.ExecContext(ctx, `PRAGMA query_only = ON`); err != nil {
 		return GatewayStateSnapshot{}, fmt.Errorf("gateway state unavailable")
