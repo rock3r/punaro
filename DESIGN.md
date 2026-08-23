@@ -1804,7 +1804,10 @@ delivery is detached, bounded, and incapable of blocking or controlling the
 coding agent. Derived machine labels and task titles are rune-safely bounded.
 
 The Claude adapter durably writes each normalized privacy-safe event to a
-bounded owner-only spool before launching a detached delivery process. One
+bounded owner-only spool before launching a detached delivery process. Unix
+spools must be current-user-owned and are tightened to mode `0700`; Windows
+spools must be current-user-owned and receive a protected DACL containing only
+the current user's full-access ACE. One
 cross-process worker retries queued events with their original IDs until
 acknowledged, while continuing past a rejected event so independent later
 updates are not starved. Per-attempt network timeouts and recoverable stale
@@ -1829,7 +1832,8 @@ recent-first inside each state, before applying configurable capacity. Accepted
 fixed-panel grids have one or two columns and one through six rows; other shapes
 are rejected before they can overlap typography or icons. The last slot becomes
 an omitted-tail per-state count when overflowing. Its output is an exact
-800x480 two-color PNG. The panel thresholds each decoded RGB565 scanline and
+800x480 two-color PNG. Custom header titles are fitted into the pixels reserved
+before the right-aligned lifecycle totals. The panel thresholds each decoded RGB565 scanline and
 packs it MSB-first for the Seeed_GFX one-bit sprite; it performs a full e-paper
 refresh only after a changed ETag, bounded PNG download, successful decode, and
 exact dimension validation. The RTC-retained validator is versioned so a
@@ -1838,8 +1842,9 @@ firmware update that changes image interpretation forces one corrective redraw.
 Canopi's first listener is loopback by default. A concrete private/link-local
 listener requires explicit LAN opt-in and an absolute TLS certificate/key pair;
 wildcard, public, and plaintext LAN binds fail closed. The panel accepts only an
-HTTPS render URL and validates the collector certificate against its configured
-CA. Adapter and simulator origins use the same HTTPS-except-literal-loopback
+HTTPS render URL, synchronizes a valid wall clock over NTP before its first
+request, and validates the collector certificate against its configured CA.
+Adapter and simulator origins use the same HTTPS-except-literal-loopback
 policy and refuse redirects, so no reusable bearer is sent to an unvalidated
 target or over plaintext LAN traffic.
 This shared-token LAN MVP is not yet Punaro device-authenticated and must not be

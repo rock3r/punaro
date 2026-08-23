@@ -13,10 +13,13 @@ func TestPanelFirmwareContractUsesConditionalValidatedRefresh(t *testing.T) {
 		t.Fatal(err)
 	}
 	source := string(payload)
-	for _, required := range []string{"If-None-Match", "ETag", "HTTP_CODE_NOT_MODIFIED", "image/png", "CANOPI_WIDTH = 800", "CANOPI_HEIGHT = 480", "int drawPNGLine(PNGDRAW *line)", "PNG_RGB565_LITTLE_ENDIAN", "packedScanline[CANOPI_WIDTH / 8]", "0x80U >> (x & 7)", "reinterpret_cast<uint16_t *>(packedScanline)", "ETAG_CACHE_VERSION", "lastETagVersion != ETAG_CACHE_VERSION", "lastETag[0] = '\\0'", "startsWith(\"https://\")", "setCACert(CANOPI_TLS_CA_CERT)", "epaper.update()"} {
+	for _, required := range []string{"If-None-Match", "ETag", "HTTP_CODE_NOT_MODIFIED", "image/png", "CANOPI_WIDTH = 800", "CANOPI_HEIGHT = 480", "int drawPNGLine(PNGDRAW *line)", "PNG_RGB565_LITTLE_ENDIAN", "packedScanline[CANOPI_WIDTH / 8]", "0x80U >> (x & 7)", "reinterpret_cast<uint16_t *>(packedScanline)", "ETAG_CACHE_VERSION", "lastETagVersion != ETAG_CACHE_VERSION", "lastETag[0] = '\\0'", "startsWith(\"https://\")", "configTime(", "time(nullptr)", "if (!syncClock())", "setCACert(CANOPI_TLS_CA_CERT)", "epaper.update()"} {
 		if !strings.Contains(source, required) {
 			t.Errorf("panel firmware is missing %q", required)
 		}
+	}
+	if strings.Index(source, "if (!syncClock())") > strings.Index(source, "setCACert(CANOPI_TLS_CA_CERT)") {
+		t.Fatal("panel validates TLS before establishing a valid wall clock")
 	}
 	if strings.Contains(source, "pushImage(0, line->y, CANOPI_WIDTH, 1, scanline)") {
 		t.Fatal("panel firmware passes RGB565 bytes directly to its one-bit sprite")

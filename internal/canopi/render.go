@@ -203,7 +203,6 @@ func Render(agents []protocol.Event, config RenderConfig, now time.Time) ([]byte
 }
 
 func drawHeader(canvas *image.RGBA, fonts renderFonts, title string, agents []protocol.Event) {
-	drawBoldText(canvas, fonts.header, 12, 28, black, strings.ToUpper(title))
 	var totals Totals
 	for _, event := range agents {
 		switch event.State {
@@ -217,7 +216,12 @@ func drawHeader(canvas *image.RGBA, fonts renderFonts, title string, agents []pr
 	}
 	text := fmt.Sprintf("%d WAITING  •  %d DONE  •  %d WORKING", totals.Waiting, totals.Done, totals.Working)
 	width := font.MeasureString(fonts.state, text).Ceil()
-	drawBoldText(canvas, fonts.state, canvas.Bounds().Dx()-12-width, 26, black, text)
+	totalsX := canvas.Bounds().Dx() - 12 - width
+	const titleX = 12
+	const headerGap = 16
+	titleWidth := totalsX - headerGap - titleX
+	drawBoldText(canvas, fonts.header, titleX, 28, black, fitText(fonts.header, strings.ToUpper(title), titleWidth))
+	drawBoldText(canvas, fonts.state, totalsX, 26, black, text)
 	fillRect(canvas, image.Rect(2, 32, canvas.Bounds().Dx()-2, 36), black)
 }
 

@@ -4,10 +4,12 @@ import (
 	"bytes"
 	"image"
 	"image/png"
+	"strings"
 	"testing"
 	"time"
 
 	"github.com/rock3r/punaro/canopi/protocol"
+	"golang.org/x/image/font"
 )
 
 func TestPaginateSortsBeforeOverflowAndCountsOnlyOmittedAgents(t *testing.T) {
@@ -70,6 +72,44 @@ func TestRenderIsDeterministicExactOneBit800x480PNG(t *testing.T) {
 	}
 	if len(colors) != 2 {
 		t.Fatalf("render has %d grayscale values, want exactly 2", len(colors))
+	}
+}
+
+func TestRenderFitsCustomTitleBeforeTotals(t *testing.T) {
+	now := time.Date(2026, 8, 23, 12, 0, 0, 0, time.UTC)
+	agents := []protocol.Event{event("waiting", "Task", protocol.StateWaitingForUser, now)}
+	config := DefaultRenderConfig()
+	config.Title = "C"
+	shortPNG, err := Render(agents, config, now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	config.Title = strings.Repeat("CUSTOM DASHBOARD TITLE ", 8)
+	longPNG, err := Render(agents, config, now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	shortImage, err := png.Decode(bytes.NewReader(shortPNG))
+	if err != nil {
+		t.Fatal(err)
+	}
+	longImage, err := png.Decode(bytes.NewReader(longPNG))
+	if err != nil {
+		t.Fatal(err)
+	}
+	fonts, err := newRenderFonts()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer fonts.close()
+	totals := "1 WAITING  •  0 DONE  •  0 WORKING"
+	totalsLeft := 800 - 12 - font.MeasureString(fonts.state, totals).Ceil()
+	for y := 0; y < 32; y++ {
+		for x := totalsLeft; x < 800; x++ {
+			if shortImage.At(x, y) != longImage.At(x, y) {
+				t.Fatalf("custom title changed reserved totals area at (%d,%d)", x, y)
+			}
+		}
 	}
 }
 

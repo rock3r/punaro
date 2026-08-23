@@ -4,6 +4,7 @@
 #include <WiFi.h>
 #include <WiFiClientSecure.h>
 #include <memory>
+#include <time.h>
 
 #include "driver.h"
 #include "secrets.h"
@@ -17,7 +18,9 @@ constexpr int MAX_PNG_BYTES = 256 * 1024;
 constexpr uint32_t POLL_INTERVAL_MS = 20000;
 constexpr uint32_t WIFI_TIMEOUT_MS = 15000;
 constexpr uint32_t DOWNLOAD_TIMEOUT_MS = 7000;
+constexpr uint32_t CLOCK_TIMEOUT_MS = 15000;
 constexpr uint32_t ETAG_CACHE_VERSION = 2;
+constexpr time_t VALID_CLOCK_AFTER = 1704067200;
 
 EPaper epaper;
 PNG png;
@@ -71,6 +74,25 @@ bool connectWiFi() {
   return true;
 }
 
+bool syncClock() {
+  if (time(nullptr) >= VALID_CLOCK_AFTER) {
+    return true;
+  }
+  Serial.println("Canopi: synchronizing clock for TLS");
+  configTime(0, 0, "pool.ntp.org", "time.cloudflare.com");
+  const uint32_t started = millis();
+  while (time(nullptr) < VALID_CLOCK_AFTER &&
+         millis() - started < CLOCK_TIMEOUT_MS) {
+    delay(100);
+  }
+  if (time(nullptr) < VALID_CLOCK_AFTER) {
+    Serial.println("Canopi: clock synchronization timed out");
+    return false;
+  }
+  Serial.println("Canopi: clock synchronized");
+  return true;
+}
+
 bool readExact(WiFiClient *stream, uint8_t *target, size_t length) {
   size_t read = 0;
   const uint32_t started = millis();
@@ -94,6 +116,9 @@ bool readExact(WiFiClient *stream, uint8_t *target, size_t length) {
 
 bool refreshOnce() {
   if (!connectWiFi()) {
+    return false;
+  }
+  if (!syncClock()) {
     return false;
   }
 

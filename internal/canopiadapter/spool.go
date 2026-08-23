@@ -238,11 +238,7 @@ func (s Spool) ensureDirectory() error {
 	if !info.IsDir() || info.Mode()&os.ModeSymlink != 0 {
 		return errors.New("canopi spool directory must be a private real directory")
 	}
-	// #nosec G302 -- this is an owner-only directory, not a regular file.
-	if err := os.Chmod(s.Directory, 0o700); err != nil {
-		return err
-	}
-	return nil
+	return secureSpoolDirectory(s.Directory, info)
 }
 
 func (s Spool) eventPath(eventID string) string {

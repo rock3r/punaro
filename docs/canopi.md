@@ -204,8 +204,10 @@ Copy the `hooks` object from
 the absolute binary path. Hook stdout and stderr stay empty.
 
 `CANOPI_SPOOL_DIR` is optional; when omitted, the adapter creates
-`canopi-claude-spool` beside the token file. The directory and queued normalized
-events are owner-only. A collector outage never causes the hook-facing process
+`canopi-claude-spool` beside the token file. On Unix, the directory must belong
+to the current user and is tightened to mode `0700`; on Windows, it must belong
+to the current user and is given a protected current-user-only DACL. Queued
+normalized events are owner-only. A collector outage never causes the hook-facing process
 to wait for network recovery. The adapter applies the same current-user,
 owner-only, regular-file, no-symlink token checks as the collector. Each
 serialized enqueue reclaims crash-left `.event-*.tmp` files while holding the
@@ -264,9 +266,10 @@ e-paper board affected the ESP32-C3 strap pins. The pinned release contains
 Espressif's strap-safe C3 flasher fix. Both tools are installed locally and
 gitignored; no Rosetta installation is required.
 
-The client connects to Wi-Fi over HTTPS, validates the collector certificate
-against its configured CA, sends the bearer token and retained ETag, and does
-nothing on 304. A 200 response must be `image/png`, have a bounded known length,
+The client connects to Wi-Fi, obtains a valid wall clock from NTP, then uses
+HTTPS to validate the collector certificate against its configured CA. It does
+not send the bearer token until clock synchronization succeeds. It sends the
+retained ETag and does nothing on 304. A 200 response must be `image/png`, have a bounded known length,
 decode successfully, and report exactly 800x480 before `epaper.update()` runs.
 Each decoded RGB565 scanline is thresholded and packed MSB-first into the
 Seeed_GFX one-bit sprite; RGB565 bytes must never be passed directly to its
@@ -295,15 +298,18 @@ Physical verification:
    JTAG, so the BOOT button is not required. If the board does not start after
    JTAG reset, fully cycle its power; switching or cycling USB is not a cold
    cycle while a connected battery and its switch keep the board powered.
-6. Confirm the first fetch performs exactly one full refresh and the displayed
+6. Confirm serial output reports `clock synchronized` before the first HTTPS
+   request. If it times out, allow DNS and NTP from the panel network before
+   diagnosing the collector certificate.
+7. Confirm the first fetch performs exactly one full refresh and the displayed
    layout matches `artifacts/canopi-implementation.png` without clipping,
    rotation, grey pixels, or missing rows.
-7. Leave state unchanged for at least two 20-second polls. The screen must not
+8. Leave state unchanged for at least two 20-second polls. The screen must not
    flash or refresh; the server response is 304 because the firmware sends
    `If-None-Match`.
-8. Change one simulated agent. Confirm one refresh within 20 seconds, a new
+9. Change one simulated agent. Confirm one refresh within 20 seconds, a new
    ETag, and no additional refresh on the following unchanged poll.
-9. Stop simulator updates and wait past `--working-ttl`; confirm non-terminal
+10. Stop simulator updates and wait past `--working-ttl`; confirm non-terminal
    cards disappear rather than becoming done. Leave a done card past
    `--done-retention` and confirm it disappears independently.
 
