@@ -57,7 +57,9 @@ counts from the omitted tail, not global totals.
 
 ## Privacy and failure behavior
 
-The wire event never requires prompts, transcripts, assistant messages,
+Wire input must be valid UTF-8 before JSON decoding, so malformed identifiers
+cannot be normalized into colliding replacement-character strings. The wire
+event never requires prompts, transcripts, assistant messages,
 credentials, tool inputs, or tool outputs. Metadata is default-deny; the schema
 and Go validator accept only the privacy-safe `hook`, `simulated`, and
 `agent_type` keys, with the same per-key types as the published JSON Schema.
@@ -267,7 +269,11 @@ on Windows, so concurrent hooks cannot unlink each other's replacement locks.
 The configured spool capacity includes a fixed contention reserve (one sixteenth,
 at least one and at most 256 slots). Normal and contention lanes therefore remain
 jointly bounded while concurrent hooks can publish without waiting past their
-provider deadline. Active contention temporaries hold kernel locks, so cleanup
+provider deadline. The complete hook-facing enqueue is capped at 1.75 seconds,
+not just its lock acquisition. The primary phase defaults to 250 ms and is capped
+at 750 ms; cleanup and capacity scans use cancellable 128-entry batches, and an
+exhausted primary budget immediately falls through to the contention reserve.
+Active contention temporaries hold kernel locks, so cleanup
 can reclaim crash leftovers without deleting an in-progress publication. A
 fallback starts under a pre-lock staging name that ordinary cleanup ignores and
 renames into the cleanup namespace only after acquiring its kernel lock.

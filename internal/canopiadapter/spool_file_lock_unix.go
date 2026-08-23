@@ -3,23 +3,40 @@
 package canopiadapter
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
+	"time"
 
 	"golang.org/x/sys/unix"
 )
 
-func withSpoolRepairLock(path string, repair func() error) error {
+func withSpoolRepairLock(ctx context.Context, path string, repair func() error) error {
 	descriptor, err := unix.Open(filepath.Dir(path), unix.O_RDONLY|unix.O_DIRECTORY|unix.O_CLOEXEC, 0) // #nosec G304 -- parent is the validated private spool directory.
 	if err != nil {
 		return err
 	}
 	directory := os.NewFile(uintptr(descriptor), filepath.Dir(path)) // #nosec G115 -- successful descriptors are nonnegative.
 	defer func() { _ = directory.Close() }()
-	if err := unix.Flock(descriptor, unix.LOCK_EX); err != nil {
-		return err
+	for {
+		err := unix.Flock(descriptor, unix.LOCK_EX|unix.LOCK_NB)
+		if err == nil {
+			break
+		}
+		if !errors.Is(err, unix.EWOULDBLOCK) {
+			return err
+		}
+		timer := time.NewTimer(enqueueLockPoll)
+		select {
+		case <-ctx.Done():
+			if !timer.Stop() {
+				<-timer.C
+			}
+			return ctx.Err()
+		case <-timer.C:
+		}
 	}
 	defer func() { _ = unix.Flock(descriptor, unix.LOCK_UN) }()
 	return repair()

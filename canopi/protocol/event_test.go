@@ -78,6 +78,18 @@ func TestDecodeEventIsStrictAndBounded(t *testing.T) {
 	}
 }
 
+func TestDecodeEventRejectsInvalidUTF8BeforeJSONNormalization(t *testing.T) {
+	event := validEvent()
+	payload, err := json.Marshal(event)
+	if err != nil {
+		t.Fatal(err)
+	}
+	payload = bytes.Replace(payload, []byte(event.EventID), []byte{0xff}, 1)
+	if _, err := DecodeEvent(bytes.NewReader(payload), int64(len(payload))); err == nil {
+		t.Fatal("DecodeEvent() accepted invalid UTF-8 and allowed JSON replacement normalization")
+	}
+}
+
 func TestDecodeEventPreservesLargeIntegerMetadataExactly(t *testing.T) {
 	event := validEvent()
 	event.Metadata = nil

@@ -143,7 +143,7 @@ func TestSpoolCleanupLeavesFreshPreLockPublisherAndReclaimsItAfterAbandonment(t 
 	if err := temporary.Close(); err != nil {
 		t.Fatal(err)
 	}
-	if err := spool.removeOrphanTemporaries(); err != nil {
+	if err := spool.removeOrphanTemporaries(context.Background()); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := os.Lstat(path); err != nil {
@@ -153,7 +153,7 @@ func TestSpoolCleanupLeavesFreshPreLockPublisherAndReclaimsItAfterAbandonment(t 
 	if err := os.Chtimes(path, abandonedAt, abandonedAt); err != nil {
 		t.Fatal(err)
 	}
-	if err := spool.removeOrphanTemporaries(); err != nil {
+	if err := spool.removeOrphanTemporaries(context.Background()); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := os.Lstat(path); !errors.Is(err, os.ErrNotExist) {
@@ -385,5 +385,34 @@ func TestEnqueueUsesDurableContentionLaneBeforeProviderDeadline(t *testing.T) {
 	}
 	if delivered != "event-via-contention-lane" {
 		t.Fatalf("contention delivery = %q", delivered)
+	}
+}
+
+func TestEnqueueLockedStopsBeforeMaintenanceWhenPrimaryBudgetExpires(t *testing.T) {
+	spool := Spool{Directory: t.TempDir(), MaxEvents: 16}
+	if err := spool.ensureDirectory(); err != nil {
+		t.Fatal(err)
+	}
+	input := spoolEvent("expired-primary-budget")
+	payload, err := json.Marshal(input)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	if err := spool.enqueueLocked(ctx, input, payload); !errors.Is(err, context.Canceled) {
+		t.Fatalf("enqueueLocked() = %v, want context cancellation", err)
+	}
+	if pending, err := spool.Pending(); err != nil || pending != 0 {
+		t.Fatalf("Pending() = %d, %v; want no partially published event", pending, err)
+	}
+}
+
+func TestProviderEnqueueBudgetsStayBelowClaudeHookDeadline(t *testing.T) {
+	if providerEnqueueBudget >= 2*time.Second {
+		t.Fatalf("provider enqueue budget = %s, must remain below Claude's two-second hook deadline", providerEnqueueBudget)
+	}
+	if maxPrimaryLaneBudget >= providerEnqueueBudget {
+		t.Fatalf("primary budget = %s, must leave time for the durable contention lane", maxPrimaryLaneBudget)
 	}
 }

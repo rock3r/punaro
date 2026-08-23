@@ -3,6 +3,8 @@
 package canopiadapter
 
 import (
+	"context"
+	"errors"
 	"os"
 	"path/filepath"
 	"syscall"
@@ -41,7 +43,7 @@ func TestSpoolRepairLockSerializesConcurrentRepair(t *testing.T) {
 	releaseFirst := make(chan struct{})
 	firstDone := make(chan error, 1)
 	go func() {
-		firstDone <- withSpoolRepairLock(path, func() error {
+		firstDone <- withSpoolRepairLock(context.Background(), path, func() error {
 			close(firstEntered)
 			<-releaseFirst
 			return nil
@@ -51,7 +53,7 @@ func TestSpoolRepairLockSerializesConcurrentRepair(t *testing.T) {
 	secondEntered := make(chan struct{})
 	secondDone := make(chan error, 1)
 	go func() {
-		secondDone <- withSpoolRepairLock(path, func() error {
+		secondDone <- withSpoolRepairLock(context.Background(), path, func() error {
 			close(secondEntered)
 			return nil
 		})
@@ -75,6 +77,39 @@ func TestSpoolRepairLockSerializesConcurrentRepair(t *testing.T) {
 	}
 }
 
+func TestSpoolRepairLockHonorsProviderDeadline(t *testing.T) {
+	path := filepath.Join(t.TempDir(), ".enqueue.lock")
+	firstEntered := make(chan struct{})
+	releaseFirst := make(chan struct{})
+	firstDone := make(chan error, 1)
+	go func() {
+		firstDone <- withSpoolRepairLock(context.Background(), path, func() error {
+			close(firstEntered)
+			<-releaseFirst
+			return nil
+		})
+	}()
+	<-firstEntered
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Millisecond)
+	defer cancel()
+	started := time.Now()
+	err := withSpoolRepairLock(ctx, path, func() error {
+		return errors.New("deadline-bounded repair entered while another process held the coordinator")
+	})
+	elapsed := time.Since(started)
+	close(releaseFirst)
+	firstErr := <-firstDone
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("withSpoolRepairLock() = %v, want deadline exceeded", err)
+	}
+	if elapsed > 100*time.Millisecond {
+		t.Fatalf("deadline-bounded repair took %s", elapsed)
+	}
+	if firstErr != nil {
+		t.Fatal(firstErr)
+	}
+}
+
 func TestSpoolLocksRejectPreexistingSymlinks(t *testing.T) {
 	for _, name := range []string{".enqueue.lock", ".drain.lock", ".supervisor.lock"} {
 		t.Run(name, func(t *testing.T) {
@@ -82,7 +117,7 @@ func TestSpoolLocksRejectPreexistingSymlinks(t *testing.T) {
 			if err := os.Symlink(name, path); err != nil {
 				t.Fatal(err)
 			}
-			file, err := openSpoolLockFile(path)
+			file, err := openSpoolLockFile(context.Background(), path)
 			if err != nil {
 				t.Fatalf("openSpoolLockFile() did not recover from planted symlink: %v", err)
 			}

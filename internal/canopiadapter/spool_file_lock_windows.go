@@ -3,6 +3,7 @@
 package canopiadapter
 
 import (
+	"context"
 	"crypto/sha256"
 	"encoding/hex"
 	"errors"
@@ -10,11 +11,12 @@ import (
 	"path/filepath"
 	"runtime"
 	"strings"
+	"time"
 
 	"golang.org/x/sys/windows"
 )
 
-func withSpoolRepairLock(path string, repair func() error) error {
+func withSpoolRepairLock(ctx context.Context, path string, repair func() error) error {
 	runtime.LockOSThread()
 	defer runtime.UnlockOSThread()
 	digest := sha256.Sum256([]byte(strings.ToLower(filepath.Clean(path))))
@@ -27,7 +29,21 @@ func withSpoolRepairLock(path string, repair func() error) error {
 		return err
 	}
 	defer func() { _ = windows.CloseHandle(mutex) }()
-	wait, err := windows.WaitForSingleObject(mutex, windows.INFINITE)
+	waitTimeout := uint32(windows.INFINITE)
+	if deadline, ok := ctx.Deadline(); ok {
+		remaining := time.Until(deadline)
+		if remaining <= 0 {
+			return ctx.Err()
+		}
+		milliseconds := (remaining + time.Millisecond - 1) / time.Millisecond
+		if milliseconds < time.Duration(windows.INFINITE) {
+			waitTimeout = uint32(milliseconds) // #nosec G115 -- value is bounded below INFINITE.
+		}
+	}
+	wait, err := windows.WaitForSingleObject(mutex, waitTimeout)
+	if wait == uint32(windows.WAIT_TIMEOUT) {
+		return context.DeadlineExceeded
+	}
 	if err != nil || (wait != windows.WAIT_OBJECT_0 && wait != windows.WAIT_ABANDONED) {
 		if err != nil {
 			return err

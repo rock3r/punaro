@@ -216,6 +216,9 @@ func DecodeEvent(reader io.Reader, maxBytes int64) (Event, error) {
 	if int64(len(payload)) > maxBytes {
 		return Event{}, fmt.Errorf("event exceeds %d bytes", maxBytes)
 	}
+	if !utf8.Valid(payload) {
+		return Event{}, errors.New("event must be valid UTF-8 JSON")
+	}
 	decoder := json.NewDecoder(bytes.NewReader(payload))
 	decoder.DisallowUnknownFields()
 	decoder.UseNumber()

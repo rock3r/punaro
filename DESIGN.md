@@ -1826,7 +1826,9 @@ Go validator expose only `hook`, `simulated`, and `agent_type`, with matching
 per-key types. Wire and persisted decoding retain numeric metadata as exact JSON
 numbers instead of converting through `float64`; omission is valid, while an
 explicit JSON `null` is rejected because the schema requires an object. Only
-explicit, trusted hook fields drive lifecycle state;
+valid UTF-8 reaches JSON decoding, preventing malformed identifiers from being
+normalized into colliding replacement-character strings. Only explicit,
+trusted hook fields drive lifecycle state;
 assistant text is neither inspected for classification nor forwarded. Claude
 invocation IDs use a fixed-length, secret-keyed HMAC over machine identity,
 provider payload, and local invocation time, never an unkeyed content digest.
@@ -1848,7 +1850,10 @@ releases it and neither stale timestamps nor wall-clock jumps can fence out a
 live holder. Concurrent enqueues wait at most 250 ms for the primary lane. Longer
 contention publishes through an atomically claimed, fsynced reserve slot within
 the same total event bound, staying below Claude's two-second hook deadline; no
-collector network I/O runs under the primary lock. The fallback temporary starts
+collector network I/O runs under the primary lock. The complete hook-facing
+enqueue is capped at 1.75 seconds; the configurable primary phase is capped at
+750 ms, maintenance and capacity scans are cancellable in 128-entry batches,
+and primary-budget exhaustion falls through to the reserve. The fallback temporary starts
 under a pre-lock staging name, acquires its kernel lock, and only then renames
 into the cleanup-visible namespace. Cleanup therefore cannot unlink the file in
 the create-to-lock window; a pre-lock crash remnant becomes reclaimable after one
