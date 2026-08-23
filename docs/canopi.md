@@ -56,7 +56,8 @@ reports counts from the omitted tail, not global totals.
 
 The wire event never requires prompts, transcripts, assistant messages,
 credentials, tool inputs, or tool outputs. Metadata is default-deny; the schema
-and Go validator accept only the privacy-safe `hook` and `simulated` keys. The
+and Go validator accept only the privacy-safe `hook`, `simulated`, and
+`agent_type` keys. The
 Claude adapter briefly inspects the provider payload locally to classify an
 unambiguous final question and to create a keyed HMAC retry identifier; neither
 the source text nor an unkeyed source digest is transmitted. Only task title,
@@ -131,7 +132,10 @@ curl -H "Authorization: Bearer $CANOPI_TOKEN" \
 
 The supported endpoints are `POST /v1/events`, `POST /v1/events:batch`,
 `GET /v1/snapshot`, and `GET /v1/render/800x480.png`. Both GET routes return
-strong ETags and honor `If-None-Match` with a body-free 304.
+strong ETags and honor `If-None-Match` with a body-free 304. A structurally valid
+batch continues after per-event admission failures and returns `207` with an
+ordered status/result entry for every event, so one permanent rejection cannot
+starve later lifecycle updates. Persistence failure still fails the request.
 
 ## Claude Code adapter
 
@@ -167,7 +171,21 @@ the absolute binary path. Hook stdout and stderr stay empty.
 `CANOPI_SPOOL_DIR` is optional; when omitted, the adapter creates
 `canopi-claude-spool` beside the token file. The directory and queued normalized
 events are owner-only. A collector outage never causes the hook-facing process
-to wait for network recovery.
+to wait for network recovery. The adapter applies the same current-user,
+owner-only, regular-file, no-symlink token checks as the collector.
+
+Run the durable worker as a continuously supervised companion using the same
+environment (for example with `Restart=always`/`KeepAlive` in the host service
+manager):
+
+```sh
+/absolute/bin/canopi-claude-hook supervise
+```
+
+Hooks also kick-start this singleton worker opportunistically. The persistent
+supervisor is the durable wake path: it keeps polling an empty spool, retries
+collector outages, and is restarted by the service manager if the worker
+crashes, so the final event of a quiet session does not depend on a later hook.
 
 ## Pi evaluation
 

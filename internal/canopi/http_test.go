@@ -118,3 +118,32 @@ func TestHandlerRejectsFutureActivityAndLiveRecordOverflow(t *testing.T) {
 		t.Fatalf("overflow status = %d, want %d", got, http.StatusTooManyRequests)
 	}
 }
+
+func TestHandlerBatchContinuesAfterPermanentEventRejection(t *testing.T) {
+	now := time.Date(2026, 8, 23, 12, 0, 0, 0, time.UTC)
+	config := DefaultConfig()
+	config.MaxLiveRecords = 1
+	store := NewStore(config)
+	store.now = func() time.Time { return now }
+	_, _ = store.Apply(event("existing", "existing", protocol.StateWorking, now))
+	handler, err := NewHandler(HandlerConfig{Store: store, Token: "secret", Now: func() time.Time { return now }, Render: DefaultRenderConfig()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	rejected, _ := json.Marshal(event("new-agent", "new-agent", protocol.StateWorking, now))
+	suffix, _ := json.Marshal(event("existing-done", "existing", protocol.StateDone, now.Add(time.Second)))
+	payload := append(append([]byte{'['}, rejected...), ',')
+	payload = append(payload, suffix...)
+	payload = append(payload, ']')
+	request := httptest.NewRequestWithContext(context.Background(), http.MethodPost, "/v1/events:batch", bytes.NewReader(payload))
+	request.Header.Set("Authorization", "Bearer secret")
+	response := httptest.NewRecorder()
+	handler.ServeHTTP(response, request)
+	if response.Code != http.StatusMultiStatus {
+		t.Fatalf("batch status = %d, body = %s", response.Code, response.Body.String())
+	}
+	agents := store.Snapshot(now.Add(time.Second)).Agents
+	if len(agents) != 1 || agents[0].State != protocol.StateDone {
+		t.Fatalf("batch suffix was not applied: %#v", agents)
+	}
+}

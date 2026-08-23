@@ -94,3 +94,33 @@ func TestSpoolRecoversDrainLockLeftByCrashedWorker(t *testing.T) {
 		t.Fatalf("delivered = %d, want 1 after stale lock recovery", delivered)
 	}
 }
+
+func TestSpoolSupervisorDeliversEventEnqueuedAfterStartup(t *testing.T) {
+	spool := Spool{Directory: t.TempDir(), MaxEvents: 2, RetryMin: time.Millisecond, RetryMax: time.Millisecond}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	delivered := make(chan protocol.Event, 1)
+	done := make(chan error, 1)
+	go func() {
+		done <- spool.Serve(ctx, func(_ context.Context, event protocol.Event) error {
+			delivered <- event
+			cancel()
+			return nil
+		})
+	}()
+	time.Sleep(20 * time.Millisecond)
+	if err := spool.Enqueue(spoolEvent("event-after-start")); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case event := <-delivered:
+		if event.EventID != "event-after-start" {
+			t.Fatalf("delivered event = %q", event.EventID)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("supervised spool did not wake for a newly enqueued event")
+	}
+	if err := <-done; !errors.Is(err, context.Canceled) {
+		t.Fatalf("Serve() error = %v", err)
+	}
+}

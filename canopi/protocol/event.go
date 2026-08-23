@@ -83,8 +83,9 @@ type Event struct {
 var machineIDPattern = regexp.MustCompile(`^[A-Za-z0-9._-]+$`)
 
 var allowedMetadataKeys = map[string]struct{}{
-	"hook":      {},
-	"simulated": {},
+	"agent_type": {},
+	"hook":       {},
+	"simulated":  {},
 }
 
 // Key returns the stable identity used to track an agent across events.

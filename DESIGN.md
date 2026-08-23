@@ -1781,7 +1781,7 @@ revision or the configured relative-time bucket.
 
 Prompts, transcripts, assistant messages, credentials, tool inputs, and tool
 outputs are not part of the protocol. Metadata is default-deny: the schema and
-Go validator expose only `hook` and `simulated`. A provider adapter may use
+Go validator expose only `hook`, `simulated`, and `agent_type`. A provider adapter may use
 final text locally for deterministic waiting/done classification but does not
 forward it. Claude retry IDs use a secret-keyed HMAC, never an unkeyed content
 digest. Adapter delivery is detached, bounded, and incapable of blocking or
@@ -1791,7 +1791,16 @@ The Claude adapter durably writes each normalized privacy-safe event to a
 bounded owner-only spool before launching a detached delivery process. One
 cross-process worker retries queued events with their original IDs until
 acknowledged; per-attempt network timeouts and recoverable stale worker locks
-keep provider hooks isolated from collector outages.
+keep provider hooks isolated from collector outages. The same protected-token
+checks apply on the adapter host. A persistent `supervise` mode runs under the
+host service manager, holds a singleton lease, polls even while the spool is
+empty, and provides a durable wake/restart path when a detached kick or worker
+crashes during a quiet session.
+
+Structurally valid event batches continue across per-event admission failures
+and return ordered per-event status records with HTTP 207 when mixed; only a
+shared persistence failure aborts the batch. This prevents one permanently
+rejected identity from starving later updates on every retry.
 
 The renderer always sorts the complete state set waiting, done, working, then
 recent-first inside each state, before applying configurable capacity. The last

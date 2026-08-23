@@ -63,3 +63,14 @@ func TestMapClaudeHookRequiresSecretEventIDKey(t *testing.T) {
 		t.Fatal("MapClaudeHook() accepted an unkeyed digest of private hook input")
 	}
 }
+
+func TestMapClaudeSubagentIncludesPrivacySafeAgentType(t *testing.T) {
+	raw := []byte(`{"session_id":"session-1","cwd":"/src/punaro","hook_event_name":"SubagentStart","agent_id":"agent-1","agent_type":"Explore"}`)
+	event, emit, err := MapClaudeHook(raw, AdapterConfig{MachineID: "studio-m2", TaskTitle: "Punaro / tests", EventIDKey: []byte("test-secret")}, time.Now())
+	if err != nil || !emit {
+		t.Fatalf("MapClaudeHook() = %+v, %t, %v", event, emit, err)
+	}
+	if event.Metadata["agent_type"] != "Explore" || event.ParentAgentInstanceID != "session-1" {
+		t.Fatalf("subagent metadata/parent = %#v/%q", event.Metadata, event.ParentAgentInstanceID)
+	}
+}

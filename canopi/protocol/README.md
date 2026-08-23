@@ -6,7 +6,7 @@ Punaro, a local spool, or another transport without changing provider mapping.
 
 The JSON Schema is the wire contract. The Go types and strict validator in
 `event.go` implement the same version-1 model. Metadata is default-deny: only
-the privacy-safe `hook` and `simulated` keys are accepted by both definitions.
+the privacy-safe `hook`, `simulated`, and `agent_type` keys are accepted by both definitions.
 Prompt text, transcripts, assistant messages, credentials, tool inputs, tool
 outputs, and unrecognized provider fields have no wire representation.
 

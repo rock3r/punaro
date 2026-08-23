@@ -160,24 +160,40 @@ func (h *Handler) ingestBatch(response http.ResponseWriter, request *http.Reques
 		}
 		events = append(events, event)
 	}
-	results := make([]ApplyResult, 0, len(events))
+	type batchResult struct {
+		ApplyResult
+		Status int    `json:"status"`
+		Error  string `json:"error,omitempty"`
+	}
+	results := make([]batchResult, 0, len(events))
+	hasRejection := false
 	for _, event := range events {
 		result, err := h.store.Apply(event)
 		if err != nil {
 			if errors.Is(err, ErrFutureActivity) {
-				writeError(response, http.StatusBadRequest, err)
-				return
+				results = append(results, batchResult{Status: http.StatusBadRequest, Error: err.Error()})
+				hasRejection = true
+				continue
 			}
 			if errors.Is(err, ErrLiveRecordLimit) {
-				writeError(response, http.StatusTooManyRequests, err)
-				return
+				results = append(results, batchResult{Status: http.StatusTooManyRequests, Error: err.Error()})
+				hasRejection = true
+				continue
 			}
 			writeError(response, http.StatusInternalServerError, errors.New("persist batch"))
 			return
 		}
-		results = append(results, result)
+		status := http.StatusOK
+		if result.Applied {
+			status = http.StatusAccepted
+		}
+		results = append(results, batchResult{ApplyResult: result, Status: status})
 	}
-	writeJSON(response, http.StatusAccepted, map[string]any{"results": results})
+	status := http.StatusAccepted
+	if hasRejection {
+		status = http.StatusMultiStatus
+	}
+	writeJSON(response, status, map[string]any{"results": results})
 }
 
 func (h *Handler) snapshot(response http.ResponseWriter, request *http.Request) {

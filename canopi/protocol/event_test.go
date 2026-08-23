@@ -45,7 +45,7 @@ func TestEventValidationAllowsOnlyPrivacySafeMetadata(t *testing.T) {
 			}
 		})
 	}
-	for _, key := range []string{"hook", "simulated"} {
+	for _, key := range []string{"hook", "simulated", "agent_type"} {
 		t.Run("allow_"+key, func(t *testing.T) {
 			event := validEvent()
 			event.Metadata = map[string]any{key: true}

@@ -22,6 +22,8 @@ const (
 	spoolLockDelay        = 5 * time.Millisecond
 	enqueueLockStaleAfter = time.Second
 	drainLockStaleAfter   = 2 * time.Minute
+	supervisorPoll        = 250 * time.Millisecond
+	supervisorHeartbeat   = 30 * time.Second
 )
 
 // ErrSpoolFull reports that the bounded durable adapter queue is full.
@@ -142,6 +144,57 @@ func (s Spool) Drain(ctx context.Context, deliver func(context.Context, protocol
 		pending, err := config.Pending()
 		if err != nil || pending == 0 {
 			return err
+		}
+	}
+}
+
+// Serve continuously wakes the durable queue and is intended to run under the
+// host service manager. A cross-process lease keeps repeated hook kick-starts
+// from creating more than one active supervisor.
+func (s Spool) Serve(ctx context.Context, deliver func(context.Context, protocol.Event) error) error {
+	if deliver == nil {
+		return errors.New("canopi spool delivery function is required")
+	}
+	config, err := s.normalized()
+	if err != nil {
+		return err
+	}
+	if err := config.ensureDirectory(); err != nil {
+		return err
+	}
+	lockPath := filepath.Join(config.Directory, ".supervisor.lock")
+	release, acquired, err := tryAcquireSupervisorLock(lockPath)
+	if err != nil || !acquired {
+		return err
+	}
+	defer release()
+	heartbeatDone := make(chan struct{})
+	defer close(heartbeatDone)
+	go func() {
+		ticker := time.NewTicker(supervisorHeartbeat)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-heartbeatDone:
+				return
+			case <-ticker.C:
+				_ = touchLock(lockPath)
+			}
+		}
+	}()
+	for {
+		_ = touchLock(lockPath)
+		if err := config.Drain(ctx, deliver); err != nil {
+			return err
+		}
+		timer := time.NewTimer(supervisorPoll)
+		select {
+		case <-ctx.Done():
+			if !timer.Stop() {
+				<-timer.C
+			}
+			return ctx.Err()
+		case <-timer.C:
 		}
 	}
 }
@@ -276,14 +329,22 @@ func acquireSpoolLock(path string) (func(), error) {
 }
 
 func tryAcquireDrainLock(path string) (func(), bool, error) {
+	return tryAcquireRecoverableLock(path, drainLockStaleAfter)
+}
+
+func tryAcquireSupervisorLock(path string) (func(), bool, error) {
+	return tryAcquireRecoverableLock(path, drainLockStaleAfter)
+}
+
+func tryAcquireRecoverableLock(path string, staleAfter time.Duration) (func(), bool, error) {
 	file, err := os.OpenFile(path, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o600) // #nosec G304 -- path is inside the configured private spool.
 	if errors.Is(err, os.ErrExist) {
-		removed, removeErr := removeStaleLock(path, drainLockStaleAfter)
+		removed, removeErr := removeStaleLock(path, staleAfter)
 		if removeErr != nil {
 			return nil, false, removeErr
 		}
 		if removed {
-			return tryAcquireDrainLock(path)
+			return tryAcquireRecoverableLock(path, staleAfter)
 		}
 		return func() {}, false, nil
 	}

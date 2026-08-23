@@ -138,7 +138,7 @@ func parseConfig(args []string) (serverConfig, error) {
 		}
 		config.stateFile = absolute
 	}
-	if config.grid.Columns <= 0 || config.grid.Rows <= 0 || config.grid.Columns*config.grid.Rows > 48 {
+	if config.grid.Columns <= 0 || config.grid.Rows <= 0 || config.grid.Columns > 48 || config.grid.Rows > 48/config.grid.Columns {
 		return serverConfig{}, errors.New("grid capacity must be between 1 and 48")
 	}
 	if config.workingTTL <= 0 || config.doneRetention <= 0 || config.relativeTimeBucket <= 0 {

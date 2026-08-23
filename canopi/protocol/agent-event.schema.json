@@ -49,6 +49,9 @@
       "type": "object",
       "description": "Privacy-safe provider metadata. Only explicitly listed keys are accepted; prompts, transcripts, messages, credentials and tool data have no protocol representation.",
       "properties": {
+        "agent_type": {
+          "type": ["string", "null"]
+        },
         "hook": {
           "type": ["string", "number", "integer", "boolean", "null"]
         },

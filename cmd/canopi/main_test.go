@@ -33,6 +33,9 @@ func TestParseConfigRejectsWildcardAndInvalidCapacity(t *testing.T) {
 	if _, err := parseConfig(append(base, "--columns", "0")); err == nil {
 		t.Fatal("parseConfig() accepted zero grid columns")
 	}
+	if _, err := parseConfig(append(base, "--columns", "9223372036854775807", "--rows", "2")); err == nil {
+		t.Fatal("parseConfig() accepted overflowing grid capacity")
+	}
 	if _, err := parseConfig(append(base, "--max-live-records", "0")); err == nil {
 		t.Fatal("parseConfig() accepted zero live-record capacity")
 	}

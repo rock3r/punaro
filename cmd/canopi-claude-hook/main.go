@@ -20,11 +20,17 @@ import (
 const maxHookBytes = 1 << 20
 
 func main() {
-	if len(os.Args) == 2 && os.Args[1] == "deliver" {
-		_ = runDelivery(os.Getenv)
-		return
+	if len(os.Args) == 2 {
+		switch os.Args[1] {
+		case "deliver":
+			_ = runDelivery(os.Getenv)
+			return
+		case "supervise":
+			_ = runSupervisor(os.Getenv)
+			return
+		}
 	}
-	_ = runHook(os.Stdin, os.Getenv, os.ReadFile, spawnDetached)
+	_ = runHook(os.Stdin, os.Getenv, readProtectedToken, spawnDetached)
 }
 
 func runHook(input io.Reader, getenv func(string) string, readFile func(string) ([]byte, error), spawn func() error) error {
@@ -62,7 +68,7 @@ func spawnDetached() error {
 	if err != nil {
 		return err
 	}
-	command := exec.CommandContext(context.Background(), executable, "deliver") // #nosec G204 -- os.Executable returns this already-running adapter binary; arguments are fixed.
+	command := exec.CommandContext(context.Background(), executable, "supervise") // #nosec G204 -- os.Executable returns this already-running adapter binary; arguments are fixed.
 	command.Stdout = io.Discard
 	command.Stderr = io.Discard
 	if err := command.Start(); err != nil {
@@ -76,13 +82,29 @@ func runDelivery(getenv func(string) string) error {
 	if err != nil {
 		return err
 	}
-	tokenBytes, err := os.ReadFile(getenv("CANOPI_TOKEN_FILE"))
+	tokenBytes, err := readProtectedToken(getenv("CANOPI_TOKEN_FILE"))
 	if err != nil {
 		return err
 	}
 	client := &http.Client{Timeout: 750 * time.Millisecond}
 	token := strings.TrimSpace(string(tokenBytes))
 	return spool.Drain(context.Background(), func(ctx context.Context, event protocol.Event) error {
+		return canopiadapter.Deliver(ctx, client, getenv("CANOPI_ENDPOINT"), token, event)
+	})
+}
+
+func runSupervisor(getenv func(string) string) error {
+	spool, err := deliverySpool(getenv)
+	if err != nil {
+		return err
+	}
+	tokenBytes, err := readProtectedToken(getenv("CANOPI_TOKEN_FILE"))
+	if err != nil {
+		return err
+	}
+	client := &http.Client{Timeout: 750 * time.Millisecond}
+	token := strings.TrimSpace(string(tokenBytes))
+	return spool.Serve(context.Background(), func(ctx context.Context, event protocol.Event) error {
 		return canopiadapter.Deliver(ctx, client, getenv("CANOPI_ENDPOINT"), token, event)
 	})
 }
