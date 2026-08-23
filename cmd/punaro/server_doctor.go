@@ -43,7 +43,7 @@ func inspectServerDoctorState(parent context.Context, installation operator.Inst
 	state.ReleaseSequence, _ = strconv.ParseInt(serverBuildSequence, 10, 64)
 	state.CatalogSequence, _ = strconv.ParseInt(serverBuildCatalogSequence, 10, 64)
 	state.InstalledRelease = known(serverBuildRelease != "" && serverBuildImage != "", serverBuildRelease != "" && serverBuildImage == installation.Image)
-	state.ComposeBinding = fileDigestMatches(operator.OverrideFile(installation.Directory), serverBuildComposeSHA256)
+	state.ComposeBinding = fileDigestMatches(ctx, operator.OverrideFile(installation.Directory), serverBuildComposeSHA256)
 	state.MigrationBinding = known(serverBuildMigrationSHA256 != "", serverBuildMigrationSHA256 == punaropostgres.MigrationManifestSHA256())
 	state.RunningImage = inspectRunningImage(ctx, installation)
 	state.Storage = inspectServerStorage(installation.DataDir, serverDoctorMinimumFree)
@@ -84,9 +84,16 @@ func known(isKnown, ok bool) knownDoctorBool {
 	return knownDoctorBool{Known: isKnown, OK: isKnown && ok}
 }
 
-func fileDigestMatches(path, expected string) knownDoctorBool {
+func fileDigestMatches(ctx context.Context, path, expected string) knownDoctorBool {
 	if len(expected) != 64 {
 		return knownDoctorBool{}
+	}
+	if ctx.Err() != nil {
+		return knownDoctorBool{}
+	}
+	info, err := os.Lstat(path) // #nosec G703 -- fixed generated file below the validated installation root.
+	if err != nil || !info.Mode().IsRegular() || info.Mode()&os.ModeSymlink != 0 {
+		return known(true, false)
 	}
 	file, err := os.Open(path) // #nosec G304 -- fixed generated file below the validated installation root.
 	if err != nil {
@@ -94,10 +101,26 @@ func fileDigestMatches(path, expected string) knownDoctorBool {
 	}
 	defer func() { _ = file.Close() }()
 	hash := sha256.New()
-	if _, err := io.CopyN(hash, file, (1<<20)+1); err != nil && !errors.Is(err, io.EOF) {
+	written, err := io.CopyN(hash, serverDoctorContextReader{ctx: ctx, reader: file}, (1<<20)+1)
+	if ctx.Err() != nil || err != nil && !errors.Is(err, io.EOF) {
 		return knownDoctorBool{}
 	}
+	if written > 1<<20 {
+		return known(true, false)
+	}
 	return known(true, hex.EncodeToString(hash.Sum(nil)) == expected)
+}
+
+type serverDoctorContextReader struct {
+	ctx    context.Context
+	reader io.Reader
+}
+
+func (reader serverDoctorContextReader) Read(buffer []byte) (int, error) {
+	if err := reader.ctx.Err(); err != nil {
+		return 0, err
+	}
+	return reader.reader.Read(buffer)
 }
 
 func inspectRunningImage(parent context.Context, installation operator.Installation) knownDoctorBool {

@@ -210,6 +210,10 @@ release identity for `minimum_bootstrap_release`.
 `rollback_available`, `running_artifact`, `supervisor_process`,
 `candidate_health`.
 
+Compose-manifest hashing and bootstrap slot inspection reject non-regular or
+linked paths before opening files, use bounded incremental reads, and honor the
+single command deadline between reads.
+
 ### Telegram gateway
 
 Configuration, service, and upstreams: `telegram_configuration`,

@@ -129,6 +129,18 @@ func TestHashExactArtifactHonorsCanceledContext(t *testing.T) {
 	}
 }
 
+func TestReadDoctorDirectoryEntriesStopsAtLimit(t *testing.T) {
+	directory := t.TempDir()
+	for index := 0; index <= maximumDoctorSlotEntries; index++ {
+		if err := os.Mkdir(filepath.Join(directory, fmt.Sprintf("entry-%03d", index)), 0o700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if entries, ok := readDoctorDirectoryEntries(t.Context(), directory, maximumDoctorSlotEntries); ok || entries != nil {
+		t.Fatalf("oversized slot directory accepted: entries=%d ok=%t", len(entries), ok)
+	}
+}
+
 func TestReleaseAtLeastUsesSemverPrereleaseOrdering(t *testing.T) {
 	for name, test := range map[string]struct {
 		current string

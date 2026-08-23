@@ -515,8 +515,8 @@ func verifySignedSlot(ctx context.Context, directory string, manifest punarorele
 		}
 		expected[name] = artifact
 	}
-	entries, err := os.ReadDir(directory)
-	if err != nil || len(entries) != len(expected)+1 || len(entries) > maximumDoctorSlotEntries {
+	entries, ok := readDoctorDirectoryEntries(ctx, directory, maximumDoctorSlotEntries)
+	if !ok || len(entries) != len(expected)+1 {
 		return "", false
 	}
 	var adapterDigest string
@@ -544,12 +544,44 @@ func verifySignedSlot(ctx context.Context, directory string, manifest punarorele
 
 func verifyLocalCheckoutSlot(ctx context.Context, directory, goos, goarch, expectedDigest string) (string, bool) {
 	name := artifactName(adapterComponent, goos, goarch)
-	entries, err := os.ReadDir(directory)
-	if err != nil || len(entries) != 2 {
+	entries, ok := readDoctorDirectoryEntries(ctx, directory, 2)
+	if !ok || len(entries) != 2 {
 		return "", false
 	}
 	digest, ok := hashExactArtifact(ctx, filepath.Join(directory, name), -1, 0o755)
 	return digest, ok && digest == expectedDigest
+}
+
+func readDoctorDirectoryEntries(ctx context.Context, directory string, maximum int) ([]os.DirEntry, bool) {
+	if ctx.Err() != nil || maximum < 1 {
+		return nil, false
+	}
+	info, err := os.Lstat(directory) // #nosec G703 -- fixed bootstrap-owned slot directory.
+	if err != nil || !info.IsDir() || info.Mode()&os.ModeSymlink != 0 {
+		return nil, false
+	}
+	handle, err := os.Open(directory) // #nosec G304,G703 -- validated bootstrap-owned slot directory.
+	if err != nil {
+		return nil, false
+	}
+	defer func() { _ = handle.Close() }()
+	entries := make([]os.DirEntry, 0, maximum)
+	for {
+		if ctx.Err() != nil {
+			return nil, false
+		}
+		batch, readErr := handle.ReadDir(16)
+		entries = append(entries, batch...)
+		if len(entries) > maximum {
+			return nil, false
+		}
+		if errors.Is(readErr, io.EOF) {
+			return entries, true
+		}
+		if readErr != nil {
+			return nil, false
+		}
+	}
 }
 
 func hashExactArtifact(ctx context.Context, path string, expectedLength int64, expectedMode int) (string, bool) {

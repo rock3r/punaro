@@ -481,7 +481,7 @@ func healthyServerDoctorState() serverDoctorState {
 
 func TestServerDoctorComposeBindingAcceptsGeneratedReleaseArtifact(t *testing.T) {
 	directory := testInstallation(t)
-	binding := fileDigestMatches(operator.OverrideFile(directory), operator.ComposeManifestSHA256())
+	binding := fileDigestMatches(t.Context(), operator.OverrideFile(directory), operator.ComposeManifestSHA256())
 	if !binding.Known || !binding.OK {
 		t.Fatalf("generated release Compose binding=%#v", binding)
 	}
