@@ -26,18 +26,25 @@ func TestMapClaudeHookUsesInstalledPermissionSchemaWithoutPrivateContent(t *test
 	}
 }
 
-func TestMapClaudeHookClassifiesClearFinalQuestionLocally(t *testing.T) {
+func TestMapClaudeHookDoesNotLetAssistantTextOverrideTerminalHook(t *testing.T) {
 	raw := []byte(`{"session_id":"session-1","cwd":"/src/punaro","hook_event_name":"Stop","stop_hook_active":false,"last_assistant_message":"I need one choice before I can continue. Which database should I use?"}`)
 	event, emit, err := MapClaudeHook(raw, AdapterConfig{MachineID: "studio-m2", TaskTitle: "Punaro / choice", EventIDKey: []byte("test-secret")}, time.Now())
 	if err != nil || !emit {
 		t.Fatalf("MapClaudeHook() = %+v, %t, %v", event, emit, err)
 	}
-	if event.State != protocol.StateWaitingForUser || event.WaitingReason != protocol.WaitingReasonQuestion {
+	if event.State != protocol.StateDone || event.WaitingReason != "" {
 		t.Fatalf("state = %q, reason = %q", event.State, event.WaitingReason)
 	}
 	encoded, _ := json.Marshal(event)
 	if strings.Contains(string(encoded), "Which database") {
 		t.Fatalf("normalized event leaked final assistant text: %s", encoded)
+	}
+}
+
+func TestMapClaudeHookIgnoresTaskCompletedWithoutTaskIdentity(t *testing.T) {
+	raw := []byte(`{"session_id":"session-1","cwd":"/src/punaro","hook_event_name":"TaskCompleted","task_id":"task-1"}`)
+	if event, emit, err := MapClaudeHook(raw, AdapterConfig{MachineID: "studio-m2", TaskTitle: "Punaro / tests", EventIDKey: []byte("test-secret")}, time.Now()); err != nil || emit || event.EventID != "" {
+		t.Fatalf("MapClaudeHook(TaskCompleted) = %+v, %t, %v", event, emit, err)
 	}
 }
 
@@ -54,6 +61,17 @@ func TestMapClaudeHookEventIDIsStableForProviderRetry(t *testing.T) {
 	}
 	if first.EventID != second.EventID {
 		t.Fatalf("event ids differ across retry: %q != %q", first.EventID, second.EventID)
+	}
+}
+
+func TestMapClaudeHookEventIDRemainsBoundedForLongValidIdentity(t *testing.T) {
+	raw := []byte(`{"session_id":"` + strings.Repeat("s", 300) + `","cwd":"/src/punaro","hook_event_name":"SessionStart"}`)
+	event, emit, err := MapClaudeHook(raw, AdapterConfig{MachineID: strings.Repeat("m", 100), MachineLabel: "machine", TaskTitle: "Punaro / tests", EventIDKey: []byte("test-secret")}, time.Now())
+	if err != nil || !emit {
+		t.Fatalf("MapClaudeHook(long identity) = %+v, %t, %v", event, emit, err)
+	}
+	if len(event.EventID) > 200 {
+		t.Fatalf("event ID length = %d, want <= 200", len(event.EventID))
 	}
 }
 

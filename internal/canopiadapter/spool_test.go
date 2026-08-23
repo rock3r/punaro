@@ -124,3 +124,23 @@ func TestSpoolSupervisorDeliversEventEnqueuedAfterStartup(t *testing.T) {
 		t.Fatalf("Serve() error = %v", err)
 	}
 }
+
+func TestActiveEnqueueLockIsHeartbeatedAndNotReclaimed(t *testing.T) {
+	directory := t.TempDir()
+	lock := filepath.Join(directory, ".enqueue.lock")
+	release, err := acquireSpoolLock(lock)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer release()
+	stale := time.Now().Add(-3 * time.Second)
+	if err := os.Chtimes(lock, stale, stale); err != nil {
+		t.Fatal(err)
+	}
+	time.Sleep(500 * time.Millisecond)
+	secondRelease, err := acquireSpoolLock(lock)
+	if err == nil {
+		secondRelease()
+		t.Fatal("active enqueue lock was reclaimed")
+	}
+}

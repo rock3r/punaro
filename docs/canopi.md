@@ -57,10 +57,10 @@ reports counts from the omitted tail, not global totals.
 The wire event never requires prompts, transcripts, assistant messages,
 credentials, tool inputs, or tool outputs. Metadata is default-deny; the schema
 and Go validator accept only the privacy-safe `hook`, `simulated`, and
-`agent_type` keys. The
-Claude adapter briefly inspects the provider payload locally to classify an
-unambiguous final question and to create a keyed HMAC retry identifier; neither
-the source text nor an unkeyed source digest is transmitted. Only task title,
+`agent_type` keys. The Claude adapter does not inspect assistant text to infer
+lifecycle state. It creates a fixed-length retry identifier from a keyed HMAC
+over the machine identity and provider payload; neither the source text nor an
+unkeyed source digest is transmitted. Only task title,
 optional repository, stable IDs, state, timestamps, and primitive allowlisted
 metadata leave the machine.
 
@@ -69,10 +69,11 @@ durably enqueues only that privacy-safe event, starts a detached delivery child,
 and returns. One cross-process worker drains the bounded 4,096-event spool and
 retries with the same event ID until the collector acknowledges it. Individual
 HTTP attempts are bounded; a crashed worker leaves its event queued and a stale
-worker lock is recoverable. Missing configuration, malformed provider input,
-spool or process-launch failure, token-file failure, network failure, and
-collector rejection all leave the coding agent unblocked and produce no
-provider-visible output.
+worker lock is recoverable. The short-lived enqueue lock is heartbeated while
+held, so a slow durable write cannot be mistaken for a crashed writer. Missing
+configuration, malformed provider input, spool or process-launch failure,
+token-file failure, network failure, and collector rejection all leave the
+coding agent unblocked and produce no provider-visible output.
 
 All collector routes require the same bearer token. Bodies, batches, headers,
 dedupe memory, and grid capacity are bounded. A non-loopback listener must be a
@@ -146,8 +147,12 @@ first-party hook reference. It consumes the common `session_id`, `cwd`, and
 - `PermissionRequest` -> waiting / permission;
 - `Elicitation` and input-requiring `Notification` variants -> waiting;
 - prompt, tool, batch, session and subagent-start activity -> working;
-- `Stop`, `TaskCompleted`, and `SubagentStop` -> done unless the local
-  deterministic classifier sees a clear user question.
+- `Stop` and `SubagentStop` -> done;
+- `TaskCompleted` is ignored because the current hook lacks a separately
+  addressable Canopi task/agent identity.
+
+Only explicit, trusted hook fields drive lifecycle state; assistant text never
+does.
 
 Build the adapter and export its small, non-secret configuration in the shell
 that launches Claude Code:

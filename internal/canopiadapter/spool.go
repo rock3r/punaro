@@ -10,6 +10,7 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/rock3r/punaro/canopi/protocol"
@@ -20,7 +21,8 @@ const (
 	maxSpoolEventBytes    = 64 << 10
 	spoolLockAttempts     = 10
 	spoolLockDelay        = 5 * time.Millisecond
-	enqueueLockStaleAfter = time.Second
+	enqueueLockStaleAfter = 2 * time.Second
+	enqueueLockHeartbeat  = 250 * time.Millisecond
 	drainLockStaleAfter   = 2 * time.Minute
 	supervisorPoll        = 250 * time.Millisecond
 	supervisorHeartbeat   = 30 * time.Second
@@ -314,8 +316,33 @@ func acquireSpoolLock(path string) (func(), error) {
 	for range spoolLockAttempts {
 		file, err := os.OpenFile(path, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o600) // #nosec G304 -- path is inside the configured private spool.
 		if err == nil {
-			_ = file.Close()
-			return func() { _ = os.Remove(path) }, nil
+			if err := file.Close(); err != nil {
+				_ = os.Remove(path)
+				return nil, err
+			}
+			done := make(chan struct{})
+			stopped := make(chan struct{})
+			go func() {
+				defer close(stopped)
+				ticker := time.NewTicker(enqueueLockHeartbeat)
+				defer ticker.Stop()
+				for {
+					select {
+					case <-done:
+						return
+					case <-ticker.C:
+						_ = touchLock(path)
+					}
+				}
+			}()
+			var once sync.Once
+			return func() {
+				once.Do(func() {
+					close(done)
+					<-stopped
+					_ = os.Remove(path)
+				})
+			}, nil
 		}
 		if !errors.Is(err, os.ErrExist) {
 			return nil, err

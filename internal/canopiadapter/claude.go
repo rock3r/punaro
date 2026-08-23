@@ -28,13 +28,12 @@ type AdapterConfig struct {
 }
 
 type claudeHook struct {
-	SessionID            string `json:"session_id"`
-	CWD                  string `json:"cwd"`
-	HookEventName        string `json:"hook_event_name"`
-	NotificationType     string `json:"notification_type"`
-	LastAssistantMessage string `json:"last_assistant_message"`
-	AgentID              string `json:"agent_id"`
-	AgentType            string `json:"agent_type"`
+	SessionID        string `json:"session_id"`
+	CWD              string `json:"cwd"`
+	HookEventName    string `json:"hook_event_name"`
+	NotificationType string `json:"notification_type"`
+	AgentID          string `json:"agent_id"`
+	AgentType        string `json:"agent_type"`
 }
 
 // MapClaudeHook maps a current Claude Code hook payload without forwarding it.
@@ -76,10 +75,12 @@ func MapClaudeHook(raw []byte, config AdapterConfig, now time.Time) (protocol.Ev
 		parentID = hook.SessionID
 	}
 	digest := hmac.New(sha256.New, config.EventIDKey)
+	_, _ = digest.Write([]byte(config.MachineID))
+	_, _ = digest.Write([]byte{0})
 	_, _ = digest.Write(raw)
 	event := protocol.Event{
 		SpecVersion:           protocol.SpecVersion,
-		EventID:               "claude_code:" + config.MachineID + ":" + hook.SessionID + ":" + hex.EncodeToString(digest.Sum(nil)),
+		EventID:               "claude_code:" + hex.EncodeToString(digest.Sum(nil)),
 		Source:                protocol.SourceClaudeCode,
 		Machine:               protocol.Machine{ID: config.MachineID, Label: machineLabel},
 		SessionID:             hook.SessionID,
@@ -116,34 +117,17 @@ func classifyClaudeHook(hook claudeHook) (protocol.State, protocol.WaitingReason
 		default:
 			return "", "", false
 		}
-	case "Stop", "TaskCompleted", "SubagentStop":
-		if asksForInput(hook.LastAssistantMessage) {
-			return protocol.StateWaitingForUser, protocol.WaitingReasonQuestion, true
-		}
+	case "Stop", "SubagentStop":
 		return protocol.StateDone, "", true
+	case "TaskCompleted":
+		// Claude's TaskCompleted hook identifies a task, not the root session or
+		// a separately addressable agent in Canopi's current model.
+		return "", "", false
 	case "SessionStart", "UserPromptSubmit", "PreToolUse", "PostToolUse", "PostToolUseFailure", "PostToolBatch", "SubagentStart", "TaskCreated":
 		return protocol.StateWorking, "", true
 	default:
 		return "", "", false
 	}
-}
-
-func asksForInput(message string) bool {
-	normalized := strings.ToLower(strings.TrimSpace(message))
-	if normalized == "" {
-		return false
-	}
-	cues := []string{
-		"which ", "would you ", "could you ", "can you ", "do you want ",
-		"should i ", "what would ", "please provide ", "please choose ",
-		"need your approval", "need one choice", "let me know ",
-	}
-	for _, cue := range cues {
-		if strings.Contains(normalized, cue) {
-			return strings.Contains(normalized, "?") || strings.HasSuffix(normalized, ":") || strings.Contains(normalized, "please")
-		}
-	}
-	return false
 }
 
 // Deliver posts one normalized event to a transport endpoint.
