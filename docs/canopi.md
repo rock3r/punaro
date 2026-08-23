@@ -127,7 +127,9 @@ relative-time render bucket. An offline panel therefore cannot leave the store
 stuck at its ceiling. Expiry is transactional: if its state-file update fails,
 the acknowledged record remains visible under the unchanged revision. Startup
 checks a configured maximum state-file representation before allocating or
-decoding it.
+decoding it; the calculation includes worst-case JSON escaping. Each serialized
+state update also reclaims crash-left `.canopi-state-*` snapshots before writing
+a new temporary file.
 
 In another terminal, generate the selected 3 waiting / 4 done / 12 working
 overflow state:

@@ -9,6 +9,7 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"strings"
 	"sync"
 	"time"
 
@@ -18,13 +19,14 @@ import (
 const (
 	maxRememberedEventIDs       = 50_000
 	maxPersistedEventBytes      = 64 << 10
+	maxJSONEncodedExpansion     = 6
 	maxSerializedEventIDBytes   = 6*200 + 3
 	persistedStateEnvelopeBytes = 4 << 10
 )
 
 func maxStateFileBytes(maxLiveRecords int) int64 {
 	return persistedStateEnvelopeBytes +
-		int64(maxLiveRecords)*maxPersistedEventBytes +
+		int64(maxLiveRecords)*maxPersistedEventBytes*maxJSONEncodedExpansion +
 		int64(maxRememberedEventIDs)*maxSerializedEventIDBytes
 }
 
@@ -386,6 +388,9 @@ func persistStore(path string, state persistedStore) error {
 	if err := os.MkdirAll(directory, 0o700); err != nil {
 		return fmt.Errorf("create Canopi state directory: %w", err)
 	}
+	if err := removeStateTemporaries(directory, filepath.Base(path)); err != nil {
+		return fmt.Errorf("reclaim Canopi state temporaries: %w", err)
+	}
 	payload, err := json.Marshal(state)
 	if err != nil {
 		return fmt.Errorf("encode Canopi state: %w", err)
@@ -415,4 +420,46 @@ func persistStore(path string, state persistedStore) error {
 		return fmt.Errorf("replace Canopi state: %w", err)
 	}
 	return syncStateDirectory(directory)
+}
+
+func removeStateTemporaries(directory, targetName string) error {
+	directoryHandle, err := os.Open(directory) // #nosec G304 -- directory is the selected state file's parent.
+	if err != nil {
+		return err
+	}
+	defer func() { _ = directoryHandle.Close() }()
+	removed := false
+	for {
+		names, readErr := directoryHandle.Readdirnames(128)
+		for _, name := range names {
+			if name == targetName || !strings.HasPrefix(name, ".canopi-state-") {
+				continue
+			}
+			candidate := filepath.Join(directory, name)
+			info, statErr := os.Lstat(candidate)
+			if errors.Is(statErr, os.ErrNotExist) {
+				continue
+			}
+			if statErr != nil {
+				return statErr
+			}
+			if !info.Mode().IsRegular() {
+				continue
+			}
+			if err := os.Remove(candidate); err != nil && !errors.Is(err, os.ErrNotExist) {
+				return err
+			}
+			removed = true
+		}
+		if errors.Is(readErr, io.EOF) {
+			break
+		}
+		if readErr != nil {
+			return readErr
+		}
+	}
+	if removed {
+		return syncStateDirectory(directory)
+	}
+	return nil
 }

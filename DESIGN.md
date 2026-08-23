@@ -1782,7 +1782,9 @@ expiry archives/hides abandoned work and never converts it to success; done
 retention is independent. Expiry commits transactionally; a failed state-file
 write leaves the acknowledged record visible under the unchanged revision.
 Startup rejects a state file beyond a bound derived from configured live-record,
-per-event, and durable-dedupe ceilings before allocating or decoding its body.
+per-event, worst-case JSON-encoding, and durable-dedupe ceilings before
+allocating or decoding its body. Serialized updates reclaim crash-left state
+temporaries in bounded directory batches before creating a replacement.
 Snapshot and image ETags change only with state revision or rendered response
 content. Snapshot responses use a weak revision validator because their
 generation timestamp changes without a semantic state change; rendered PNGs

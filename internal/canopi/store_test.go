@@ -156,6 +156,30 @@ func TestOpenStoreRejectsStateFileBeyondConfiguredBoundBeforeReading(t *testing.
 	}
 }
 
+func TestMaxStateFileBytesAccountsForWorstCaseJSONEscaping(t *testing.T) {
+	wantMinimum := int64(persistedStateEnvelopeBytes) +
+		int64(maxPersistedEventBytes*maxJSONEncodedExpansion) +
+		int64(maxRememberedEventIDs*maxSerializedEventIDBytes)
+	if got := maxStateFileBytes(1); got < wantMinimum {
+		t.Fatalf("maxStateFileBytes(1) = %d, want at least %d", got, wantMinimum)
+	}
+}
+
+func TestPersistStoreReclaimsCrashLeftTemporary(t *testing.T) {
+	directory := t.TempDir()
+	orphan := filepath.Join(directory, ".canopi-state-crashed")
+	if err := os.WriteFile(orphan, []byte("partial"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(directory, "state.json")
+	if err := persistStore(path, persistedStore{}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Lstat(orphan); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("crash-left state temporary still exists: %v", err)
+	}
+}
+
 func TestApplyPersistenceFailureDoesNotAcknowledgeOrMutate(t *testing.T) {
 	now := time.Date(2026, 8, 23, 12, 0, 0, 0, time.UTC)
 	store := NewStore(DefaultConfig())
