@@ -6,6 +6,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"io"
 	"os"
 	"path/filepath"
 	"sort"
@@ -56,6 +57,9 @@ func (s Spool) Enqueue(event protocol.Event) error {
 		return err
 	}
 	defer release()
+	if err := config.removeOrphanTemporaries(); err != nil {
+		return err
+	}
 	target := config.eventPath(event.EventID)
 	if _, err := os.Lstat(target); err == nil {
 		return nil
@@ -244,6 +248,48 @@ func (s Spool) ensureDirectory() error {
 func (s Spool) eventPath(eventID string) string {
 	digest := sha256.Sum256([]byte(eventID))
 	return filepath.Join(s.Directory, hex.EncodeToString(digest[:])+".json")
+}
+
+func (s Spool) removeOrphanTemporaries() error {
+	directory, err := os.Open(s.Directory) // #nosec G304 -- Directory is the validated private spool.
+	if err != nil {
+		return err
+	}
+	defer func() { _ = directory.Close() }()
+	removed := false
+	for {
+		names, readErr := directory.Readdirnames(128)
+		for _, name := range names {
+			if !strings.HasPrefix(name, ".event-") || !strings.HasSuffix(name, ".tmp") {
+				continue
+			}
+			path := filepath.Join(s.Directory, name)
+			info, statErr := os.Lstat(path)
+			if errors.Is(statErr, os.ErrNotExist) {
+				continue
+			}
+			if statErr != nil {
+				return statErr
+			}
+			if !info.Mode().IsRegular() {
+				continue
+			}
+			if err := os.Remove(path); err != nil && !errors.Is(err, os.ErrNotExist) {
+				return err
+			}
+			removed = true
+		}
+		if errors.Is(readErr, io.EOF) {
+			break
+		}
+		if readErr != nil {
+			return readErr
+		}
+	}
+	if removed {
+		return syncDirectory(s.Directory)
+	}
+	return nil
 }
 
 func (s Spool) eventFiles() ([]string, error) {

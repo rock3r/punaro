@@ -1781,6 +1781,8 @@ dedupe set, so an exact retry still attempts persistence. Non-terminal TTL
 expiry archives/hides abandoned work and never converts it to success; done
 retention is independent. Expiry commits transactionally; a failed state-file
 write leaves the acknowledged record visible under the unchanged revision.
+Startup rejects a state file beyond a bound derived from configured live-record,
+per-event, and durable-dedupe ceilings before allocating or decoding its body.
 Snapshot and image ETags change only with state revision or rendered response
 content. Snapshot responses use a weak revision validator because their
 generation timestamp changes without a semantic state change; rendered PNGs
@@ -1805,7 +1807,9 @@ acknowledged, while continuing past a rejected event so independent later
 updates are not starved. Per-attempt network timeouts and recoverable stale
 worker locks keep provider hooks isolated from collector outages. An active
 enqueue lock is heartbeated so slow durable writes cannot be reclaimed as
-stale. The same protected-token checks apply on the adapter host. A persistent
+stale. Under that lock, every enqueue removes crash-left temporary event files
+before admitting new work. The same protected-token checks apply on the adapter
+host. A persistent
 `supervise` mode runs under the host service manager, holds a singleton lease,
 polls even while the spool is empty, and provides a durable wake/restart path
 when a detached kick or worker crashes during a quiet session.
@@ -1813,7 +1817,9 @@ when a detached kick or worker crashes during a quiet session.
 Structurally valid event batches continue across per-event admission failures
 and return ordered per-event status records with HTTP 207 when mixed; only a
 shared persistence failure aborts the batch. This prevents one permanently
-rejected identity from starving later updates on every retry.
+rejected identity from starving later updates on every retry. The simulator
+retains only rejected events from a mixed response and retries their stable IDs
+before advancing.
 
 The renderer always sorts the complete state set waiting, done, working, then
 recent-first inside each state, before applying configurable capacity. Accepted
@@ -1830,7 +1836,8 @@ Canopi's first listener is loopback by default. A concrete private/link-local
 listener requires explicit LAN opt-in and an absolute TLS certificate/key pair;
 wildcard, public, and plaintext LAN binds fail closed. The panel accepts only an
 HTTPS render URL and validates the collector certificate against its configured
-CA.
+CA. Adapter and simulator origins use the same HTTPS-except-literal-loopback
+policy, so no reusable bearer is sent over plaintext LAN traffic.
 This shared-token LAN MVP is not yet Punaro device-authenticated and must not be
 mounted on the public Punaro origin. Its bearer token must be a protected,
 current-user-owned regular file (or equivalent current-user-only Windows ACL),

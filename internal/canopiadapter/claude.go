@@ -16,6 +16,7 @@ import (
 	"time"
 
 	"github.com/rock3r/punaro/canopi/protocol"
+	"github.com/rock3r/punaro/internal/canopitransport"
 )
 
 // AdapterConfig supplies privacy-safe local identity and event-ID keying.
@@ -145,6 +146,9 @@ func classifyClaudeHook(hook claudeHook) (protocol.State, protocol.WaitingReason
 func Deliver(ctx context.Context, client *http.Client, endpoint, token string, event protocol.Event) error {
 	if client == nil {
 		return errors.New("HTTP client is required")
+	}
+	if err := canopitransport.ValidateOrigin(endpoint); err != nil {
+		return err
 	}
 	payload, err := json.Marshal(event)
 	if err != nil {

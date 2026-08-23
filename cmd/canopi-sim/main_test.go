@@ -25,11 +25,29 @@ func TestPostBatchSendsAuthenticatedSimulatorEvents(t *testing.T) {
 		response.WriteHeader(http.StatusAccepted)
 	}))
 	defer server.Close()
-	if err := postBatch(server.Client(), server.URL, "test-token", simulator.Events(time.Now(), 0, "test-run")); err != nil {
+	if pending, err := postBatch(server.Client(), server.URL, "test-token", simulator.Events(time.Now(), 0, "test-run")); err != nil || len(pending) != 0 {
 		t.Fatalf("postBatch() error = %v", err)
 	}
 	if !received {
 		t.Fatal("collector did not receive simulator batch")
+	}
+}
+
+func TestPostBatchRetainsOnlyRejectedMultiStatusEvents(t *testing.T) {
+	events := simulator.Events(time.Now(), 0, "test-run")[:3]
+	server := httptest.NewServer(http.HandlerFunc(func(response http.ResponseWriter, _ *http.Request) {
+		response.Header().Set("Content-Type", "application/json")
+		response.WriteHeader(http.StatusMultiStatus)
+		_, _ = io.WriteString(response, `{"results":[{"status":202},{"status":429},{"status":200}]}`)
+	}))
+	defer server.Close()
+
+	pending, err := postBatch(server.Client(), server.URL, "test-token", events)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(pending) != 1 || pending[0].EventID != events[1].EventID {
+		t.Fatalf("pending events = %#v, want only %q", pending, events[1].EventID)
 	}
 }
 

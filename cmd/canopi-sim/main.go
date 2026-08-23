@@ -23,6 +23,7 @@ import (
 	"github.com/rock3r/punaro/canopi/protocol"
 	"github.com/rock3r/punaro/internal/canopi/simulator"
 	"github.com/rock3r/punaro/internal/canopicredential"
+	"github.com/rock3r/punaro/internal/canopitransport"
 )
 
 func main() {
@@ -40,7 +41,7 @@ func run(args []string, stderr io.Writer) int {
 		return 2
 	}
 	parsedEndpoint, err := url.Parse(*endpoint)
-	if err != nil || (parsedEndpoint.Scheme != "http" && parsedEndpoint.Scheme != "https") || parsedEndpoint.Host == "" || parsedEndpoint.Path != "" {
+	if err != nil || parsedEndpoint.Host == "" || canopitransport.ValidateOrigin(*endpoint) != nil {
 		return 2
 	}
 	token, err := canopicredential.ReadToken(*tokenFile)
@@ -74,13 +75,20 @@ func runSimulation(ctx context.Context, client *http.Client, endpoint, token, ru
 	tick := 0
 	pending := simulator.Events(time.Now().UTC(), tick, runID)
 	for {
-		err := postBatch(client, endpoint, token, pending)
-		if err != nil {
+		remaining, err := postBatch(client, endpoint, token, pending)
+		switch {
+		case err != nil:
 			_, _ = fmt.Fprintln(stderr, "canopi-sim: collector unavailable")
 			if once {
 				return err
 			}
-		} else {
+		case len(remaining) != 0:
+			pending = remaining
+			_, _ = fmt.Fprintln(stderr, "canopi-sim: collector rejected events; retrying")
+			if once {
+				return errors.New("collector rejected simulator events")
+			}
+		default:
 			if once {
 				return nil
 			}
@@ -105,27 +113,52 @@ func runSimulation(ctx context.Context, client *http.Client, endpoint, token, ru
 	}
 }
 
-func postBatch(client *http.Client, endpoint, token string, events []protocol.Event) error {
+func postBatch(client *http.Client, endpoint, token string, events []protocol.Event) ([]protocol.Event, error) {
 	if client == nil {
-		return errors.New("HTTP client is required")
+		return nil, errors.New("HTTP client is required")
 	}
 	payload, err := json.Marshal(events)
 	if err != nil {
-		return err
+		return nil, err
 	}
 	request, err := http.NewRequestWithContext(context.Background(), http.MethodPost, strings.TrimRight(endpoint, "/")+"/v1/events:batch", bytes.NewReader(payload))
 	if err != nil {
-		return err
+		return nil, err
 	}
 	request.Header.Set("Authorization", "Bearer "+token)
 	request.Header.Set("Content-Type", "application/json")
 	response, err := client.Do(request)
 	if err != nil {
-		return err
+		return nil, err
 	}
 	defer func() { _ = response.Body.Close() }()
 	if response.StatusCode < 200 || response.StatusCode >= 300 {
-		return fmt.Errorf("collector returned HTTP %d", response.StatusCode)
+		return nil, fmt.Errorf("collector returned HTTP %d", response.StatusCode)
 	}
-	return nil
+	if response.StatusCode != http.StatusMultiStatus {
+		return nil, nil
+	}
+	const maxBatchResponseBytes = 64 << 10
+	body, err := io.ReadAll(io.LimitReader(response.Body, maxBatchResponseBytes+1))
+	if err != nil || len(body) > maxBatchResponseBytes {
+		return nil, errors.New("collector returned an invalid batch response")
+	}
+	var result struct {
+		Results []struct {
+			Status int `json:"status"`
+		} `json:"results"`
+	}
+	if err := json.Unmarshal(body, &result); err != nil || len(result.Results) != len(events) {
+		return nil, errors.New("collector returned an invalid batch response")
+	}
+	remaining := make([]protocol.Event, 0)
+	for index, item := range result.Results {
+		if item.Status < 100 || item.Status > 599 {
+			return nil, errors.New("collector returned an invalid batch status")
+		}
+		if item.Status < 200 || item.Status >= 300 {
+			remaining = append(remaining, events[index])
+		}
+	}
+	return remaining, nil
 }

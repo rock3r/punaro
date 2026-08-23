@@ -1,13 +1,31 @@
 package canopiadapter
 
 import (
+	"context"
 	"encoding/json"
+	"net/http"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/rock3r/punaro/canopi/protocol"
 )
+
+func TestDeliverRejectsPlaintextNonLoopbackEndpoint(t *testing.T) {
+	client := &http.Client{Transport: roundTripFunc(func(*http.Request) (*http.Response, error) {
+		t.Fatal("plaintext non-loopback request reached the transport")
+		return nil, nil
+	})}
+	if err := Deliver(context.Background(), client, "http://192.0.2.40:8090", "token", spoolEvent("event-1")); err == nil {
+		t.Fatal("Deliver() accepted a plaintext non-loopback endpoint")
+	}
+}
+
+type roundTripFunc func(*http.Request) (*http.Response, error)
+
+func (function roundTripFunc) RoundTrip(request *http.Request) (*http.Response, error) {
+	return function(request)
+}
 
 func TestMapClaudeHookUsesInstalledPermissionSchemaWithoutPrivateContent(t *testing.T) {
 	raw := []byte(`{"session_id":"session-1","transcript_path":"/private/transcript.jsonl","cwd":"/src/punaro","hook_event_name":"PermissionRequest","tool_name":"Bash","tool_input":{"command":"secret command"}}`)

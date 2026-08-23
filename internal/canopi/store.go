@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"sort"
@@ -14,7 +15,18 @@ import (
 	"github.com/rock3r/punaro/canopi/protocol"
 )
 
-const maxRememberedEventIDs = 50_000
+const (
+	maxRememberedEventIDs       = 50_000
+	maxPersistedEventBytes      = 64 << 10
+	maxSerializedEventIDBytes   = 6*200 + 3
+	persistedStateEnvelopeBytes = 4 << 10
+)
+
+func maxStateFileBytes(maxLiveRecords int) int64 {
+	return persistedStateEnvelopeBytes +
+		int64(maxLiveRecords)*maxPersistedEventBytes +
+		int64(maxRememberedEventIDs)*maxSerializedEventIDBytes
+}
 
 var (
 	// ErrLiveRecordLimit reports bounded admission of a new agent identity.
@@ -130,12 +142,28 @@ func OpenStore(path string, config Config) (*Store, error) {
 	}
 	store := NewStore(normalized)
 	store.persist = func(state persistedStore) error { return persistStore(path, state) }
-	payload, err := os.ReadFile(path) // #nosec G304 -- the operator explicitly selects this private state file.
+	file, err := os.Open(path) // #nosec G304 -- the operator explicitly selects this private state file.
 	if errors.Is(err, os.ErrNotExist) {
 		return store, nil
 	}
 	if err != nil {
 		return nil, fmt.Errorf("read Canopi state: %w", err)
+	}
+	defer func() { _ = file.Close() }()
+	limit := maxStateFileBytes(store.config.MaxLiveRecords)
+	info, err := file.Stat()
+	if err != nil {
+		return nil, fmt.Errorf("inspect Canopi state: %w", err)
+	}
+	if info.Size() > limit {
+		return nil, errors.New("persisted Canopi state exceeds limit")
+	}
+	payload, err := io.ReadAll(io.LimitReader(file, limit+1))
+	if err != nil {
+		return nil, fmt.Errorf("read Canopi state: %w", err)
+	}
+	if int64(len(payload)) > limit {
+		return nil, errors.New("persisted Canopi state exceeds limit")
 	}
 	var persisted persistedStore
 	if err := json.Unmarshal(payload, &persisted); err != nil {

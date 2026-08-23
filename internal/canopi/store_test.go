@@ -2,7 +2,9 @@ package canopi
 
 import (
 	"errors"
+	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -136,6 +138,21 @@ func TestPersistentStoreSurvivesRestartAndKeepsDedupe(t *testing.T) {
 	}
 	if result, err := reopened.Apply(input); err != nil || !result.Duplicate {
 		t.Fatalf("Apply() after restart = %+v, %v", result, err)
+	}
+}
+
+func TestOpenStoreRejectsStateFileBeyondConfiguredBoundBeforeReading(t *testing.T) {
+	config := DefaultConfig()
+	config.MaxLiveRecords = 1
+	path := filepath.Join(t.TempDir(), "oversized-state.json")
+	if err := os.WriteFile(path, nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Truncate(path, maxStateFileBytes(config.MaxLiveRecords)+1); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := OpenStore(path, config); err == nil || !strings.Contains(err.Error(), "exceeds limit") {
+		t.Fatalf("OpenStore() error = %v, want bounded state-file rejection", err)
 	}
 }
 

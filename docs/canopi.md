@@ -89,7 +89,8 @@ public, and plaintext LAN binds are rejected. The token path must name a
 current-user-owned regular file
 with owner-only access (or an equivalent protected current-user ACL on Windows);
 symlinks and files replaced during open are rejected. The collector, Claude
-adapter, and simulator all use this same protected loader.
+adapter, and simulator all use this same protected loader. Adapter and simulator
+origins likewise require HTTPS except for HTTP to a literal loopback address.
 
 ## Run the vertical slice
 
@@ -124,7 +125,9 @@ updates or evade expiry. Expired records are durably purged using the real
 current time before capacity admission and reads, independently of the
 relative-time render bucket. An offline panel therefore cannot leave the store
 stuck at its ceiling. Expiry is transactional: if its state-file update fails,
-the acknowledged record remains visible under the unchanged revision.
+the acknowledged record remains visible under the unchanged revision. Startup
+checks a configured maximum state-file representation before allocating or
+decoding it.
 
 In another terminal, generate the selected 3 waiting / 4 done / 12 working
 overflow state:
@@ -137,7 +140,8 @@ go run ./cmd/canopi-sim \
 
 One-shot mode is `--once`. On a transient delivery failure, the continuous
 simulator retries the exact pending batch and event IDs before advancing its
-state. Inspect the normalized snapshot or image with:
+state. For a mixed `207` response, it retains and retries only the rejected
+events. Inspect the normalized snapshot or image with:
 
 ```sh
 CANOPI_TOKEN="$(cat /absolute/private/canopi.token)"
@@ -181,7 +185,7 @@ that launches Claude Code:
 
 ```sh
 go build -trimpath -o /absolute/bin/canopi-claude-hook ./cmd/canopi-claude-hook
-export CANOPI_ENDPOINT=http://10.0.0.20:8090
+export CANOPI_ENDPOINT=https://canopi.example.internal:8443
 export CANOPI_TOKEN_FILE=/absolute/private/canopi.token
 export CANOPI_SPOOL_DIR=/absolute/private/canopi-claude-spool
 export CANOPI_MACHINE_ID=studio-m2
@@ -199,7 +203,9 @@ the absolute binary path. Hook stdout and stderr stay empty.
 `canopi-claude-spool` beside the token file. The directory and queued normalized
 events are owner-only. A collector outage never causes the hook-facing process
 to wait for network recovery. The adapter applies the same current-user,
-owner-only, regular-file, no-symlink token checks as the collector.
+owner-only, regular-file, no-symlink token checks as the collector. Each
+serialized enqueue reclaims crash-left `.event-*.tmp` files while holding the
+cross-process enqueue lock, keeping temporary storage bounded across restarts.
 
 Run the durable worker as a continuously supervised companion using the same
 environment (for example with `Restart=always`/`KeepAlive` in the host service

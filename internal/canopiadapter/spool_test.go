@@ -109,6 +109,21 @@ func TestSpoolIsBoundedAndDuplicateEnqueueIsIdempotent(t *testing.T) {
 	}
 }
 
+func TestSpoolEnqueueReclaimsTemporaryFileLeftByCrash(t *testing.T) {
+	directory := t.TempDir()
+	orphan := filepath.Join(directory, ".event-crashed.tmp")
+	if err := os.WriteFile(orphan, []byte("partial"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	spool := Spool{Directory: directory, MaxEvents: 1}
+	if err := spool.Enqueue(spoolEvent("event-after-crash")); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Lstat(orphan); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("orphan temporary still exists: %v", err)
+	}
+}
+
 func TestSpoolRecoversDrainLockLeftByCrashedWorker(t *testing.T) {
 	directory := t.TempDir()
 	spool := Spool{Directory: directory, MaxEvents: 1}
