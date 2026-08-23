@@ -180,6 +180,25 @@ func TestDoctorRunPIDReadIsBoundedAndContextAware(t *testing.T) {
 	}
 }
 
+func TestDoctorReadyReadIsBoundedAndContextAware(t *testing.T) {
+	directory := t.TempDir()
+	path := filepath.Join(directory, readyFile)
+	if err := os.WriteFile(path, []byte(strings.Repeat("x", maxReadyBytes+1)), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := doctorReadReadyFile(t.Context(), directory); err == nil {
+		t.Fatal("oversized ready record was accepted")
+	}
+	if err := os.WriteFile(path, []byte(`{"schema":1,"status":"healthy"}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(t.Context())
+	cancel()
+	if _, err := doctorReadReadyFile(ctx, directory); err == nil {
+		t.Fatal("canceled ready read continued")
+	}
+}
+
 func TestReleaseAtLeastUsesSemverPrereleaseOrdering(t *testing.T) {
 	for name, test := range map[string]struct {
 		current string

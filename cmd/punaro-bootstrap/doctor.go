@@ -4,15 +4,18 @@ import (
 	"context"
 	"crypto/ed25519"
 	"encoding/json"
+	"errors"
 	"flag"
 	"fmt"
 	"io"
 	"os"
+	"path/filepath"
 	"strings"
 	"time"
 
 	"github.com/rock3r/punaro/internal/bootstrap"
 	punarodiagnostic "github.com/rock3r/punaro/internal/diagnostic"
+	"github.com/rock3r/punaro/internal/incrementalfs"
 	punarorelease "github.com/rock3r/punaro/internal/release"
 )
 
@@ -39,17 +42,17 @@ func runBootstrapDoctor(args []string, stdout, stderr io.Writer) int {
 	if flags.Parse(args) != nil || flags.NArg() != 0 || *directory == "" || *timeout < time.Second || *timeout > maximumBootstrapDoctorTimeout {
 		return 2
 	}
+	ctx, cancel := context.WithTimeout(context.Background(), *timeout)
+	defer cancel()
 	var keys map[string]ed25519.PublicKey
 	if *keysFile != "" {
-		loaded, err := loadKeys(*keysFile)
+		loaded, err := loadDoctorKeys(ctx, *keysFile)
 		if err != nil {
 			_, _ = fmt.Fprintln(stderr, "punaro-bootstrap doctor failed: release keys are unavailable")
 			return 2
 		}
 		keys = loaded
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), *timeout)
-	defer cancel()
 	report, err := bootstrap.Doctor(ctx, bootstrap.DoctorRequest{Directory: *directory, MachineID: strings.TrimSpace(*machineID), Origin: strings.TrimSpace(*origin), Keys: keys, BootstrapRelease: bootstrapBuildRelease})
 	if err != nil {
 		_, _ = fmt.Fprintln(stderr, "punaro-bootstrap doctor failed: diagnostic report unavailable")
@@ -62,4 +65,15 @@ func runBootstrapDoctor(args []string, stdout, stderr io.Writer) int {
 		return 2
 	}
 	return punarodiagnostic.ExitCode(report)
+}
+
+func loadDoctorKeys(ctx context.Context, path string) (map[string]ed25519.PublicKey, error) {
+	if !filepath.IsAbs(path) {
+		return nil, errors.New("bootstrap keys file is invalid")
+	}
+	body, err := incrementalfs.ReadFile(ctx, path, punarorelease.MaximumEnvelopeBytes)
+	if err != nil {
+		return nil, errors.New("bootstrap keys file is invalid")
+	}
+	return punarorelease.ParsePublicKeys(body)
 }

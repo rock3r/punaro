@@ -6,6 +6,7 @@ import (
 	"bytes"
 	"context"
 	"crypto/sha256"
+	"encoding/binary"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -113,6 +114,12 @@ func SkillSetDigestContext(ctx context.Context, root string) (string, error) {
 	}
 	sort.Strings(files)
 	hash := sha256.New()
+	writeField := func(value []byte) {
+		var length [8]byte
+		binary.BigEndian.PutUint64(length[:], uint64(len(value)))
+		_, _ = hash.Write(length[:])
+		_, _ = hash.Write(value)
+	}
 	for _, path := range files {
 		if err := ctx.Err(); err != nil {
 			return "", err
@@ -125,10 +132,8 @@ func SkillSetDigestContext(ctx context.Context, root string) (string, error) {
 		if err != nil {
 			return "", errors.New("skill set is invalid")
 		}
-		_, _ = hash.Write([]byte(filepath.ToSlash(relative)))
-		_, _ = hash.Write([]byte{0})
-		_, _ = hash.Write(body)
-		_, _ = hash.Write([]byte{0})
+		writeField([]byte(filepath.ToSlash(relative)))
+		writeField(body)
 	}
 	return hex.EncodeToString(hash.Sum(nil)), nil
 }

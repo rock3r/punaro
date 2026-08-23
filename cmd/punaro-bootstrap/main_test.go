@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"crypto/ed25519"
 	"crypto/rand"
 	"encoding/json"
@@ -254,6 +255,21 @@ func TestBootstrapCLIDoctorEmitsStrictReadOnlyReport(t *testing.T) {
 		if strings.Contains(stdout.String(), forbidden) {
 			t.Fatalf("doctor leaked %q: %s", forbidden, stdout.String())
 		}
+	}
+}
+
+func TestBootstrapDoctorKeyReadIsBoundedAndContextAware(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "keys.json")
+	if err := os.WriteFile(path, []byte(strings.Repeat("x", punarorelease.MaximumEnvelopeBytes+1)), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := loadDoctorKeys(t.Context(), path); err == nil {
+		t.Fatal("oversized doctor key set was accepted")
+	}
+	ctx, cancel := context.WithCancel(t.Context())
+	cancel()
+	if _, err := loadDoctorKeys(ctx, path); err == nil {
+		t.Fatal("canceled doctor key read continued")
 	}
 }
 

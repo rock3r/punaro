@@ -16,6 +16,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/rock3r/punaro/internal/incrementalfs"
 	punarorelease "github.com/rock3r/punaro/internal/release"
 )
 
@@ -914,17 +915,17 @@ func adapterBinary(slotDir, goos, goarch string) (string, error) {
 }
 
 func readReadyFile(path string) (string, error) {
-	info, err := os.Lstat(path) // #nosec G703 -- ready file is a fixed child of the bootstrap directory.
-	if err != nil {
+	if _, err := os.Lstat(path); err != nil { // #nosec G703 -- ready file is a fixed child of the bootstrap directory.
 		return "", err
 	}
-	if !info.Mode().IsRegular() || info.Size() > maxReadyBytes {
-		return "", errors.New("bootstrap ready file is invalid")
-	}
-	body, err := os.ReadFile(path) // #nosec G304 -- ready file is a fixed child of the bootstrap directory.
+	body, err := incrementalfs.ReadFile(context.Background(), path, maxReadyBytes)
 	if err != nil {
 		return "", errors.New("bootstrap ready file is invalid")
 	}
+	return parseReadyFile(body)
+}
+
+func parseReadyFile(body []byte) (string, error) {
 	if err := rejectDuplicateJSONFields(body); err != nil {
 		return "", errors.New("bootstrap ready file is invalid")
 	}

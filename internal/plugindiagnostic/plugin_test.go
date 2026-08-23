@@ -35,6 +35,44 @@ func TestRepositoryPluginHasOneVersionAndDeterministicSkillDigest(t *testing.T) 
 	}
 }
 
+func TestSkillSetDigestFramesNULContainingFilesUnambiguously(t *testing.T) {
+	createRoot := func(t *testing.T, attachment, mailbox []byte) string {
+		t.Helper()
+		root := t.TempDir()
+		for _, skill := range []string{"punaro-attachment", "punaro-mailbox", "punaro-reply"} {
+			if err := os.Mkdir(filepath.Join(root, skill), 0o700); err != nil {
+				t.Fatal(err)
+			}
+		}
+		for path, body := range map[string][]byte{
+			"punaro-attachment/SKILL.md": attachment,
+			"punaro-mailbox/SKILL.md":    mailbox,
+			"punaro-reply/SKILL.md":      []byte("reply"),
+		} {
+			if len(body) == 0 {
+				continue
+			}
+			if err := os.WriteFile(filepath.Join(root, filepath.FromSlash(path)), body, 0o600); err != nil {
+				t.Fatal(err)
+			}
+		}
+		return root
+	}
+	colliding := createRoot(t, []byte("attachment\x00punaro-mailbox/SKILL.md\x00mailbox"), nil)
+	separate := createRoot(t, []byte("attachment"), []byte("mailbox"))
+	first, err := SkillSetDigest(colliding)
+	if err != nil {
+		t.Fatal(err)
+	}
+	second, err := SkillSetDigest(separate)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if first == second {
+		t.Fatal("distinct NUL-containing skill trees produced the same digest")
+	}
+}
+
 func TestSkillSetDigestRejectsUnexpectedAndLinkedEntries(t *testing.T) {
 	root := t.TempDir()
 	for _, skill := range []string{"punaro-attachment", "punaro-mailbox", "punaro-reply"} {

@@ -241,6 +241,14 @@ func doctorLoadRunPID(ctx context.Context, directory string) (runPIDRecord, erro
 	return parseRunPID(body)
 }
 
+func doctorReadReadyFile(ctx context.Context, directory string) (string, error) {
+	body, exists, err := doctorReadOptionalState(ctx, filepath.Join(directory, readyFile), maxReadyBytes)
+	if err != nil || !exists {
+		return "", errors.New("bootstrap ready file is invalid")
+	}
+	return parseReadyFile(body)
+}
+
 func doctorLoadRecovery(ctx context.Context, directory string) (recoveryState, error) {
 	body, exists, err := doctorReadOptionalState(ctx, filepath.Join(directory, recoveryFile), maximumDoctorStateBytes)
 	if err != nil || !exists {
@@ -713,7 +721,7 @@ func doctorRunningState(ctx context.Context, request DoctorRequest, current slot
 	record, err := doctorLoadRunPID(ctx, request.Directory)
 	processOK := err == nil && record.PID > 0 && filepath.Clean(record.Path) == runningPath && matchProcessImage(record.PID, record.Path) == processImageMatch
 	checks = append(checks, boolBootstrapCheck(processOK, "supervisor_process", "restart_adapter_service"))
-	_, readyErr := readReadyFile(filepath.Join(request.Directory, readyFile))
+	_, readyErr := doctorReadReadyFile(ctx, request.Directory)
 	checks = append(checks, boolBootstrapCheck(readyErr == nil && current.Release != "", "candidate_health", "restart_adapter_service"))
 	return checks
 }

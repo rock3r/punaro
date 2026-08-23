@@ -31,6 +31,10 @@ a read-only connection and bounded queries. Installed mailbox smoke checks
 hash their state tree before and after the MCP initialize/tools-only exchange.
 Backup contents, mailbox state, and nested skill trees are traversed in bounded
 directory batches with total-entry ceilings and deadline checks between reads.
+Skill-set digests length-prefix every relative path and file body so arbitrary
+skill bytes cannot create an ambiguous tree encoding. Explicit bootstrap public
+keys and bootstrap health state are read as bounded regular non-symlink files
+through the same diagnostic deadline and descriptor-identity checks.
 
 ## Commands
 
