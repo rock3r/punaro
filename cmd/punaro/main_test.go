@@ -980,6 +980,19 @@ func TestServerDoctorBackupInspectionHonorsCanceledContext(t *testing.T) {
 	}
 }
 
+func TestServerDoctorBackupInspectionBoundsRootEntries(t *testing.T) {
+	root := t.TempDir()
+	for index := 0; index <= 128; index++ {
+		if err := os.Mkdir(filepath.Join(root, fmt.Sprintf("entry-%03d", index)), 0o700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	available, fresh := inspectServerBackups(t.Context(), root, time.Now().UTC())
+	if available.Known || fresh.Known {
+		t.Fatalf("oversized backup root reported known results: available=%#v fresh=%#v", available, fresh)
+	}
+}
+
 func TestServerDoctorRequiresReleasePostgreSQLMajor(t *testing.T) {
 	preserveDependencies(t)
 	directory := testInstallation(t)

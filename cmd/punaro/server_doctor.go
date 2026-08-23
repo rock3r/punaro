@@ -117,11 +117,7 @@ func inspectServerBackups(ctx context.Context, root string, now time.Time) (know
 	if ctx.Err() != nil {
 		return knownDoctorBool{}, knownDoctorBool{}
 	}
-	entries, err := os.ReadDir(root)
-	if err != nil || len(entries) > 128 {
-		return knownDoctorBool{}, knownDoctorBool{}
-	}
-	backups, err := punarobackup.ListContext(ctx, root)
+	backups, err := punarobackup.ListContextLimit(ctx, root, 128)
 	if err != nil {
 		return knownDoctorBool{}, knownDoctorBool{}
 	}

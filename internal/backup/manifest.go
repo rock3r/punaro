@@ -245,6 +245,15 @@ func List(root string) ([]Summary, error) {
 // ListContext returns fully verified backups and stops verification promptly
 // when the caller's diagnostic deadline expires.
 func ListContext(ctx context.Context, root string) ([]Summary, error) {
+	return ListContextLimit(ctx, root, 0)
+}
+
+// ListContextLimit is ListContext with an optional bound on all root entries.
+// A zero limit permits any number and preserves the general listing API.
+func ListContextLimit(ctx context.Context, root string, maximumEntries int) ([]Summary, error) {
+	if maximumEntries < 0 {
+		return nil, errors.New("backup listing limit is invalid")
+	}
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
@@ -257,9 +266,14 @@ func ListContext(ctx context.Context, root string) ([]Summary, error) {
 	}
 	defer func() { _ = directoryHandle.Close() }()
 	result := []Summary{}
+	entryCount := 0
 	for {
 		entries, readErr := directoryHandle.ReadDir(32)
 		for _, entry := range entries {
+			entryCount++
+			if maximumEntries > 0 && entryCount > maximumEntries {
+				return nil, errors.New("backup root has too many entries")
+			}
 			if err := ctx.Err(); err != nil {
 				return nil, err
 			}

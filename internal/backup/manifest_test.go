@@ -23,6 +23,19 @@ func TestListContextStopsBeforeVerificationWhenCanceled(t *testing.T) {
 	}
 }
 
+func TestListContextLimitStopsAfterBoundedRootEntries(t *testing.T) {
+	root := t.TempDir()
+	requirePrivate(t, root)
+	for _, name := range []string{"one", "two"} {
+		if err := os.Mkdir(filepath.Join(root, name), 0o700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if _, err := ListContextLimit(t.Context(), root, 1); err == nil {
+		t.Fatal("bounded backup listing accepted excess root entries")
+	}
+}
+
 func TestVerifyAcceptsExactPrivateBackup(t *testing.T) {
 	directory := t.TempDir()
 	requirePrivate(t, directory)
