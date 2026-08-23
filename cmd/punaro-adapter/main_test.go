@@ -1205,6 +1205,13 @@ func writeInstallerProfile(t *testing.T, relayURL string) string {
 	if err := os.MkdirAll(dataDir, 0o700); err != nil {
 		t.Fatal(err)
 	}
+	mailboxBin := filepath.Join(home, ".local", "bin", "agent-mailbox")
+	if err := os.MkdirAll(filepath.Dir(mailboxBin), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(mailboxBin, []byte("fixture"), 0o700); err != nil { // #nosec G306 -- executable test fixture.
+		t.Fatal(err)
+	}
 	profile := filepath.Join(configDir, "adapter.env")
 	lines := []string{
 		"# Created by the installer.",
@@ -1215,7 +1222,7 @@ func writeInstallerProfile(t *testing.T, relayURL string) string {
 		"PUNARO_ADAPTER_DATA_DIR=" + dataDir,
 		"PUNARO_MAILBOX_STATE_DIR=" + filepath.Join(home, ".local", "state", "ai-agent", "mailbox"),
 		"PUNARO_ADAPTER_POLL_INTERVAL=30s",
-		"PUNARO_AGENT_MAILBOX_BIN=agent-mailbox",
+		"PUNARO_AGENT_MAILBOX_BIN=" + mailboxBin,
 	}
 	if strings.HasPrefix(relayURL, "https://") {
 		identityFile := filepath.Join(configDir, "client-identity.json")

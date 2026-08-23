@@ -124,6 +124,35 @@ func TestGatewayHealthSeparatesTerminalFailureClassesAndStuckProgress(t *testing
 	}
 }
 
+func TestGatewayHealthClearsTerminalFailuresAfterSuccessfulRecovery(t *testing.T) {
+	t.Parallel()
+	database := filepath.Join(t.TempDir(), "telegram.db")
+	state, err := Open(database)
+	if err != nil {
+		t.Fatal(err)
+	}
+	now := testCallbackNow
+	for _, class := range []GatewayFailureClass{GatewayFailureInboundRelayPermanent, GatewayFailureOutboundTelegramPermanent, GatewayFailureDeletedTopic} {
+		if err := state.RecordGatewayCycle(GatewayCycleRecord{At: now, Offset: 8, Failure: class}); err != nil {
+			t.Fatal(err)
+		}
+		now = now.Add(time.Minute)
+	}
+	if err := state.RecordGatewayCycle(GatewayCycleRecord{At: now, Offset: 9, PollOK: true, RelayOK: true, TelegramOK: true}); err != nil {
+		t.Fatal(err)
+	}
+	if err := state.Close(); err != nil {
+		t.Fatal(err)
+	}
+	snapshot, err := InspectGatewayState(database, now.Add(time.Minute))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if snapshot.TerminalInbound != 0 || snapshot.TerminalOutbound != 0 || snapshot.LastFailure != GatewayFailureNone || snapshot.ConsecutiveFailures != 0 || snapshot.StuckHead {
+		t.Fatalf("snapshot=%#v", snapshot)
+	}
+}
+
 func TestStateIssuesHashedTTLCallbackTokens(t *testing.T) {
 	t.Parallel()
 	state, err := Open(filepath.Join(t.TempDir(), "telegram.db"))

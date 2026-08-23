@@ -12,6 +12,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"time"
 
 	punarodiagnostic "github.com/rock3r/punaro/internal/diagnostic"
 	punarorelease "github.com/rock3r/punaro/internal/release"
@@ -29,6 +30,10 @@ func (values *repeatedFlag) Set(value string) error {
 }
 
 func runFleetDoctor(args []string, stdout, stderr io.Writer) int {
+	return runFleetDoctorAt(args, stdout, stderr, time.Now().UTC())
+}
+
+func runFleetDoctorAt(args []string, stdout, stderr io.Writer, now time.Time) int {
 	flags := flag.NewFlagSet("punaro-bootstrap fleet-doctor", flag.ContinueOnError)
 	flags.SetOutput(stderr)
 	var reports, expected repeatedFlag
@@ -58,7 +63,7 @@ func runFleetDoctor(args []string, stdout, stderr io.Writer) int {
 		return writeFleetFailure(stderr)
 	}
 	catalog, err := punarorelease.ParseCatalog(catalogBody)
-	if err != nil {
+	if err != nil || !catalog.Fresh(now) {
 		return writeFleetFailure(stderr)
 	}
 

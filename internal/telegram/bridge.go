@@ -72,6 +72,10 @@ func ClassifyGatewayCycleFailure(err error) GatewayFailureClass {
 	if PermanentBotAPIFailure(err) {
 		return GatewayFailureOutboundTelegramPermanent
 	}
+	var cycle *GatewayCycleError
+	if !errors.As(err, &cycle) || cycle.Phase != GatewayPhaseInbound {
+		return GatewayFailureTransient
+	}
 	var permanentRelay interface{ PermanentRelayFailure() bool }
 	if errors.As(err, &permanentRelay) && permanentRelay.PermanentRelayFailure() {
 		return GatewayFailureInboundRelayPermanent

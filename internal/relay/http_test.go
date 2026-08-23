@@ -593,8 +593,8 @@ func TestHTTPTelegramClaimAPIsAndUserTelegramSend(t *testing.T) {
 	if inboundRetry.Code != http.StatusOK {
 		t.Fatalf("inbound retry=%d %s", inboundRetry.Code, inboundRetry.Body.String())
 	}
-	if agentInbound := serveSigned(t, handler, privateA, "machine-a", http.MethodPost, "/v1/conversations/"+conversation.ID+"/telegram-inbound", `{"from_endpoint":"telegram/primary","from_participant":"user-telegram","body":"nope"}`, "inbound-agent", "telegram-update:8"); agentInbound.Code != http.StatusForbidden {
-		t.Fatalf("agent inbound=%d %s", agentInbound.Code, agentInbound.Body.String())
+	if agentInbound := serveSigned(t, handler, privateA, "machine-a", http.MethodPost, "/v1/conversations/"+conversation.ID+"/telegram-inbound", `{"from_endpoint":"telegram/primary","from_participant":"user-telegram","body":"nope"}`, "inbound-agent", "telegram-update:8"); agentInbound.Code != http.StatusForbidden || agentInbound.Header().Get(ResponseNonceHeader) != "inbound-agent" {
+		t.Fatalf("agent inbound=%d nonce=%q %s", agentInbound.Code, agentInbound.Header().Get(ResponseNonceHeader), agentInbound.Body.String())
 	}
 	for _, field := range []struct {
 		name string

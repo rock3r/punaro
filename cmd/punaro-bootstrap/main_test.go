@@ -76,18 +76,24 @@ func TestFleetDoctorCLIAggregatesOnlyLocallyVerifiedSignedReports(t *testing.T) 
 		}
 	}
 	var stdout, stderr bytes.Buffer
-	code := runFleetDoctor([]string{
+	args := []string{
 		"--report", serverPath, "--report", adapterPath,
 		"--expect", "punaro-lxc/server", "--expect", "mac-studio/adapter",
 		"--catalog", catalogPath, "--catalog-signature", catalogSignaturePath,
 		"--release-root", root, "--keys-file", keysPath,
-	}, &stdout, &stderr)
+	}
+	code := runFleetDoctor(args, &stdout, &stderr)
 	if code != 0 {
 		t.Fatalf("exit=%d stdout=%q stderr=%q", code, stdout.String(), stderr.String())
 	}
 	report, err := punarodiagnostic.Decode(bytes.NewReader(stdout.Bytes()))
 	if err != nil || report.Component != punarodiagnostic.ComponentFleet || !report.Healthy {
 		t.Fatalf("report=%#v err=%v", report, err)
+	}
+	stdout.Reset()
+	stderr.Reset()
+	if code := runFleetDoctorAt(args, &stdout, &stderr, time.Date(2026, 9, 1, 0, 0, 0, 0, time.UTC)); code != 2 || stdout.Len() != 0 {
+		t.Fatalf("expired catalog exit=%d stdout=%q stderr=%q", code, stdout.String(), stderr.String())
 	}
 }
 

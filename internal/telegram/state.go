@@ -216,8 +216,8 @@ func (s *State) RecordGatewayCycle(record GatewayCycleRecord) error {
 		offset=excluded.offset,
 		consecutive_failures=CASE WHEN excluded.last_failure='' THEN 0 ELSE gateway_health.consecutive_failures+1 END,
 		last_failure=excluded.last_failure,
-		terminal_inbound=gateway_health.terminal_inbound+excluded.terminal_inbound,
-		terminal_outbound=gateway_health.terminal_outbound+excluded.terminal_outbound`,
+		terminal_inbound=CASE WHEN excluded.last_failure='' THEN 0 ELSE gateway_health.terminal_inbound+excluded.terminal_inbound END,
+		terminal_outbound=CASE WHEN excluded.last_failure='' THEN 0 ELSE gateway_health.terminal_outbound+excluded.terminal_outbound END`,
 		now, successAt, pollAt, relayAt, telegramAt, progressAt, record.Offset, consecutiveDelta, string(record.Failure), inboundDelta, outboundDelta)
 	return err
 }

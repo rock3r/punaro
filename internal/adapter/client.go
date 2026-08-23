@@ -98,13 +98,32 @@ type relayHTTPStatusError struct {
 	err    error
 }
 
+type relayRejectionError struct {
+	status    int
+	confirmed bool
+}
+
+func (e *relayRejectionError) Error() string {
+	return fmt.Sprintf("relay rejected request with HTTP %d", e.status)
+}
+
 func (e *relayHTTPStatusError) Error() string { return e.err.Error() }
 func (e *relayHTTPStatusError) Unwrap() error { return e.err }
 
 // PermanentOfferNoticeFailure is true only for append-route responses whose
 // handler rejects before any message or idempotency row can be created.
 func (e *relayHTTPStatusError) PermanentOfferNoticeFailure() bool {
-	return e != nil && (e.status == http.StatusForbidden || e.status == http.StatusNotFound)
+	return e.PermanentRelayFailure()
+}
+
+// PermanentRelayFailure reports signed relay rejections that happened before
+// an inbound message or idempotency row could be created.
+func (e *relayHTTPStatusError) PermanentRelayFailure() bool {
+	if e == nil || e.status != http.StatusForbidden && e.status != http.StatusNotFound {
+		return false
+	}
+	var rejection *relayRejectionError
+	return errors.As(e.err, &rejection) && rejection.confirmed
 }
 
 // RelayHTTPStatus reports the HTTP status carried by a signed relay error.
@@ -516,8 +535,11 @@ func (c *HTTPRelayClient) SendTelegramInbound(ctx context.Context, conversationI
 		request["telegram_thread_id"] = telegramThreadID
 	}
 	var message relay.Message
-	_, err := c.doJSONWithIdempotency(ctx, http.MethodPost, "/v1/conversations/"+url.PathEscape(conversationID)+"/telegram-inbound", request, idempotencyKey, &message)
-	return message, err
+	status, err := c.doJSONWithIdempotency(ctx, http.MethodPost, "/v1/conversations/"+url.PathEscape(conversationID)+"/telegram-inbound", request, idempotencyKey, &message)
+	if err != nil {
+		return relay.Message{}, &relayHTTPStatusError{status: status, err: err}
+	}
+	return message, nil
 }
 
 // SetConversationDisplayName renames a room through a live admin session.
@@ -1009,7 +1031,10 @@ func (c *HTTPRelayClient) doJSONAllowingWithIdempotency(ctx context.Context, met
 	}
 	defer func() { _ = response.Body.Close() }()
 	if !allowedHTTPStatus(response.StatusCode, allowed) {
-		return response.StatusCode, fmt.Errorf("relay rejected request with HTTP %d", response.StatusCode)
+		return response.StatusCode, &relayRejectionError{
+			status:    response.StatusCode,
+			confirmed: response.Header.Get(relay.ResponseNonceHeader) == nonce,
+		}
 	}
 	if responseValue == nil || response.StatusCode == http.StatusNoContent {
 		return response.StatusCode, nil

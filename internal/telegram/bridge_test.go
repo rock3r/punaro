@@ -76,6 +76,7 @@ func TestClassifyGatewayCycleFailureSeparatesRetryAndTerminalPlanes(t *testing.T
 		{name: "deleted topic", err: &GatewayCycleError{Phase: GatewayPhaseSend, Err: BotAPIStatusError{Method: "sendRichMessage", Status: 400, Kind: BotAPIErrorDeletedTopic}}, class: GatewayFailureDeletedTopic},
 		{name: "permanent outbound Telegram", err: &GatewayCycleError{Phase: GatewayPhaseSend, Err: BotAPIStatusError{Method: "sendRichMessage", Status: 403}}, class: GatewayFailureOutboundTelegramPermanent},
 		{name: "permanent inbound relay", err: &GatewayCycleError{Phase: GatewayPhaseInbound, Err: permanentRelay}, class: GatewayFailureInboundRelayPermanent},
+		{name: "permanent relay outside inbound", err: &GatewayCycleError{Phase: GatewayPhaseAdvertise, Err: permanentRelay}, class: GatewayFailureTransient},
 		{name: "message-less poll", err: &GatewayCycleError{Phase: GatewayPhasePoll, Err: BotAPIStatusError{Method: "getUpdates", Status: 404}}, class: GatewayFailureMessageLessPoll},
 	} {
 		t.Run(test.name, func(t *testing.T) {

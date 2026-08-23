@@ -132,6 +132,7 @@ func (h *handler) serveHTTP(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusUnauthorized, "authentication required")
 		return
 	}
+	w.Header().Set(ResponseNonceHeader, r.Header.Get("X-Punaro-Nonce"))
 	machineID := session.MachineID
 	authority := PrincipalAuthority{PrincipalID: session.PrincipalID, CredentialLookupID: session.CredentialLookupID, CredentialGeneration: session.CredentialGeneration}
 	now := h.now().UTC()

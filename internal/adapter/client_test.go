@@ -331,7 +331,10 @@ func TestHTTPRelayClientClassifiesOnlyPreAppendRejectionsAsTerminalOfferFailures
 		terminal bool
 	}{{http.StatusForbidden, true}, {http.StatusNotFound, true}, {http.StatusConflict, false}, {http.StatusInternalServerError, false}} {
 		t.Run(http.StatusText(test.status), func(t *testing.T) {
-			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(test.status) }))
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				w.Header().Set(relay.ResponseNonceHeader, r.Header.Get("X-Punaro-Nonce"))
+				w.WriteHeader(test.status)
+			}))
 			defer server.Close()
 			client, err := NewHTTPRelayClient(server.URL, "machine-a", private, server.Client(), AccessServiceToken{})
 			if err != nil {
@@ -340,6 +343,48 @@ func TestHTTPRelayClientClassifiesOnlyPreAppendRejectionsAsTerminalOfferFailures
 			_, err = client.Send(context.Background(), "conversation-1", "agent/a", "offer", "offer-1")
 			var terminal terminalOfferNoticeFailure
 			if err == nil || !errors.As(err, &terminal) || terminal.PermanentOfferNoticeFailure() != test.terminal {
+				t.Fatalf("status=%d err=%v terminal=%v", test.status, err, terminal)
+			}
+		})
+	}
+}
+
+func TestHTTPRelayClientClassifiesTelegramInboundPreAppendRejection(t *testing.T) {
+	_, private, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, test := range []struct {
+		name          string
+		status        int
+		relayResponse bool
+		terminal      bool
+	}{
+		{name: "relay forbidden", status: http.StatusForbidden, relayResponse: true, terminal: true},
+		{name: "relay not found", status: http.StatusNotFound, relayResponse: true, terminal: true},
+		{name: "intermediary forbidden", status: http.StatusForbidden, terminal: false},
+		{name: "intermediary not found", status: http.StatusNotFound, terminal: false},
+		{name: "relay conflict", status: http.StatusConflict, relayResponse: true, terminal: false},
+		{name: "relay server error", status: http.StatusInternalServerError, relayResponse: true, terminal: false},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if r.URL.Path != "/v1/conversations/conversation-1/telegram-inbound" {
+					t.Fatalf("unexpected path %s", r.URL.Path)
+				}
+				if test.relayResponse {
+					w.Header().Set(relay.ResponseNonceHeader, r.Header.Get("X-Punaro-Nonce"))
+				}
+				w.WriteHeader(test.status)
+			}))
+			defer server.Close()
+			client, err := NewHTTPRelayClient(server.URL, "machine-a", private, server.Client(), AccessServiceToken{})
+			if err != nil {
+				t.Fatal(err)
+			}
+			_, err = client.SendTelegramInbound(context.Background(), "conversation-1", relay.TelegramGatewayEndpoint, relay.TelegramUserParticipant, "ship it", "", "", 0, "telegram-update:42")
+			var terminal interface{ PermanentRelayFailure() bool }
+			if err == nil || !errors.As(err, &terminal) || terminal.PermanentRelayFailure() != test.terminal {
 				t.Fatalf("status=%d err=%v terminal=%v", test.status, err, terminal)
 			}
 		})
