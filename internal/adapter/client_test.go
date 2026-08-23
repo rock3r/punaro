@@ -12,6 +12,7 @@ import (
 	"net/http/cookiejar"
 	"net/http/httptest"
 	"net/url"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -160,6 +161,41 @@ func TestHTTPRelayClientDoctorProbeRequiresConfirmedOriginProtocol(t *testing.T)
 	}
 }
 
+func TestHTTPRelayClientDoctorProbeVerifiesAccessEnforcement(t *testing.T) {
+	_, private, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, accessProtected := range []bool{true, false} {
+		t.Run(map[bool]string{true: "protected", false: "open"}[accessProtected], func(t *testing.T) {
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if r.Header.Get("CF-Access-Client-Id") == "" && accessProtected {
+					w.WriteHeader(http.StatusForbidden)
+					return
+				}
+				w.Header().Set(relay.ResponseNonceHeader, r.Header.Get("X-Punaro-Nonce"))
+				w.Header().Set(relay.ProtocolHeader, strconv.Itoa(relay.ProtocolVersion))
+				w.WriteHeader(http.StatusNoContent)
+			}))
+			defer server.Close()
+			client, err := NewHTTPRelayClient(server.URL, "machine-a", private, server.Client(), AccessServiceToken{ClientID: "access-id", ClientSecret: "access-secret"})
+			if err != nil {
+				t.Fatal(err)
+			}
+			result, probeErr := client.Doctor(t.Context())
+			if accessProtected {
+				if probeErr != nil || result != (DoctorProbeResult{Transport: true, Origin: true, Access: true, Enrolled: true, Protocol: true}) {
+					t.Fatalf("protected result=%#v err=%v", result, probeErr)
+				}
+				return
+			}
+			if probeErr == nil || result != (DoctorProbeResult{Transport: true, Origin: true}) {
+				t.Fatalf("open result=%#v err=%v", result, probeErr)
+			}
+		})
+	}
+}
+
 func TestHTTPRelayClientDoctorNotificationProbeIsContentFree(t *testing.T) {
 	_, private, err := ed25519.GenerateKey(rand.Reader)
 	if err != nil {
@@ -186,6 +222,46 @@ func TestHTTPRelayClientDoctorNotificationProbeIsContentFree(t *testing.T) {
 	result, err := client.DoctorNotifications(t.Context())
 	if err != nil || result != (DoctorProbeResult{Transport: true, Origin: true, Access: true, Enrolled: true, Protocol: true}) {
 		t.Fatalf("result=%#v err=%v", result, err)
+	}
+}
+
+func TestHTTPRelayClientDoctorNotificationVerifiesAccessEnforcement(t *testing.T) {
+	_, private, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, accessProtected := range []bool{true, false} {
+		t.Run(map[bool]string{true: "protected", false: "open"}[accessProtected], func(t *testing.T) {
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if r.Header.Get("CF-Access-Client-Id") == "" && accessProtected {
+					w.WriteHeader(http.StatusForbidden)
+					return
+				}
+				w.Header().Set(relay.ResponseNonceHeader, r.Header.Get("X-Punaro-Nonce"))
+				w.Header().Set(relay.ProtocolHeader, strconv.Itoa(relay.ProtocolVersion))
+				connection, acceptErr := websocket.Accept(w, r, &websocket.AcceptOptions{CompressionMode: websocket.CompressionDisabled})
+				if acceptErr != nil {
+					t.Errorf("accept: %v", acceptErr)
+					return
+				}
+				_ = connection.Close(websocket.StatusNormalClosure, "")
+			}))
+			defer server.Close()
+			client, err := NewHTTPRelayClient(server.URL, "machine-a", private, server.Client(), AccessServiceToken{ClientID: "access-id", ClientSecret: "access-secret"})
+			if err != nil {
+				t.Fatal(err)
+			}
+			result, probeErr := client.DoctorNotifications(t.Context())
+			if accessProtected {
+				if probeErr != nil || result != (DoctorProbeResult{Transport: true, Origin: true, Access: true, Enrolled: true, Protocol: true}) {
+					t.Fatalf("protected result=%#v err=%v", result, probeErr)
+				}
+				return
+			}
+			if probeErr == nil || result != (DoctorProbeResult{Transport: true, Origin: true}) {
+				t.Fatalf("open result=%#v err=%v", result, probeErr)
+			}
+		})
 	}
 }
 

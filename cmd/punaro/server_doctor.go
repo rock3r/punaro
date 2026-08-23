@@ -192,6 +192,9 @@ func serverBlobTopologyPrivate(installation operator.Installation) bool {
 func inspectServerRelay(parent context.Context, installation operator.Installation, relayProfile string) (knownDoctorBool, knownDoctorBool, knownDoctorBool, knownDoctorBool, knownDoctorBool) {
 	if installation.Ingress.PublicURL == "" && installation.Ingress.Mode == "lan" {
 		passed := known(true, true)
+		if installation.RelayEnabled {
+			return passed, passed, passed, knownDoctorBool{}, knownDoctorBool{}
+		}
 		return passed, passed, passed, passed, passed
 	}
 	profile, err := loadServerDoctorProfile(relayProfile)
@@ -235,8 +238,35 @@ func inspectServerPublicEdge(ctx context.Context, publicURL string, profile serv
 		return known(true, false), knownDoctorBool{}, knownDoctorBool{}
 	}
 	defer func() { _ = response.Body.Close() }()
-	origin := response.StatusCode == http.StatusNotFound && response.Header.Get("Cache-Control") == "no-store" && response.Header.Get("X-Content-Type-Options") == "nosniff" && response.Header.Get("X-Frame-Options") == "DENY"
-	return known(true, true), known(true, origin), known(true, origin)
+	origin := serverPublicEdgeOrigin(response)
+	if !origin || profile.AccessToken.ClientID == "" {
+		return known(true, true), known(true, origin), known(true, origin)
+	}
+	negativeClient, err := adapter.OpenAccessSession(ctx, profile.RelayURL, baseClient, adapter.AccessServiceToken{})
+	if err != nil {
+		return known(true, true), known(true, true), knownDoctorBool{}
+	}
+	negativeClient.Jar = nil
+	negativeClient.CheckRedirect = func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }
+	negativeRequest, err := http.NewRequestWithContext(ctx, http.MethodHead, strings.TrimSuffix(profile.RelayURL, "/")+"/", nil)
+	if err != nil {
+		return known(true, true), known(true, true), knownDoctorBool{}
+	}
+	negativeResponse, err := negativeClient.Do(negativeRequest)
+	if err != nil {
+		return known(true, true), known(true, true), knownDoctorBool{}
+	}
+	defer func() { _ = negativeResponse.Body.Close() }()
+	protected := !serverPublicEdgeOrigin(negativeResponse) && serverAccessRejectionStatus(negativeResponse.StatusCode)
+	return known(true, true), known(true, true), known(true, protected)
+}
+
+func serverPublicEdgeOrigin(response *http.Response) bool {
+	return response != nil && response.StatusCode == http.StatusNotFound && response.Header.Get("Cache-Control") == "no-store" && response.Header.Get("X-Content-Type-Options") == "nosniff" && response.Header.Get("X-Frame-Options") == "DENY"
+}
+
+func serverAccessRejectionStatus(status int) bool {
+	return status >= http.StatusMultipleChoices && status < http.StatusBadRequest || status == http.StatusUnauthorized || status == http.StatusForbidden
 }
 
 type serverDoctorProfile struct {

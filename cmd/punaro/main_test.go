@@ -932,20 +932,39 @@ func TestDoctorEmitsStrictContentFreeServerReport(t *testing.T) {
 }
 
 func TestServerDoctorUsesNonRelayPublicEdgeProbeWhenRelayDisabled(t *testing.T) {
-	server := httptest.NewTLSServer(http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {
-		if request.Method != http.MethodHead || request.URL.Path != "/" {
-			t.Fatalf("request=%s %s", request.Method, request.URL.Path)
-		}
-		response.Header().Set("Cache-Control", "no-store")
-		response.Header().Set("X-Content-Type-Options", "nosniff")
-		response.Header().Set("X-Frame-Options", "DENY")
-		http.NotFound(response, request)
-	}))
-	defer server.Close()
-	profile := serverDoctorProfile{RelayURL: server.URL, AccessToken: adapter.AccessServiceToken{}}
-	route, origin, access := inspectServerPublicEdge(t.Context(), server.URL, profile, server.Client())
+	for _, accessProtected := range []bool{true, false} {
+		t.Run(map[bool]string{true: "protected", false: "open"}[accessProtected], func(t *testing.T) {
+			server := httptest.NewTLSServer(http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {
+				if request.Method != http.MethodHead || request.URL.Path != "/" {
+					t.Fatalf("request=%s %s", request.Method, request.URL.Path)
+				}
+				if request.Header.Get("CF-Access-Client-Id") == "" && accessProtected {
+					response.WriteHeader(http.StatusForbidden)
+					return
+				}
+				response.Header().Set("Cache-Control", "no-store")
+				response.Header().Set("X-Content-Type-Options", "nosniff")
+				response.Header().Set("X-Frame-Options", "DENY")
+				http.NotFound(response, request)
+			}))
+			defer server.Close()
+			profile := serverDoctorProfile{RelayURL: server.URL, AccessToken: adapter.AccessServiceToken{ClientID: "access-id", ClientSecret: "access-secret"}}
+			route, origin, access := inspectServerPublicEdge(t.Context(), server.URL, profile, server.Client())
+			if !route.Known || !route.OK || !origin.Known || !origin.OK || !access.Known || access.OK != accessProtected {
+				t.Fatalf("route=%#v origin=%#v access=%#v", route, origin, access)
+			}
+		})
+	}
+}
+
+func TestServerDoctorDoesNotSynthesizeEnabledLANRelayHealth(t *testing.T) {
+	installation := operator.Installation{Ingress: ingress.Policy{Mode: ingress.LAN}, RelayEnabled: true}
+	route, origin, access, enrollment, protocol := inspectServerRelay(t.Context(), installation, "")
 	if !route.Known || !route.OK || !origin.Known || !origin.OK || !access.Known || !access.OK {
 		t.Fatalf("route=%#v origin=%#v access=%#v", route, origin, access)
+	}
+	if enrollment.Known || protocol.Known {
+		t.Fatalf("enrollment=%#v protocol=%#v", enrollment, protocol)
 	}
 }
 

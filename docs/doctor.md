@@ -61,6 +61,11 @@ only when this server host is explicitly expected to own and run the local
 An Internet/proxy installation also needs `--relay-profile` so the edge checks
 probe the real public route, origin, and Access admission. When relay is
 enabled, the same probe also requires the enrolled relay identity and protocol.
+Access admission passes only after a credentialed request reaches the expected
+Punaro route and a fresh equivalent request without the Access credential is
+rejected before Punaro can echo its nonce or origin signature. This negative
+probe is also required by adapter and Telegram relay and notification checks;
+an origin that remains reachable without Access fails the Access check.
 When relay is intentionally disabled, those two relay-only checks are optional
 and unavailable; the public-edge checks use the content-free non-relay root
 route instead. The profile writer refuses replacement, creates mode
@@ -81,7 +86,9 @@ and owner-only on Unix. The generated profile contains only the fixed HTTPS
 origin, machine ID, and those two absolute credential-file paths; credential
 contents never enter argv, the profile, the report, or logs. A trusted-LAN
 installation with no public URL passes the edge checks from its declared local
-topology and omits `--relay-profile`.
+topology and omits `--relay-profile`. If relay is enabled in that topology,
+relay enrollment and protocol remain required but unavailable until a signed
+relay probe can be configured; doctor never synthesizes those checks as passing.
 
 Client adapter on macOS, Linux, or Windows (pass the installed plugin root so
 plugin and skill parity are checked):

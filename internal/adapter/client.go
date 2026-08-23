@@ -234,6 +234,9 @@ func (c *HTTPRelayClient) doctor(ctx context.Context, endpoint string) (DoctorPr
 		return result, errors.New("relay doctor origin was not confirmed")
 	}
 	result.Origin = true
+	if c.accessToken.ClientID != "" && !c.doctorAccessIsEnforced(ctx, endpoint) {
+		return result, errors.New("relay doctor Access admission was not enforced")
+	}
 	result.Access = true
 	if response.StatusCode != http.StatusNoContent {
 		return result, errors.New("relay doctor authorization failed")
@@ -261,6 +264,44 @@ func (c *HTTPRelayClient) doctor(ctx context.Context, endpoint string) (DoctorPr
 	return result, nil
 }
 
+func (c *HTTPRelayClient) doctorAccessIsEnforced(ctx context.Context, endpoint string) bool {
+	nonce, err := randomNonce()
+	if err != nil {
+		return false
+	}
+	timestamp := time.Now().UTC()
+	signed := relay.SignedRequest{MachineID: c.machineID, Method: http.MethodHead, Path: relay.DoctorPath, Timestamp: timestamp, Nonce: nonce}
+	signed.Signature = ed25519.Sign(c.privateKey, relay.CanonicalRequest(signed))
+	target := c.baseURL.ResolveReference(&url.URL{Path: relay.DoctorPath})
+	request, err := http.NewRequestWithContext(ctx, http.MethodHead, target.String(), nil)
+	if err != nil {
+		return false
+	}
+	request.Header.Set("X-Punaro-Machine", signed.MachineID)
+	request.Header.Set("X-Punaro-Timestamp", signed.Timestamp.Format(time.RFC3339Nano))
+	request.Header.Set("X-Punaro-Nonce", signed.Nonce)
+	request.Header.Set("X-Punaro-Signature", base64.RawURLEncoding.EncodeToString(signed.Signature))
+	if endpoint != "" {
+		request.Header.Set(relay.DoctorEndpointHeader, endpoint)
+	}
+	client := *c.httpClient
+	client.CheckRedirect = func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }
+	response, err := client.Do(request)
+	if err != nil {
+		return false
+	}
+	defer func() { _ = response.Body.Close() }()
+	responseNonces := response.Header.Values(relay.ResponseNonceHeader)
+	if len(responseNonces) == 1 && responseNonces[0] == nonce {
+		return false
+	}
+	return accessRejectionStatus(response.StatusCode)
+}
+
+func accessRejectionStatus(status int) bool {
+	return status >= http.StatusMultipleChoices && status < http.StatusBadRequest || status == http.StatusUnauthorized || status == http.StatusForbidden
+}
+
 func parseDoctorCountHeader(header http.Header, name string) (int, bool) {
 	values := header.Values(name)
 	if len(values) != 1 {
@@ -277,33 +318,7 @@ func (c *HTTPRelayClient) DoctorNotifications(ctx context.Context) (DoctorProbeR
 	if c == nil || c.httpClient == nil || c.baseURL == nil {
 		return DoctorProbeResult{}, errors.New("relay notification doctor client is unavailable")
 	}
-	nonce, err := randomNonce()
-	if err != nil {
-		return DoctorProbeResult{}, err
-	}
-	timestamp := time.Now().UTC()
-	signed := relay.SignedRequest{MachineID: c.machineID, Method: http.MethodGet, Path: relay.DoctorNotificationsPath, Timestamp: timestamp, Nonce: nonce}
-	signed.Signature = ed25519.Sign(c.privateKey, relay.CanonicalRequest(signed))
-	target := *c.baseURL
-	if target.Scheme == "https" {
-		target.Scheme = "wss"
-	} else {
-		target.Scheme = "ws"
-	}
-	target.Path = relay.DoctorNotificationsPath
-	headers := http.Header{}
-	headers.Set("X-Punaro-Machine", signed.MachineID)
-	headers.Set("X-Punaro-Timestamp", signed.Timestamp.Format(time.RFC3339Nano))
-	headers.Set("X-Punaro-Nonce", signed.Nonce)
-	headers.Set("X-Punaro-Signature", base64.RawURLEncoding.EncodeToString(signed.Signature))
-	if c.accessToken.ClientID != "" {
-		headers.Set("CF-Access-Client-Id", c.accessToken.ClientID)
-		headers.Set("CF-Access-Client-Secret", c.accessToken.ClientSecret)
-	}
-	c.addAccessCookies(headers)
-	client := *c.httpClient
-	client.CheckRedirect = func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }
-	connection, response, dialErr := websocket.Dial(ctx, target.String(), &websocket.DialOptions{HTTPClient: &client, HTTPHeader: headers, CompressionMode: websocket.CompressionDisabled})
+	connection, response, nonce, dialErr := c.openDoctorNotification(ctx, true)
 	if response != nil && response.Body != nil {
 		defer func() { _ = response.Body.Close() }()
 	}
@@ -319,6 +334,12 @@ func (c *HTTPRelayClient) DoctorNotifications(ctx context.Context) (DoctorProbeR
 		return result, errors.New("relay notification doctor origin was not confirmed")
 	}
 	result.Origin = true
+	if c.accessToken.ClientID != "" && !c.doctorNotificationAccessIsEnforced(ctx) {
+		if connection != nil {
+			_ = connection.CloseNow()
+		}
+		return result, errors.New("relay notification doctor Access admission was not enforced")
+	}
 	result.Access = true
 	if dialErr != nil || connection == nil || response.StatusCode != http.StatusSwitchingProtocols {
 		if connection != nil {
@@ -335,6 +356,57 @@ func (c *HTTPRelayClient) DoctorNotifications(ctx context.Context) (DoctorProbeR
 	result.Protocol = true
 	_ = connection.Close(websocket.StatusNormalClosure, "")
 	return result, nil
+}
+
+func (c *HTTPRelayClient) openDoctorNotification(ctx context.Context, includeAccess bool) (*websocket.Conn, *http.Response, string, error) {
+	nonce, err := randomNonce()
+	if err != nil {
+		return nil, nil, "", err
+	}
+	timestamp := time.Now().UTC()
+	signed := relay.SignedRequest{MachineID: c.machineID, Method: http.MethodGet, Path: relay.DoctorNotificationsPath, Timestamp: timestamp, Nonce: nonce}
+	signed.Signature = ed25519.Sign(c.privateKey, relay.CanonicalRequest(signed))
+	target := *c.baseURL
+	if target.Scheme == "https" {
+		target.Scheme = "wss"
+	} else {
+		target.Scheme = "ws"
+	}
+	target.Path = relay.DoctorNotificationsPath
+	headers := http.Header{}
+	headers.Set("X-Punaro-Machine", signed.MachineID)
+	headers.Set("X-Punaro-Timestamp", signed.Timestamp.Format(time.RFC3339Nano))
+	headers.Set("X-Punaro-Nonce", signed.Nonce)
+	headers.Set("X-Punaro-Signature", base64.RawURLEncoding.EncodeToString(signed.Signature))
+	if includeAccess && c.accessToken.ClientID != "" {
+		headers.Set("CF-Access-Client-Id", c.accessToken.ClientID)
+		headers.Set("CF-Access-Client-Secret", c.accessToken.ClientSecret)
+	}
+	if includeAccess {
+		c.addAccessCookies(headers)
+	}
+	client := *c.httpClient
+	client.CheckRedirect = func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }
+	connection, response, dialErr := websocket.Dial(ctx, target.String(), &websocket.DialOptions{HTTPClient: &client, HTTPHeader: headers, CompressionMode: websocket.CompressionDisabled})
+	return connection, response, nonce, dialErr
+}
+
+func (c *HTTPRelayClient) doctorNotificationAccessIsEnforced(ctx context.Context) bool {
+	connection, response, nonce, _ := c.openDoctorNotification(ctx, false)
+	if connection != nil {
+		_ = connection.CloseNow()
+	}
+	if response == nil {
+		return false
+	}
+	if response.Body != nil {
+		defer func() { _ = response.Body.Close() }()
+	}
+	responseNonces := response.Header.Values(relay.ResponseNonceHeader)
+	if len(responseNonces) == 1 && responseNonces[0] == nonce {
+		return false
+	}
+	return accessRejectionStatus(response.StatusCode)
 }
 
 // Advertise replaces the machine's current local endpoint attachment set.

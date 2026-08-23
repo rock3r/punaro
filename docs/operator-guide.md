@@ -534,7 +534,11 @@ Provision that owner-only profile with `punaro doctor-profile write`; it stores
 only the fixed origin, diagnostic machine ID, and absolute references to
 separately protected Ed25519 and Cloudflare Access credential files. The
 diagnostic machine must be enrolled when relay is enabled; relay-only checks
-are optional when relay is intentionally disabled. The
+are optional when relay is intentionally disabled. Access health requires both
+a successful credentialed probe and rejection of a fresh credentialless probe
+before it reaches Punaro. A trusted-LAN installation may derive only its edge
+topology checks locally; enabled relay enrollment and protocol are reported
+unavailable rather than inferred. The
 exact formats and trusted-LAN omission are in [doctor.md](doctor.md). Add
 `--gateway-co-located` only when this host is explicitly responsible for the
 local `punaro-telegram` system service; otherwise collect its separate doctor
