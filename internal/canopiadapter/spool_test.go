@@ -56,6 +56,46 @@ func TestSpoolRetainsFailedDeliveryAndRetriesSameEvent(t *testing.T) {
 	}
 }
 
+func TestSpoolMovesPastRejectedEventWithoutDroppingIt(t *testing.T) {
+	spool := Spool{Directory: t.TempDir(), MaxEvents: 4, RetryMin: time.Millisecond, RetryMax: time.Millisecond}
+	if err := spool.Enqueue(spoolEvent("event-a")); err != nil {
+		t.Fatal(err)
+	}
+	if err := spool.Enqueue(spoolEvent("event-b")); err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	rejectedID := ""
+	advanced := false
+	attempts := 0
+	err := spool.Drain(ctx, func(_ context.Context, event protocol.Event) error {
+		attempts++
+		if rejectedID == "" {
+			rejectedID = event.EventID
+			return errors.New("collector rejected event")
+		}
+		if event.EventID != rejectedID {
+			advanced = true
+			cancel()
+			return nil
+		}
+		if attempts >= 3 {
+			cancel()
+		}
+		return errors.New("collector rejected event")
+	})
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("Drain() error = %v", err)
+	}
+	if !advanced {
+		t.Fatal("Drain() did not attempt the independent event after a rejection")
+	}
+	if got, err := spool.Pending(); err != nil || got != 1 {
+		t.Fatalf("Pending() = %d, %v; want rejected event retained", got, err)
+	}
+}
+
 func TestSpoolIsBoundedAndDuplicateEnqueueIsIdempotent(t *testing.T) {
 	spool := Spool{Directory: t.TempDir(), MaxEvents: 1}
 	if err := spool.Enqueue(spoolEvent("event-a")); err != nil {

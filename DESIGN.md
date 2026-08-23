@@ -1777,7 +1777,8 @@ state-file write never mutates the acknowledged in-memory revision, record, or
 dedupe set, so an exact retry still attempts persistence. Non-terminal TTL
 expiry archives/hides abandoned work and never converts it to success; done
 retention is independent. Snapshot and image ETags change only with state
-revision or the configured relative-time bucket.
+revision or rendered response content. TTL checks always use the real clock;
+only relative-time rendering and its image cache key use the configured bucket.
 
 Prompts, transcripts, assistant messages, credentials, tool inputs, and tool
 outputs are not part of the protocol. Metadata is default-deny: the schema and
@@ -1791,14 +1792,14 @@ blocking or controlling the coding agent.
 The Claude adapter durably writes each normalized privacy-safe event to a
 bounded owner-only spool before launching a detached delivery process. One
 cross-process worker retries queued events with their original IDs until
-acknowledged; per-attempt network timeouts and recoverable stale worker locks
-keep provider hooks isolated from collector outages. An active enqueue lock is
-heartbeated so slow durable writes cannot be reclaimed as stale. The same
-protected-token checks apply on the adapter host. A persistent `supervise` mode
-runs under the host service manager, holds a singleton lease, polls even while
-the spool is empty, and provides a durable wake/restart path when a detached
-kick or worker
-crashes during a quiet session.
+acknowledged, while continuing past a rejected event so independent later
+updates are not starved. Per-attempt network timeouts and recoverable stale
+worker locks keep provider hooks isolated from collector outages. An active
+enqueue lock is heartbeated so slow durable writes cannot be reclaimed as
+stale. The same protected-token checks apply on the adapter host. A persistent
+`supervise` mode runs under the host service manager, holds a singleton lease,
+polls even while the spool is empty, and provides a durable wake/restart path
+when a detached kick or worker crashes during a quiet session.
 
 Structurally valid event batches continue across per-event admission failures
 and return ordered per-event status records with HTTP 207 when mixed; only a
@@ -1806,9 +1807,11 @@ shared persistence failure aborts the batch. This prevents one permanently
 rejected identity from starving later updates on every retry.
 
 The renderer always sorts the complete state set waiting, done, working, then
-recent-first inside each state, before applying configurable capacity. The last
-slot becomes an omitted-tail per-state count when overflowing. Its output is an
-exact 800x480 two-color PNG; the panel performs a full e-paper refresh only
+recent-first inside each state, before applying configurable capacity. Accepted
+fixed-panel grids have one or two columns and one through six rows; other shapes
+are rejected before they can overlap typography or icons. The last slot becomes
+an omitted-tail per-state count when overflowing. Its output is an exact
+800x480 two-color PNG; the panel performs a full e-paper refresh only
 after a changed ETag, bounded PNG download, successful decode, and exact
 dimension validation.
 

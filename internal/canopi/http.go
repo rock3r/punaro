@@ -197,7 +197,7 @@ func (h *Handler) ingestBatch(response http.ResponseWriter, request *http.Reques
 }
 
 func (h *Handler) snapshot(response http.ResponseWriter, request *http.Request) {
-	now := h.now().Truncate(h.render.RelativeTimeBucket)
+	now := h.now()
 	snapshot := h.store.Snapshot(now)
 	payload, err := json.Marshal(snapshot)
 	if err != nil {
@@ -217,9 +217,10 @@ func (h *Handler) snapshot(response http.ResponseWriter, request *http.Request) 
 }
 
 func (h *Handler) renderPNG(response http.ResponseWriter, request *http.Request) {
-	now := h.now().Truncate(h.render.RelativeTimeBucket)
+	now := h.now()
 	snapshot := h.store.Snapshot(now)
-	payload, etag, err := h.cachedRender(snapshot, now)
+	bucket := now.Truncate(h.render.RelativeTimeBucket)
+	payload, etag, err := h.cachedRender(snapshot, bucket)
 	if err != nil {
 		writeError(response, http.StatusInternalServerError, errors.New("render dashboard"))
 		return

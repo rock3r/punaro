@@ -79,3 +79,13 @@ func TestTileTitleUsesTheFullTopRow(t *testing.T) {
 		t.Fatalf("titleAvailableWidth() = %d, want %d", got, want)
 	}
 }
+
+func TestRenderRejectsUnusableGridShapes(t *testing.T) {
+	for _, grid := range []GridConfig{{Columns: 3, Rows: 1}, {Columns: 1, Rows: 7}, {Columns: 48, Rows: 1}} {
+		config := DefaultRenderConfig()
+		config.Grid = grid
+		if _, err := Render(nil, config, time.Now()); err == nil {
+			t.Fatalf("Render() accepted unusable grid %dx%d", grid.Columns, grid.Rows)
+		}
+	}
+}

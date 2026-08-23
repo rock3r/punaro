@@ -147,3 +147,34 @@ func TestHandlerBatchContinuesAfterPermanentEventRejection(t *testing.T) {
 		t.Fatalf("batch suffix was not applied: %#v", agents)
 	}
 }
+
+func TestHandlerUsesRealClockForExpiryOnSnapshotAndRender(t *testing.T) {
+	now := time.Date(2026, 8, 23, 12, 45, 0, 0, time.UTC)
+	for _, path := range []string{"/v1/snapshot", "/v1/render/800x480.png"} {
+		t.Run(path, func(t *testing.T) {
+			config := DefaultConfig()
+			config.WorkingTTL = 30 * time.Minute
+			store := NewStore(config)
+			store.now = func() time.Time { return now }
+			if _, err := store.Apply(event("stale", "agent", protocol.StateWorking, now.Add(-45*time.Minute))); err != nil {
+				t.Fatal(err)
+			}
+			render := DefaultRenderConfig()
+			render.RelativeTimeBucket = 24 * time.Hour
+			handler, err := NewHandler(HandlerConfig{Store: store, Token: "secret", Now: func() time.Time { return now }, Render: render})
+			if err != nil {
+				t.Fatal(err)
+			}
+			request := httptest.NewRequestWithContext(context.Background(), http.MethodGet, path, nil)
+			request.Header.Set("Authorization", "Bearer secret")
+			response := httptest.NewRecorder()
+			handler.ServeHTTP(response, request)
+			if response.Code != http.StatusOK {
+				t.Fatalf("GET %s status = %d, body = %s", path, response.Code, response.Body.String())
+			}
+			if got := store.Revision(); got != 2 {
+				t.Fatalf("revision after GET %s = %d, want expiry revision 2", path, got)
+			}
+		})
+	}
+}

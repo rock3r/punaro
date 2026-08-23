@@ -25,6 +25,15 @@ type GridConfig struct {
 	Rows    int
 }
 
+// Validate rejects shapes whose fixed panel tiles cannot contain the selected
+// icon, typography, and overflow-summary layout.
+func (g GridConfig) Validate() error {
+	if g.Columns <= 0 || g.Columns > 2 || g.Rows <= 0 || g.Rows > 6 {
+		return errors.New("grid dimensions must be between 1x1 and 2x6")
+	}
+	return nil
+}
+
 // RenderConfig controls deterministic 800x480 panel rendering.
 type RenderConfig struct {
 	Width              int
@@ -48,8 +57,8 @@ func (c RenderConfig) validate() error {
 	if c.Width != 800 || c.Height != 480 {
 		return errors.New("canopi panel rendering must be exactly 800x480")
 	}
-	if c.Grid.Columns <= 0 || c.Grid.Rows <= 0 || c.Grid.Columns*c.Grid.Rows > 48 {
-		return errors.New("grid capacity must be between 1 and 48")
+	if err := c.Grid.Validate(); err != nil {
+		return err
 	}
 	if c.RelativeTimeBucket <= 0 {
 		return errors.New("relative time bucket must be positive")
@@ -76,10 +85,10 @@ type Page struct {
 
 // Paginate sorts agents and reserves the final slot for overflow when needed.
 func Paginate(agents []protocol.Event, grid GridConfig) (Page, error) {
-	capacity := grid.Columns * grid.Rows
-	if grid.Columns <= 0 || grid.Rows <= 0 || capacity > 48 {
-		return Page{}, errors.New("grid capacity must be between 1 and 48")
+	if err := grid.Validate(); err != nil {
+		return Page{}, err
 	}
+	capacity := grid.Columns * grid.Rows
 	sorted := append([]protocol.Event(nil), agents...)
 	SortEvents(sorted)
 	if len(sorted) <= capacity {
@@ -320,7 +329,10 @@ func relativeTime(now, activity time.Time) string {
 }
 
 func fitText(face font.Face, text string, maxWidth int) string {
-	if maxWidth <= 0 || font.MeasureString(face, text).Ceil() <= maxWidth {
+	if maxWidth <= 0 {
+		return ""
+	}
+	if font.MeasureString(face, text).Ceil() <= maxWidth {
 		return text
 	}
 	runes := []rune(text)

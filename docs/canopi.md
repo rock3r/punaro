@@ -49,8 +49,10 @@ agents have an independent retention period.
 
 The collector sorts the complete state set as waiting, done, working, and then
 by descending activity time inside each state. Only after sorting does it apply
-grid capacity. When there is overflow, the last slot replaces one agent and
-reports counts from the omitted tail, not global totals.
+grid capacity. The fixed renderer supports one or two columns and one through
+six rows, rejecting shapes too narrow or short for its typography and overflow
+summary. When there is overflow, the last slot replaces one agent and reports
+counts from the omitted tail, not global totals.
 
 ## Privacy and failure behavior
 
@@ -68,12 +70,13 @@ The hook-facing Claude process performs no network I/O. It normalizes the event,
 durably enqueues only that privacy-safe event, starts a detached delivery child,
 and returns. One cross-process worker drains the bounded 4,096-event spool and
 retries with the same event ID until the collector acknowledges it. Individual
-HTTP attempts are bounded; a crashed worker leaves its event queued and a stale
-worker lock is recoverable. The short-lived enqueue lock is heartbeated while
-held, so a slow durable write cannot be mistaken for a crashed writer. Missing
-configuration, malformed provider input, spool or process-launch failure,
-token-file failure, network failure, and collector rejection all leave the
-coding agent unblocked and produce no provider-visible output.
+HTTP attempts are bounded, and a rejected event remains queued without starving
+independent events behind it. A crashed worker leaves its events queued and a
+stale worker lock is recoverable. The short-lived enqueue lock is heartbeated
+while held, so a slow durable write cannot be mistaken for a crashed writer.
+Missing configuration, malformed provider input, spool or process-launch
+failure, token-file failure, network failure, and collector rejection all leave
+the coding agent unblocked and produce no provider-visible output.
 
 All collector routes require the same bearer token. Bodies, batches, headers,
 dedupe memory, and grid capacity are bounded. A non-loopback listener must be a
@@ -104,12 +107,15 @@ For a deliberately selected LAN address, add `--allow-lan` and replace the
 listener with that concrete private IP. Useful configuration flags are
 `--columns`, `--rows`, `--working-ttl`, `--done-retention`,
 `--max-live-records`, `--max-future-skew`, `--relative-time-bucket`, and
-`--title`. New agent identities are rejected at the configured live-record
-ceiling, while updates to known identities remain admissible. Activity times
-beyond the configured future-clock-skew window are rejected before they can
-fence later correct updates or evade expiry. Expired records are durably purged
-before capacity admission, so an offline panel cannot leave the store stuck at
-its ceiling.
+`--title`. Grid dimensions are constrained to 1–2 columns and 1–6 rows so every
+accepted shape remains legible on the fixed panel. New agent identities are
+rejected at the configured live-record ceiling, while updates to known
+identities remain admissible. Activity times beyond the configured
+future-clock-skew window are rejected before they can fence later correct
+updates or evade expiry. Expired records are durably purged using the real
+current time before capacity admission and reads, independently of the
+relative-time render bucket. An offline panel therefore cannot leave the store
+stuck at its ceiling.
 
 In another terminal, generate the selected 3 waiting / 4 done / 12 working
 overflow state:

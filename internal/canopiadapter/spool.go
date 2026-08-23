@@ -271,43 +271,48 @@ func (s Spool) drainLocked(ctx context.Context, deliver func(context.Context, pr
 		if len(files) == 0 {
 			return nil
 		}
-		payload, err := os.ReadFile(files[0]) // #nosec G304 -- eventFiles returns entries from the configured private spool.
-		if err != nil {
-			return err
-		}
-		event, err := protocol.DecodeEvent(strings.NewReader(string(payload)), maxSpoolEventBytes)
-		if err != nil {
-			_ = os.Remove(files[0])
-			continue
-		}
-		for {
+		hadFailure := false
+		for _, path := range files {
+			payload, err := os.ReadFile(path) // #nosec G304 -- eventFiles returns entries from the configured private spool.
+			if err != nil {
+				return err
+			}
+			event, err := protocol.DecodeEvent(strings.NewReader(string(payload)), maxSpoolEventBytes)
+			if err != nil {
+				_ = os.Remove(path)
+				continue
+			}
 			heartbeat()
 			attemptCtx, cancel := context.WithTimeout(ctx, time.Second)
 			err = deliver(attemptCtx, event)
 			cancel()
-			if err == nil {
-				if err := os.Remove(files[0]); err != nil && !errors.Is(err, os.ErrNotExist) {
-					return err
-				}
-				if err := syncDirectory(s.Directory); err != nil {
-					return err
-				}
-				backoff = s.RetryMin
-				break
+			if err != nil {
+				hadFailure = true
+				continue
 			}
-			timer := time.NewTimer(backoff)
-			select {
-			case <-ctx.Done():
-				if !timer.Stop() {
-					<-timer.C
-				}
-				return ctx.Err()
-			case <-timer.C:
+			if err := os.Remove(path); err != nil && !errors.Is(err, os.ErrNotExist) {
+				return err
 			}
-			backoff *= 2
-			if backoff > s.RetryMax {
-				backoff = s.RetryMax
+			if err := syncDirectory(s.Directory); err != nil {
+				return err
 			}
+		}
+		if !hadFailure {
+			backoff = s.RetryMin
+			continue
+		}
+		timer := time.NewTimer(backoff)
+		select {
+		case <-ctx.Done():
+			if !timer.Stop() {
+				<-timer.C
+			}
+			return ctx.Err()
+		case <-timer.C:
+		}
+		backoff *= 2
+		if backoff > s.RetryMax {
+			backoff = s.RetryMax
 		}
 	}
 }
