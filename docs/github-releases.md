@@ -54,7 +54,7 @@ The `release` workflow dispatch builds:
 - `punaro-adapter`, `punaro-trusted-attachment`, `punaro-memory`,
   `punaro-enroll`, and `punaro-bootstrap` for `darwin/arm64`, `linux/amd64`,
   `linux/arm64`, and `windows/amd64`
-- `punaro` and `punaro-telegram` for Linux
+- `punaro`, `punaro-telegram`, and `punaro-relay-adopt-prepare` for Linux
 
 Darwin adapter builds use `CGO_ENABLED=1` so the supported ACL path is compiled
 in. The workflow then writes unsigned `punaro-release.json` and

@@ -11,8 +11,8 @@ import (
 
 const sqlitePendingBodyBytes = "length(CAST(message.body AS BLOB))"
 
-func (s *Store) bootstrapPendingQuota(ctx context.Context) error {
-	if _, err := s.db.ExecContext(ctx, `INSERT OR IGNORE INTO pending_quota_install(singleton, pending_count, pending_bytes)
+func bootstrapPendingQuota(ctx context.Context, db sqliteExecQueryer) error {
+	if _, err := db.ExecContext(ctx, `INSERT OR IGNORE INTO pending_quota_install(singleton, pending_count, pending_bytes)
 		SELECT 1, counted, bytes FROM (
 			SELECT COUNT(*) AS counted, COALESCE(SUM(`+sqlitePendingBodyBytes+`), 0) AS bytes
 			FROM deliveries AS delivery JOIN messages AS message ON message.id = delivery.message_id
@@ -20,7 +20,7 @@ func (s *Store) bootstrapPendingQuota(ctx context.Context) error {
 		) WHERE counted > 0`); err != nil {
 		return fmt.Errorf("bootstrap pending installation quota: %w", err)
 	}
-	if _, err := s.db.ExecContext(ctx, `INSERT OR IGNORE INTO pending_quota_recipients(recipient_endpoint, pending_count, pending_bytes)
+	if _, err := db.ExecContext(ctx, `INSERT OR IGNORE INTO pending_quota_recipients(recipient_endpoint, pending_count, pending_bytes)
 		SELECT delivery.recipient_endpoint, COUNT(*), COALESCE(SUM(`+sqlitePendingBodyBytes+`), 0)
 		FROM deliveries AS delivery JOIN messages AS message ON message.id = delivery.message_id
 		WHERE delivery.acked_at IS NULL
@@ -32,6 +32,14 @@ func (s *Store) bootstrapPendingQuota(ctx context.Context) error {
 
 func appendDeliveryRecipients(tx *sql.Tx, conversationID, fromEndpoint, targetRole string) ([]string, error) {
 	var recipients []string
+	if targetRole == TelegramUserParticipant {
+		if fromEndpoint == TelegramGatewayEndpoint {
+			return nil, nil
+		}
+		recipients = append(recipients, TelegramGatewayEndpoint)
+		sort.Strings(recipients)
+		return recipients, nil
+	}
 	if targetRole == "" {
 		rows, err := tx.QueryContext(context.Background(), "SELECT endpoint FROM memberships WHERE conversation_id = ? AND (capabilities & ?) != 0 AND endpoint != ?", conversationID, CapReceive, fromEndpoint)
 		if err != nil {

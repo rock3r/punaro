@@ -23,6 +23,15 @@ $allScripts = ($paths | ForEach-Object { [System.IO.File]::ReadAllText($_) }) -j
 if (-not $allScripts.Contains('existing Punaro guidance predates trusted attachments')) {
     throw 'Windows guidance installer does not fail closed on retired guidance'
 }
+if (-not $allScripts.Contains('existing Punaro guidance predates user-telegram send')) {
+    throw 'Windows guidance installer does not fail closed on pre-user-telegram send guidance'
+}
+if (-not $allScripts.Contains('existing Punaro guidance predates telegram-origin-only send')) {
+    throw 'Windows guidance installer does not fail closed on claimed-topic user-telegram send guidance'
+}
+if (-not $allScripts.Contains('--to user-telegram')) {
+    throw 'Windows guidance installer does not teach --to user-telegram'
+}
 if ($allScripts -match 'Invoke-Expression|PUNARO_CF_ACCESS_CLIENT_SECRET=|\.\s*\$config') {
     throw 'Windows client scripts must not execute configuration or embed Access credentials'
 }

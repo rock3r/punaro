@@ -654,7 +654,7 @@ func TestHTTPRelayClientSignsBoundedProtocolRequests(t *testing.T) {
 	if err != nil || message.ID != "message-1" {
 		t.Fatalf("send = %#v, %v", message, err)
 	}
-	conversation, err := client.CreateConversation(context.Background(), "agent/a", []relay.Member{{Endpoint: "agent/a", Capabilities: relay.CapSend | relay.CapReceive | relay.CapAdmin}}, "create-1")
+	conversation, err := client.CreateConversation(context.Background(), "agent/a", []relay.Member{{Endpoint: "agent/a", Capabilities: relay.CapSend | relay.CapReceive | relay.CapAdmin}}, "", "create-1")
 	if err != nil || conversation.ID != "conversation-created" {
 		t.Fatalf("create=%#v err=%v", conversation, err)
 	}
@@ -870,9 +870,188 @@ func TestHTTPRelayClientEncodesDurableRoleMemberWithoutChangingEndpointMember(t 
 	conversation, err := client.CreateConversation(context.Background(), "agent/a/session", []relay.Member{
 		{Endpoint: "agent/a/session", Capabilities: relay.CapSend | relay.CapReceive | relay.CapAdmin},
 		{Role: "role/plan-reviewer", RoleMachineID: "machine-b", Capabilities: relay.CapReceive},
-	}, "create-role-member")
+	}, "", "create-role-member")
 	if err != nil || conversation.ID != "role-conversation" {
 		t.Fatalf("conversation=%#v err=%v", conversation, err)
+	}
+}
+
+func TestHTTPRelayClientOmitsEmptyDisplayNameOnCreate(t *testing.T) {
+	public, private, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var unnamedBody, namedBody []byte
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost || r.URL.Path != "/v1/conversations" {
+			t.Fatalf("request = %s %s", r.Method, r.URL.Path)
+		}
+		body := mustReadAll(t, r)
+		request := signedRequestFromHTTP(t, r, body)
+		if !ed25519.Verify(public, relay.CanonicalRequest(request), request.Signature) {
+			t.Fatal("conversation request was not signed")
+		}
+		var payload map[string]any
+		if err := json.Unmarshal(body, &payload); err != nil {
+			t.Fatalf("conversation payload=%s err=%v", body, err)
+		}
+		if _, present := payload["display_name"]; present && unnamedBody == nil {
+			t.Fatalf("unnamed create included display_name: %s", body)
+		}
+		if unnamedBody == nil {
+			unnamedBody = append([]byte(nil), body...)
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`{"id":"unnamed-conversation"}`))
+			return
+		}
+		if payload["display_name"] != "Review room" {
+			t.Fatalf("named create payload=%s", body)
+		}
+		namedBody = append([]byte(nil), body...)
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"id":"named-conversation","display_name":"Review room"}`))
+	}))
+	defer server.Close()
+	client, err := NewHTTPRelayClient(server.URL, "machine-a", private, server.Client(), AccessServiceToken{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	unnamed, err := client.CreateConversation(context.Background(), "agent/a", []relay.Member{{Endpoint: "agent/a", Capabilities: relay.CapSend | relay.CapReceive | relay.CapAdmin}}, "", "create-unnamed")
+	if err != nil || unnamed.ID != "unnamed-conversation" {
+		t.Fatalf("unnamed=%#v err=%v", unnamed, err)
+	}
+	named, err := client.CreateConversation(context.Background(), "agent/a", []relay.Member{{Endpoint: "agent/a", Capabilities: relay.CapSend | relay.CapReceive | relay.CapAdmin}}, "Review room", "create-named")
+	if err != nil || named.ID != "named-conversation" || named.DisplayName != "Review room" {
+		t.Fatalf("named=%#v err=%v", named, err)
+	}
+	if unnamedBody == nil || namedBody == nil {
+		t.Fatal("create requests were not observed")
+	}
+}
+
+func TestHTTPRelayClientTelegramClaimAndInboundMethods(t *testing.T) {
+	t.Parallel()
+	public, private, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	seen := map[string][]byte{}
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body := mustReadAll(t, r)
+		request := signedRequestFromHTTP(t, r, body)
+		if !ed25519.Verify(public, relay.CanonicalRequest(request), request.Signature) {
+			t.Fatal("telegram claim request was not signed")
+		}
+		seen[r.Method+" "+r.URL.Path] = append([]byte(nil), body...)
+		w.Header().Set("Content-Type", "application/json")
+		switch r.URL.Path {
+		case "/v1/conversations/conversation-1/telegram-claim":
+			if r.Header.Get("Idempotency-Key") != "claim-conversation-1" {
+				t.Fatal("missing claim idempotency key")
+			}
+			_, _ = w.Write([]byte(`{"conversation_id":"conversation-1","status":"pending","display_name":"Ops","created_at":"2026-08-16T12:00:00Z"}`))
+		case "/v1/conversations/conversation-1/telegram-claim/complete":
+			if string(body) != "{}" {
+				t.Fatalf("complete body=%s", body)
+			}
+			_, _ = w.Write([]byte(`{"conversation_id":"conversation-1","status":"complete","display_name":"Ops","created_at":"2026-08-16T12:00:00Z","completed_at":"2026-08-16T12:00:05Z"}`))
+		case "/v1/telegram/claims/pending":
+			_, _ = w.Write([]byte(`{"claims":[{"conversation_id":"conversation-1","status":"pending","display_name":"Ops","created_at":"2026-08-16T12:00:00Z"}]}`))
+		case "/v1/telegram/unclaimed":
+			_, _ = w.Write([]byte(`{"topics":[{"id":"conversation-1","display_name":"Ops"}]}`))
+		case "/v1/sessions/topic":
+			_, _ = w.Write([]byte(`{"id":"conversation-1","display_name":"Ops","claimed":true}`))
+		case "/v1/conversations/conversation-1/telegram-inbound":
+			if r.Header.Get("Idempotency-Key") != "telegram-update:42" {
+				t.Fatal("missing inbound idempotency key")
+			}
+			_, _ = w.Write([]byte(`{"id":"message-1","conversation_id":"conversation-1","sequence":1,"from_endpoint":"telegram/primary","from_participant":"user-telegram","body":"ship it","created_at":"2026-08-16T12:00:00Z"}`))
+		default:
+			t.Fatalf("unexpected path %s", r.URL.Path)
+		}
+	}))
+	defer server.Close()
+	client, err := NewHTTPRelayClient(server.URL, "machine-a", private, server.Client(), AccessServiceToken{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	claim, err := client.ClaimConversation(context.Background(), "conversation-1", "agent/a", "claim-conversation-1")
+	if err != nil || claim.Status != "pending" {
+		t.Fatalf("claim=%#v err=%v", claim, err)
+	}
+	completed, err := client.CompleteTelegramClaim(context.Background(), "conversation-1")
+	if err != nil || completed.Status != "complete" {
+		t.Fatalf("complete=%#v err=%v", completed, err)
+	}
+	pending, err := client.PendingTelegramClaims(context.Background(), 1, "")
+	if err != nil || len(pending) != 1 || pending[0].ConversationID != "conversation-1" {
+		t.Fatalf("pending=%#v err=%v", pending, err)
+	}
+	topics, err := client.ListUnclaimed(context.Background())
+	if err != nil || len(topics) != 1 || topics[0].ID != "conversation-1" {
+		t.Fatalf("unclaimed=%#v err=%v", topics, err)
+	}
+	topic, err := client.GetSessionTopic(context.Background(), "agent/a")
+	if err != nil || !topic.Claimed || topic.ID != "conversation-1" {
+		t.Fatalf("topic=%#v err=%v", topic, err)
+	}
+	message, err := client.SendTelegramInbound(context.Background(), "conversation-1", relay.TelegramGatewayEndpoint, relay.TelegramUserParticipant, "ship it", "", "", 0, "telegram-update:42")
+	if err != nil || message.FromParticipant != relay.TelegramUserParticipant {
+		t.Fatalf("inbound=%#v err=%v", message, err)
+	}
+	if _, ok := seen["POST /v1/conversations/conversation-1/telegram-claim/complete"]; !ok {
+		t.Fatal("complete request was not observed")
+	}
+}
+
+func TestHTTPRelayClientClaimConversationTreatsCompleteAsSuccess(t *testing.T) {
+	t.Parallel()
+	_, private, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost || r.URL.Path != "/v1/conversations/conversation-1/telegram-claim" {
+			t.Fatalf("unexpected route %s %s", r.Method, r.URL.Path)
+		}
+		if r.Header.Get("Idempotency-Key") != "claim-conversation-1" {
+			t.Fatal("missing claim idempotency key")
+		}
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(`{"conversation_id":"conversation-1","status":"complete","display_name":"Ops","created_at":"2026-08-16T12:00:00Z","completed_at":"2026-08-16T12:00:05Z"}`))
+	}))
+	defer server.Close()
+	client, err := NewHTTPRelayClient(server.URL, "machine-a", private, server.Client(), AccessServiceToken{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	claim, err := client.ClaimConversation(context.Background(), "conversation-1", "agent/a", "claim-conversation-1")
+	if err != nil || claim.Status != "complete" || claim.ConversationID != "conversation-1" {
+		t.Fatalf("complete claim=%#v err=%v", claim, err)
+	}
+}
+
+func TestHTTPRelayClientGetSessionTopicExposesForbiddenStatus(t *testing.T) {
+	t.Parallel()
+	_, private, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost || r.URL.Path != "/v1/sessions/topic" {
+			t.Fatalf("unexpected route %s %s", r.Method, r.URL.Path)
+		}
+		http.Error(w, `{"error":"authorization denied"}`, http.StatusForbidden)
+	}))
+	defer server.Close()
+	client, err := NewHTTPRelayClient(server.URL, "machine-a", private, server.Client(), AccessServiceToken{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = client.GetSessionTopic(context.Background(), "agent/a")
+	if RelayHTTPStatus(err) != http.StatusForbidden {
+		t.Fatalf("forbidden topic status=%d err=%v", RelayHTTPStatus(err), err)
 	}
 }
 

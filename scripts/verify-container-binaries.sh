@@ -3,7 +3,7 @@ set -eu
 
 dockerfile=${1:-Dockerfile}
 
-for binary in punaro punarod punaro-migrate punaro-admin punaro-adapter punaro-telegram punaro-trusted-attachment; do
+for binary in punaro punarod punaro-migrate punaro-admin punaro-adapter punaro-telegram punaro-trusted-attachment punaro-relay-adopt-prepare; do
 	if ! grep -Fq -- "-o /out/$binary ./cmd/$binary" "$dockerfile"; then
 		echo "container build does not produce $binary" >&2
 		exit 1

@@ -2,11 +2,15 @@ package relay
 
 import (
 	"encoding/base64"
+	"errors"
+	"fmt"
 	"regexp"
 	"strings"
 	"time"
 	"unicode"
 	"unicode/utf8"
+
+	"github.com/google/uuid"
 )
 
 var canonicalRoleSlug = regexp.MustCompile(`^[a-z0-9][a-z0-9-]{0,62}$`)
@@ -151,14 +155,111 @@ func ValidMessageBody(value string) bool {
 // AppendRequestHash binds a message idempotency key to its immutable request.
 func AppendRequestHash(input AppendInput) string { return appendHash(input) }
 
+const (
+	maxConversationDisplayNameRunes = 128
+	maxConversationDisplayNameBytes = 512
+	// TelegramGatewayEndpoint is the enrolled gateway mailbox. Claim complete
+	// is the only writer that inserts it with send|receive.
+	TelegramGatewayEndpoint = "telegram/primary"
+	// TelegramUserParticipant is the built-in per-topic human label. It is
+	// never a durable roles row and never a member-set target.
+	TelegramUserParticipant = "user-telegram"
+	// TelegramPrimaryEndpoint is the occupancy-fence name for the gateway.
+	// It must occupy every claimed topic, so fencing never applies to it.
+	TelegramPrimaryEndpoint = TelegramGatewayEndpoint
+	// TelegramCodexRole is the durable role the host-local adopt-prepare
+	// one-shot drops from the still-unnamed non-keeper. It is an ordinary
+	// role, not a reserved participant label.
+	TelegramCodexRole = "role/telegram-codex"
+)
+
+// TelegramGatewayCapabilities is the only membership complete may grant.
+const TelegramGatewayCapabilities = CapSend | CapReceive
+
+// ReservedRelayMember reports labels that cannot be created or member-set.
+// user-telegram is a built-in participant; telegram/primary is claim-owned.
+func ReservedRelayMember(value string) bool {
+	return value == TelegramUserParticipant || value == TelegramGatewayEndpoint
+}
+
+// ValidateTelegramInbound checks gateway inbound fields before a store write.
+func ValidateTelegramInbound(input TelegramInboundInput) error {
+	if strings.TrimSpace(input.ConversationID) == "" || !ValidMachineID(input.SenderMachineID) || input.FromEndpoint != TelegramGatewayEndpoint || input.FromParticipant != TelegramUserParticipant || !ValidRequestToken(input.IdempotencyKey) {
+		return ErrForbidden
+	}
+	if input.InReplyToEndpoint != "" && !ValidEndpoint(input.InReplyToEndpoint) {
+		return ErrForbidden
+	}
+	if input.InReplyToMessageID != "" && !ValidRequestToken(input.InReplyToMessageID) && uuid.Validate(input.InReplyToMessageID) != nil {
+		return ErrForbidden
+	}
+	if input.TelegramThreadID < 0 {
+		return ErrForbidden
+	}
+	if !ValidMessageBody(input.Body) {
+		return errors.New("message body is not portable UTF-8 text")
+	}
+	if len(input.Body) > maxMessageBodyBytes {
+		return fmt.Errorf("message body exceeds %d bytes", maxMessageBodyBytes)
+	}
+	return nil
+}
+
+// SanitizeConversationDisplayName trims and clamps a room label. Empty input is
+// legal for unnamed test rooms; a provided name must remain non-empty.
+func SanitizeConversationDisplayName(value string) (string, error) {
+	if value == "" {
+		return "", nil
+	}
+	if !utf8.ValidString(value) || strings.ContainsRune(value, 0) {
+		return "", errInvalidConversationDisplayName
+	}
+	for _, character := range value {
+		if unicode.IsControl(character) {
+			return "", errInvalidConversationDisplayName
+		}
+	}
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return "", errInvalidConversationDisplayName
+	}
+	if utf8.RuneCountInString(value) > maxConversationDisplayNameRunes {
+		value = string([]rune(value)[:maxConversationDisplayNameRunes])
+	}
+	for len(value) > maxConversationDisplayNameBytes {
+		_, size := utf8.DecodeLastRuneInString(value)
+		if size <= 0 {
+			return "", errInvalidConversationDisplayName
+		}
+		value = value[:len(value)-size]
+	}
+	if value == "" {
+		return "", errInvalidConversationDisplayName
+	}
+	return value, nil
+}
+
+var errInvalidConversationDisplayName = errors.New("invalid conversation display name")
+
 // CreateConversationRequestHash binds a conversation idempotency key to the
-// normalized creator and membership set.
-func CreateConversationRequestHash(creatorEndpoint string, members []Member, projectID ...string) string {
+// normalized creator, membership set, and display name. An empty display name
+// keeps the pre-upgrade membership digest so unnamed create retries still hit
+// existing conversation_idempotency rows.
+func CreateConversationRequestHash(creatorEndpoint string, members []Member, displayName string, projectID ...string) string {
 	digest := createConversationHash(creatorEndpoint, members)
+	if displayName != "" {
+		digest = stableHash(digest, displayName)
+	}
 	if len(projectID) == 0 || projectID[0] == "" {
 		return digest
 	}
 	return stableHash(digest, projectID[0])
+}
+
+// DisplayNameRequestHash binds a rename idempotency key to the conversation,
+// live admin endpoint, and sanitized label.
+func DisplayNameRequestHash(conversationID, actorEndpoint, displayName string) string {
+	return stableHash(conversationID, actorEndpoint, displayName)
 }
 
 // Backend is the complete durable mail boundary shared by the SQLite parity
@@ -195,6 +296,24 @@ type InvocationBackend interface {
 type ControlBackend interface {
 	ApplyControl(ControlInput) (ControlEvent, bool, error)
 	ControlAudit(conversationID, machineID, actorEndpoint string, now time.Time) ([]ControlEvent, error)
+}
+
+// DisplayNameBackend is the explicit admin rename surface. It stays off the
+// message plane and rechecks a live admin session on every mutation.
+type DisplayNameBackend interface {
+	SetConversationDisplayName(SetDisplayNameInput) (Conversation, bool, error)
+}
+
+// TelegramClaimBackend is the claim, occupancy, and gateway-inbound surface.
+// It stays off Backend so mail cutover parity is not blocked on topic APIs.
+type TelegramClaimBackend interface {
+	SetConversationDisplayName(SetDisplayNameInput) (Conversation, bool, error)
+	ReserveTelegramClaim(TelegramClaimInput) (TelegramClaim, bool, error)
+	CompleteTelegramClaim(TelegramClaimCompleteInput) (TelegramClaim, bool, error)
+	PendingTelegramClaims(machineID string, now time.Time, limit int, after string) ([]TelegramClaim, error)
+	UnclaimedNamedConversations(machineID string, now time.Time, limit int) ([]UnclaimedTopic, error)
+	SessionTopic(machineID, endpoint string, now time.Time) (SessionTopic, error)
+	AppendTelegramInbound(TelegramInboundInput) (Message, bool, error)
 }
 
 // PrincipalEndpointBackend atomically binds advertised endpoint ownership to
@@ -244,3 +363,5 @@ type NonceStore interface {
 var _ Backend = (*Store)(nil)
 var _ RoleProfileBackend = (*Store)(nil)
 var _ DirectMessageBackend = (*Store)(nil)
+var _ DisplayNameBackend = (*Store)(nil)
+var _ TelegramClaimBackend = (*Store)(nil)

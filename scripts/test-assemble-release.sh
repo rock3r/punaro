@@ -34,3 +34,7 @@ if ! "$repo_dir/scripts/build-release-artifacts.sh" --help >/dev/null; then
 	printf '%s\n' 'build-release-artifacts help failed' >&2
 	exit 1
 fi
+if ! grep -Fq 'build punaro-relay-adopt-prepare ./cmd/punaro-relay-adopt-prepare' "$repo_dir/scripts/build-release-artifacts.sh"; then
+	printf '%s\n' 'linux release artifacts omit punaro-relay-adopt-prepare' >&2
+	exit 1
+fi

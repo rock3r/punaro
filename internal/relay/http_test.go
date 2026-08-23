@@ -367,6 +367,259 @@ func TestHTTPCreateConversationDeduplicatesSameMachineIdempotencyKey(t *testing.
 	}
 }
 
+func TestHTTPCreateConversationPersistsDisplayNameAndAllowsUnnamed(t *testing.T) {
+	t.Parallel()
+	public, private, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	store, err := Open(filepath.Join(t.TempDir(), "relay.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+	auth, err := NewAuthenticator(store, []Machine{{ID: "machine-a", PublicKey: public, EndpointPrefixes: []string{"agent/a/"}}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	clock := time.Date(2026, time.July, 13, 12, 0, 0, 0, time.UTC)
+	handler := NewHandler(store, auth, HandlerOptions{Now: func() time.Time { return clock }, EndpointLeaseTTL: time.Minute})
+	serveSigned(t, handler, private, "machine-a", http.MethodPut, "/v1/machines/me/endpoints", `{"endpoints":["agent/a/session"]}`, "advertise", "")
+	named := serveSigned(t, handler, private, "machine-a", http.MethodPost, "/v1/conversations", `{"creator_endpoint":"agent/a/session","display_name":"  Review room  ","members":[{"endpoint":"agent/a/session","capabilities":["send","receive","admin"]}]}`, "create-named", "create-named")
+	var namedConversation Conversation
+	if named.Code != http.StatusCreated || json.NewDecoder(named.Body).Decode(&namedConversation) != nil || namedConversation.DisplayName != "Review room" {
+		t.Fatalf("named create=%d %s", named.Code, named.Body.String())
+	}
+	unnamed := serveSigned(t, handler, private, "machine-a", http.MethodPost, "/v1/conversations", `{"creator_endpoint":"agent/a/session","members":[{"endpoint":"agent/a/session","capabilities":["send","receive","admin"]}]}`, "create-unnamed", "create-unnamed")
+	var unnamedConversation Conversation
+	if unnamed.Code != http.StatusCreated || json.NewDecoder(unnamed.Body).Decode(&unnamedConversation) != nil || unnamedConversation.DisplayName != "" {
+		t.Fatalf("unnamed create=%d %s", unnamed.Code, unnamed.Body.String())
+	}
+	listed := serveSigned(t, handler, private, "machine-a", http.MethodGet, "/v1/conversations", "", "list", "")
+	var payload struct {
+		Conversations []Conversation `json:"conversations"`
+	}
+	if listed.Code != http.StatusOK || json.NewDecoder(listed.Body).Decode(&payload) != nil || len(payload.Conversations) != 2 {
+		t.Fatalf("list=%d %s", listed.Code, listed.Body.String())
+	}
+	foundNamed, foundUnnamed := false, false
+	for _, conversation := range payload.Conversations {
+		switch conversation.ID {
+		case namedConversation.ID:
+			foundNamed = conversation.DisplayName == "Review room"
+		case unnamedConversation.ID:
+			foundUnnamed = conversation.DisplayName == ""
+		}
+	}
+	if !foundNamed || !foundUnnamed {
+		t.Fatalf("list payload missing display names: %#v", payload.Conversations)
+	}
+	changed := serveSigned(t, handler, private, "machine-a", http.MethodPost, "/v1/conversations", `{"creator_endpoint":"agent/a/session","display_name":"Other room","members":[{"endpoint":"agent/a/session","capabilities":["send","receive","admin"]}]}`, "create-named-conflict", "create-named")
+	if changed.Code != http.StatusConflict {
+		t.Fatalf("changed named create=%d %s", changed.Code, changed.Body.String())
+	}
+}
+
+func TestHTTPSetConversationDisplayNameRequiresAdminAndIsIdempotent(t *testing.T) {
+	t.Parallel()
+	publicA, privateA, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	publicB, privateB, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	store, err := Open(filepath.Join(t.TempDir(), "relay.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+	auth, err := NewAuthenticator(store, []Machine{{ID: "machine-a", PublicKey: publicA, EndpointPrefixes: []string{"agent/a/"}}, {ID: "machine-b", PublicKey: publicB, EndpointPrefixes: []string{"agent/b/"}}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	now := time.Date(2026, time.July, 13, 12, 0, 0, 0, time.UTC)
+	handler := NewHandler(store, auth, HandlerOptions{Now: func() time.Time { return now }, EndpointLeaseTTL: time.Hour})
+	serveSigned(t, handler, privateA, "machine-a", http.MethodPut, "/v1/machines/me/endpoints", `{"endpoints":["agent/a/session"]}`, "advertise-a", "")
+	serveSigned(t, handler, privateB, "machine-b", http.MethodPut, "/v1/machines/me/endpoints", `{"endpoints":["agent/b/session"]}`, "advertise-b", "")
+	created := serveSigned(t, handler, privateA, "machine-a", http.MethodPost, "/v1/conversations", `{"creator_endpoint":"agent/a/session","members":[{"endpoint":"agent/a/session","capabilities":["send","receive","admin"]},{"endpoint":"agent/b/session","capabilities":["receive"]}]}`, "create", "create-1")
+	var conversation Conversation
+	if created.Code != http.StatusCreated || json.NewDecoder(created.Body).Decode(&conversation) != nil {
+		t.Fatalf("create=%d %s", created.Code, created.Body.String())
+	}
+	body := `{"actor_endpoint":"agent/a/session","display_name":"Ops room"}`
+	first := serveSigned(t, handler, privateA, "machine-a", http.MethodPost, "/v1/conversations/"+conversation.ID+"/display-name", body, "rename-first", "rename-1")
+	var renamed Conversation
+	if first.Code != http.StatusCreated || json.NewDecoder(first.Body).Decode(&renamed) != nil || renamed.DisplayName != "Ops room" {
+		t.Fatalf("rename=%d %s", first.Code, first.Body.String())
+	}
+	retry := serveSigned(t, handler, privateA, "machine-a", http.MethodPost, "/v1/conversations/"+conversation.ID+"/display-name", body, "rename-retry", "rename-1")
+	if retry.Code != http.StatusOK {
+		t.Fatalf("rename retry=%d %s", retry.Code, retry.Body.String())
+	}
+	denied := serveSigned(t, handler, privateB, "machine-b", http.MethodPost, "/v1/conversations/"+conversation.ID+"/display-name", `{"actor_endpoint":"agent/b/session","display_name":"Hijacked"}`, "rename-denied", "rename-2")
+	if denied.Code != http.StatusForbidden {
+		t.Fatalf("non-admin rename=%d %s", denied.Code, denied.Body.String())
+	}
+	if missing := serveSigned(t, handler, privateA, "machine-a", http.MethodPost, "/v1/conversations/"+conversation.ID+"/display-name", body, "rename-missing-key", ""); missing.Code != http.StatusBadRequest {
+		t.Fatalf("rename without idempotency key=%d %s", missing.Code, missing.Body.String())
+	}
+	if empty := serveSigned(t, handler, privateA, "machine-a", http.MethodPost, "/v1/conversations/"+conversation.ID+"/display-name", `{"actor_endpoint":"agent/a/session","display_name":""}`, "rename-empty", "rename-empty"); empty.Code != http.StatusBadRequest {
+		t.Fatalf("empty rename=%d %s", empty.Code, empty.Body.String())
+	}
+	if whitespace := serveSigned(t, handler, privateA, "machine-a", http.MethodPost, "/v1/conversations/"+conversation.ID+"/display-name", `{"actor_endpoint":"agent/a/session","display_name":"   "}`, "rename-whitespace", "rename-whitespace"); whitespace.Code != http.StatusBadRequest {
+		t.Fatalf("whitespace rename=%d %s", whitespace.Code, whitespace.Body.String())
+	}
+	if detach := serveSigned(t, handler, privateA, "machine-a", http.MethodPut, "/v1/machines/me/endpoints", `{"endpoints":[]}`, "detach-a", ""); detach.Code != http.StatusOK {
+		t.Fatalf("detach=%d %s", detach.Code, detach.Body.String())
+	}
+	if detached := serveSigned(t, handler, privateA, "machine-a", http.MethodPost, "/v1/conversations/"+conversation.ID+"/display-name", body, "rename-detached", "rename-detached"); detached.Code != http.StatusForbidden {
+		t.Fatalf("detached admin rename=%d %s", detached.Code, detached.Body.String())
+	}
+}
+
+func TestHTTPTelegramClaimAPIsAndUserTelegramSend(t *testing.T) {
+	t.Parallel()
+	publicA, privateA, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	publicB, privateB, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	publicTG, privateTG, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	store, err := Open(filepath.Join(t.TempDir(), "relay.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+	auth, err := NewAuthenticator(store, []Machine{
+		{ID: "machine-a", PublicKey: publicA, EndpointPrefixes: []string{"agent/a/"}},
+		{ID: "machine-b", PublicKey: publicB, EndpointPrefixes: []string{"agent/b/"}},
+		{ID: "machine-telegram", PublicKey: publicTG, Endpoints: []string{TelegramGatewayEndpoint}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	now := time.Date(2026, time.July, 13, 12, 0, 0, 0, time.UTC)
+	handler := NewHandler(store, auth, HandlerOptions{Now: func() time.Time { return now }, EndpointLeaseTTL: time.Hour, DeliveryLeaseTTL: time.Minute})
+	serveSigned(t, handler, privateA, "machine-a", http.MethodPut, "/v1/machines/me/endpoints", `{"endpoints":["agent/a/session"]}`, "advertise-a", "")
+	serveSigned(t, handler, privateB, "machine-b", http.MethodPut, "/v1/machines/me/endpoints", `{"endpoints":["agent/b/session"]}`, "advertise-b", "")
+	serveSigned(t, handler, privateTG, "machine-telegram", http.MethodPut, "/v1/machines/me/endpoints", `{"endpoints":["telegram/primary"]}`, "advertise-tg", "")
+	if reserved := serveSigned(t, handler, privateA, "machine-a", http.MethodPost, "/v1/conversations", `{"creator_endpoint":"agent/a/session","display_name":"Ops","members":[{"endpoint":"agent/a/session","capabilities":["send","receive","admin"]},{"role":"user-telegram","role_machine_id":"machine-a","capabilities":["receive"]}]}`, "create-reserved-role", "create-reserved"); reserved.Code != http.StatusBadRequest {
+		t.Fatalf("create user-telegram role=%d %s", reserved.Code, reserved.Body.String())
+	}
+	created := serveSigned(t, handler, privateA, "machine-a", http.MethodPost, "/v1/conversations", `{"creator_endpoint":"agent/a/session","display_name":"Ops","members":[{"endpoint":"agent/a/session","capabilities":["send","receive","admin"]},{"endpoint":"agent/b/session","capabilities":["receive"]}]}`, "create", "create-1")
+	var conversation Conversation
+	if created.Code != http.StatusCreated || json.NewDecoder(created.Body).Decode(&conversation) != nil {
+		t.Fatalf("create=%d %s", created.Code, created.Body.String())
+	}
+	if member := serveSigned(t, handler, privateA, "machine-a", http.MethodPost, "/v1/conversations/"+conversation.ID+"/controls", `{"actor_endpoint":"agent/a/session","operation":"upsert_member","member":{"endpoint":"user-telegram","capabilities":["receive"]}}`, "member-set", "member-set"); member.Code != http.StatusForbidden {
+		t.Fatalf("member set user-telegram=%d %s", member.Code, member.Body.String())
+	}
+	unclaimed := serveSigned(t, handler, privateB, "machine-b", http.MethodGet, "/v1/telegram/unclaimed", "", "unclaimed-denied", "")
+	if unclaimed.Code != http.StatusForbidden {
+		t.Fatalf("agent unclaimed=%d %s", unclaimed.Code, unclaimed.Body.String())
+	}
+	listed := serveSigned(t, handler, privateTG, "machine-telegram", http.MethodGet, "/v1/telegram/unclaimed", "", "unclaimed", "")
+	var topics struct {
+		Topics []UnclaimedTopic `json:"topics"`
+	}
+	if listed.Code != http.StatusOK || json.NewDecoder(listed.Body).Decode(&topics) != nil || len(topics.Topics) != 1 || topics.Topics[0].ID != conversation.ID {
+		t.Fatalf("unclaimed=%d %s", listed.Code, listed.Body.String())
+	}
+	topic := serveSigned(t, handler, privateA, "machine-a", http.MethodPost, "/v1/sessions/topic", `{"endpoint":"agent/a/session"}`, "topic", "")
+	var session SessionTopic
+	if topic.Code != http.StatusOK || json.NewDecoder(topic.Body).Decode(&session) != nil || session.ID != conversation.ID || session.Claimed {
+		t.Fatalf("session topic=%d %s", topic.Code, topic.Body.String())
+	}
+	if send := serveSigned(t, handler, privateA, "machine-a", http.MethodPost, "/v1/conversations/"+conversation.ID+"/messages", `{"from_endpoint":"agent/a/session","target_role":"user-telegram","body":"too soon"}`, "send-early", "send-early"); send.Code != http.StatusForbidden {
+		t.Fatalf("unclaimed send=%d %s", send.Code, send.Body.String())
+	}
+	first := serveSigned(t, handler, privateA, "machine-a", http.MethodPost, "/v1/conversations/"+conversation.ID+"/telegram-claim", `{"endpoint":"agent/a/session"}`, "claim-first", "claim-"+conversation.ID)
+	var reserved TelegramClaim
+	if first.Code != http.StatusCreated || json.NewDecoder(first.Body).Decode(&reserved) != nil || reserved.Status != "pending" {
+		t.Fatalf("reserve=%d %s", first.Code, first.Body.String())
+	}
+	retry := serveSigned(t, handler, privateTG, "machine-telegram", http.MethodPost, "/v1/conversations/"+conversation.ID+"/telegram-claim", `{"endpoint":"telegram/primary"}`, "claim-gateway", "gateway-claim-"+conversation.ID)
+	if retry.Code != http.StatusOK {
+		t.Fatalf("gateway ensure=%d %s", retry.Code, retry.Body.String())
+	}
+	pending := serveSigned(t, handler, privateTG, "machine-telegram", http.MethodPost, "/v1/telegram/claims/pending", `{"limit":1}`, "pending", "")
+	var pendingPayload struct {
+		Claims []TelegramClaim `json:"claims"`
+	}
+	if pending.Code != http.StatusOK || json.NewDecoder(pending.Body).Decode(&pendingPayload) != nil || len(pendingPayload.Claims) != 1 {
+		t.Fatalf("pending=%d %s", pending.Code, pending.Body.String())
+	}
+	if extra := serveSigned(t, handler, privateTG, "machine-telegram", http.MethodPost, "/v1/conversations/"+conversation.ID+"/telegram-claim/complete", `{"endpoint":"telegram/primary"}`, "complete-extra", ""); extra.Code != http.StatusBadRequest {
+		t.Fatalf("complete unknown field=%d %s", extra.Code, extra.Body.String())
+	}
+	if denied := serveSigned(t, handler, privateA, "machine-a", http.MethodPost, "/v1/conversations/"+conversation.ID+"/telegram-claim/complete", `{}`, "complete-denied", ""); denied.Code != http.StatusForbidden {
+		t.Fatalf("agent complete=%d %s", denied.Code, denied.Body.String())
+	}
+	complete := serveSigned(t, handler, privateTG, "machine-telegram", http.MethodPost, "/v1/conversations/"+conversation.ID+"/telegram-claim/complete", `{}`, "complete", "")
+	var completed TelegramClaim
+	if complete.Code != http.StatusCreated || json.NewDecoder(complete.Body).Decode(&completed) != nil || completed.Status != "complete" {
+		t.Fatalf("complete=%d %s", complete.Code, complete.Body.String())
+	}
+	if completeRetry := serveSigned(t, handler, privateTG, "machine-telegram", http.MethodPost, "/v1/conversations/"+conversation.ID+"/telegram-claim/complete", `{}`, "complete-retry", ""); completeRetry.Code != http.StatusOK {
+		t.Fatalf("complete retry=%d %s", completeRetry.Code, completeRetry.Body.String())
+	}
+	if query := serveSigned(t, handler, privateTG, "machine-telegram", http.MethodGet, "/v1/telegram/unclaimed?limit=10", "", "unclaimed-query", ""); query.Code != http.StatusBadRequest {
+		t.Fatalf("unclaimed query string=%d %s", query.Code, query.Body.String())
+	}
+	send := serveSigned(t, handler, privateA, "machine-a", http.MethodPost, "/v1/conversations/"+conversation.ID+"/messages", `{"from_endpoint":"agent/a/session","target_role":"user-telegram","body":"ping"}`, "send-user", "send-user")
+	var sent Message
+	if send.Code != http.StatusCreated || json.NewDecoder(send.Body).Decode(&sent) != nil || sent.ID == "" {
+		t.Fatalf("user-telegram send=%d %s", send.Code, send.Body.String())
+	}
+	lease := serveSigned(t, handler, privateTG, "machine-telegram", http.MethodPost, "/v1/deliveries/lease", `{"endpoint":"telegram/primary","consumer_id":"gateway"}`, "lease-tg", "")
+	var page DeliveryLeasePage
+	if lease.Code != http.StatusOK || json.NewDecoder(lease.Body).Decode(&page) != nil || len(page.Deliveries) != 1 || page.Deliveries[0].RecipientEndpoint != TelegramGatewayEndpoint {
+		t.Fatalf("gateway lease=%d %#v %s", lease.Code, page, lease.Body.String())
+	}
+	inbound := serveSigned(t, handler, privateTG, "machine-telegram", http.MethodPost, "/v1/conversations/"+conversation.ID+"/telegram-inbound", `{"from_endpoint":"telegram/primary","from_participant":"user-telegram","body":"ship it","in_reply_to_punaro_message_id":"`+sent.ID+`","in_reply_to_endpoint":"agent/a/session","telegram_thread_id":795446}`, "inbound", "telegram-update:7")
+	var inboundMessage Message
+	if inbound.Code != http.StatusCreated || json.NewDecoder(inbound.Body).Decode(&inboundMessage) != nil || inboundMessage.FromParticipant != TelegramUserParticipant || inboundMessage.InReplyToPunaroMessageID != sent.ID || inboundMessage.InReplyToEndpoint != "agent/a/session" || inboundMessage.TelegramThreadID != 795446 {
+		t.Fatalf("inbound=%d %s", inbound.Code, inbound.Body.String())
+	}
+	inboundRetry := serveSigned(t, handler, privateTG, "machine-telegram", http.MethodPost, "/v1/conversations/"+conversation.ID+"/telegram-inbound", `{"from_endpoint":"telegram/primary","from_participant":"user-telegram","body":"ship it"}`, "inbound-retry", "telegram-update:7")
+	if inboundRetry.Code != http.StatusOK {
+		t.Fatalf("inbound retry=%d %s", inboundRetry.Code, inboundRetry.Body.String())
+	}
+	if agentInbound := serveSigned(t, handler, privateA, "machine-a", http.MethodPost, "/v1/conversations/"+conversation.ID+"/telegram-inbound", `{"from_endpoint":"telegram/primary","from_participant":"user-telegram","body":"nope"}`, "inbound-agent", "telegram-update:8"); agentInbound.Code != http.StatusForbidden {
+		t.Fatalf("agent inbound=%d %s", agentInbound.Code, agentInbound.Body.String())
+	}
+	for _, field := range []struct {
+		name string
+		body string
+	}{
+		{"from_participant", `{"from_endpoint":"agent/a/session","body":"nope","from_participant":"user-telegram"}`},
+		{"in_reply_to_punaro_message_id", `{"from_endpoint":"agent/a/session","body":"nope","in_reply_to_punaro_message_id":"` + sent.ID + `"}`},
+		{"in_reply_to_endpoint", `{"from_endpoint":"agent/a/session","body":"nope","in_reply_to_endpoint":"agent/a/session"}`},
+		{"telegram_thread_id", `{"from_endpoint":"agent/a/session","body":"nope","telegram_thread_id":795446}`},
+	} {
+		if extra := serveSigned(t, handler, privateA, "machine-a", http.MethodPost, "/v1/conversations/"+conversation.ID+"/messages", field.body, "send-meta-"+field.name, "send-meta-"+field.name); extra.Code != http.StatusBadRequest {
+			t.Fatalf("agent %s send=%d %s", field.name, extra.Code, extra.Body.String())
+		}
+	}
+	leased := serveSigned(t, handler, privateB, "machine-b", http.MethodPost, "/v1/deliveries/lease", `{"endpoint":"agent/b/session","consumer_id":"adapter-b"}`, "lease-inbound", "")
+	var inboundPage DeliveryLeasePage
+	if leased.Code != http.StatusOK || json.NewDecoder(leased.Body).Decode(&inboundPage) != nil || len(inboundPage.Deliveries) != 1 {
+		t.Fatalf("inbound lease=%d %s", leased.Code, leased.Body.String())
+	}
+	got := inboundPage.Deliveries[0].Message
+	if got.ID != inboundMessage.ID || got.FromEndpoint != TelegramGatewayEndpoint || got.FromParticipant != TelegramUserParticipant || got.InReplyToPunaroMessageID != sent.ID || got.InReplyToEndpoint != "agent/a/session" || got.TelegramThreadID != 795446 {
+		t.Fatalf("leased inbound=%#v", got)
+	}
+}
+
 func TestHTTPInvokeIsAContentFreeOfflineRuntimeHandoff(t *testing.T) {
 	publicA, privateA, err := ed25519.GenerateKey(rand.Reader)
 	if err != nil {

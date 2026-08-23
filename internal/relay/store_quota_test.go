@@ -497,6 +497,109 @@ func TestStoreConcurrentAckCannotUnderflow(t *testing.T) {
 	}
 }
 
+func TestStoreGatewayUserTelegramSendDoesNotChargeSelfQuota(t *testing.T) {
+	store := openQuotaStore(t, tightQuota(1, 1024, 8, 4096))
+	now := quotaNow()
+	conversation := createClaimedTelegramConversation(t, store, now)
+	first, duplicate, err := store.AppendMessage(AppendInput{
+		ConversationID: conversation.ID, SenderMachineID: "machine-telegram", FromEndpoint: TelegramGatewayEndpoint,
+		TargetRole: TelegramUserParticipant, Body: "self", IdempotencyKey: "gateway-to-user-1", Now: now,
+	})
+	if err != nil || duplicate {
+		t.Fatalf("gateway user-telegram send=%#v duplicate=%t err=%v", first, duplicate, err)
+	}
+	var deliveries int
+	if err := store.db.QueryRowContext(context.Background(), "SELECT COUNT(*) FROM deliveries WHERE message_id=?", first.ID).Scan(&deliveries); err != nil || deliveries != 0 {
+		t.Fatalf("gateway self-send deliveries=%d err=%v", deliveries, err)
+	}
+	if counters := quotaRecipientCounters(t, store, TelegramGatewayEndpoint); counters != (QuotaCounters{}) {
+		t.Fatalf("gateway self-send charged recipient quota=%#v", counters)
+	}
+	if counters := quotaInstallCounters(t, store); counters != (QuotaCounters{}) {
+		t.Fatalf("gateway self-send charged install quota=%#v", counters)
+	}
+	if err := store.VerifyPendingQuota(); err != nil {
+		t.Fatalf("quota after gateway self-send: %v", err)
+	}
+	if _, _, err := store.AppendMessage(AppendInput{
+		ConversationID: conversation.ID, SenderMachineID: "machine-a", FromEndpoint: "agent/a",
+		TargetRole: TelegramUserParticipant, Body: "ping", IdempotencyKey: "agent-to-user-1", Now: now,
+	}); err != nil {
+		t.Fatalf("agent user-telegram send after gateway self-send: %v", err)
+	}
+	if counters := quotaRecipientCounters(t, store, TelegramGatewayEndpoint); counters.Count != 1 || counters.Bytes != int64(len("ping")) {
+		t.Fatalf("agent send quota=%#v", counters)
+	}
+}
+
+func TestStoreUserTelegramSendChargesAndReleasesGatewayQuota(t *testing.T) {
+	store := openQuotaStore(t, tightQuota(1, 1024, 8, 4096))
+	now := quotaNow()
+	conversation := createClaimedTelegramConversation(t, store, now)
+	first, duplicate, err := store.AppendMessage(AppendInput{
+		ConversationID: conversation.ID, SenderMachineID: "machine-a", FromEndpoint: "agent/a",
+		TargetRole: TelegramUserParticipant, Body: "ping", IdempotencyKey: "to-user-1", Now: now,
+	})
+	if err != nil || duplicate {
+		t.Fatalf("first user-telegram send=%#v duplicate=%t err=%v", first, duplicate, err)
+	}
+	if counters := quotaRecipientCounters(t, store, TelegramGatewayEndpoint); counters.Count != 1 || counters.Bytes != int64(len("ping")) {
+		t.Fatalf("gateway quota after send=%#v", counters)
+	}
+	if _, _, err := store.AppendMessage(AppendInput{
+		ConversationID: conversation.ID, SenderMachineID: "machine-a", FromEndpoint: "agent/a",
+		TargetRole: TelegramUserParticipant, Body: "again", IdempotencyKey: "to-user-2", Now: now,
+	}); !errors.Is(err, ErrCapacityExceeded) {
+		t.Fatalf("second user-telegram send err=%v, want capacity exceeded", err)
+	}
+	if counters := quotaRecipientCounters(t, store, TelegramGatewayEndpoint); counters.Count != 1 {
+		t.Fatalf("denied send changed gateway quota=%#v", counters)
+	}
+	page, err := store.LeaseDeliveries("machine-telegram", "tg-consumer", TelegramGatewayEndpoint, conversation.ID, now, time.Minute, 10)
+	if err != nil || len(page.Deliveries) != 1 {
+		t.Fatalf("gateway lease=%#v err=%v", page, err)
+	}
+	if err := store.AckDelivery("machine-telegram", TelegramGatewayEndpoint, page.Deliveries[0].ID, page.Deliveries[0].LeaseToken, page.Deliveries[0].LeaseGeneration, now); err != nil {
+		t.Fatalf("gateway ack: %v", err)
+	}
+	if counters := quotaRecipientCounters(t, store, TelegramGatewayEndpoint); counters.Count != 0 {
+		t.Fatalf("gateway quota after ack=%#v", counters)
+	}
+	if _, _, err := store.AppendMessage(AppendInput{
+		ConversationID: conversation.ID, SenderMachineID: "machine-a", FromEndpoint: "agent/a",
+		TargetRole: TelegramUserParticipant, Body: "after-ack", IdempotencyKey: "to-user-3", Now: now,
+	}); err != nil {
+		t.Fatalf("send after ack: %v", err)
+	}
+}
+
+func createClaimedTelegramConversation(t *testing.T, store *Store, now time.Time) Conversation {
+	t.Helper()
+	if err := store.AdvertiseEndpoints("machine-a", []string{"agent/a"}, now, time.Hour); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.AdvertiseEndpoints("machine-telegram", []string{TelegramGatewayEndpoint}, now, time.Hour); err != nil {
+		t.Fatal(err)
+	}
+	conversation, err := store.CreateConversationIdempotent(CreateConversationInput{
+		MachineID: "machine-a", IdempotencyKey: "named-quota", CreatorEndpoint: "agent/a",
+		DisplayName: "Ops", Members: []Member{{Endpoint: "agent/a", Capabilities: CapSend | CapReceive | CapAdmin}}, Now: now,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := store.ReserveTelegramClaim(TelegramClaimInput{
+		ConversationID: conversation.ID, MachineID: "machine-a", Endpoint: "agent/a",
+		IdempotencyKey: "claim-" + conversation.ID, Now: now,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := store.CompleteTelegramClaim(TelegramClaimCompleteInput{ConversationID: conversation.ID, MachineID: "machine-telegram", Now: now}); err != nil {
+		t.Fatal(err)
+	}
+	return conversation
+}
+
 func openQuotaStore(t *testing.T, cfg QuotaConfig) *Store {
 	t.Helper()
 	store, err := Open(filepath.Join(t.TempDir(), "relay.db"))
