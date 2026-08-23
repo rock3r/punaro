@@ -47,7 +47,7 @@ func inspectServerDoctorState(parent context.Context, installation operator.Inst
 	state.MigrationBinding = known(serverBuildMigrationSHA256 != "", serverBuildMigrationSHA256 == punaropostgres.MigrationManifestSHA256())
 	state.RunningImage = inspectRunningImage(ctx, installation)
 	state.Storage = inspectServerStorage(installation.DataDir, serverDoctorMinimumFree)
-	state.BackupAvailable, state.BackupFresh = inspectServerBackups(installation.BackupDir, time.Now().UTC())
+	state.BackupAvailable, state.BackupFresh = inspectServerBackups(ctx, installation.BackupDir, time.Now().UTC())
 	state.DatabasePrivate = known(true, serverComposeTopologyPrivate(installation))
 	state.HealthPrivate = known(true, listener.IsLoopback(installation.HealthListenAddr))
 	state.AdminPrivate = state.DatabasePrivate
@@ -113,12 +113,15 @@ func inspectRunningImage(parent context.Context, installation operator.Installat
 	return known(ok, strings.TrimSpace(image) == installation.Image)
 }
 
-func inspectServerBackups(root string, now time.Time) (knownDoctorBool, knownDoctorBool) {
+func inspectServerBackups(ctx context.Context, root string, now time.Time) (knownDoctorBool, knownDoctorBool) {
+	if ctx.Err() != nil {
+		return knownDoctorBool{}, knownDoctorBool{}
+	}
 	entries, err := os.ReadDir(root)
 	if err != nil || len(entries) > 128 {
 		return knownDoctorBool{}, knownDoctorBool{}
 	}
-	backups, err := punarobackup.List(root)
+	backups, err := punarobackup.ListContext(ctx, root)
 	if err != nil {
 		return knownDoctorBool{}, knownDoctorBool{}
 	}

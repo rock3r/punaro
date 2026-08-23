@@ -321,12 +321,12 @@ func distinctDoctorPaths(config adapterConfig) bool {
 	return true
 }
 
-func probeMailboxMCP(ctx context.Context, config adapterConfig) error {
+func probeMailboxMCP(ctx context.Context, config adapterConfig) (resultErr error) {
 	binary, err := validateMailboxDoctorConfiguration(config)
 	if err != nil {
 		return err
 	}
-	before, err := mailboxDoctorTreeDigest(config.mailboxState)
+	before, err := mailboxDoctorTreeDigest(ctx, config.mailboxState)
 	if err != nil {
 		return errors.New("mailbox state cannot be inspected safely")
 	}
@@ -352,6 +352,10 @@ func probeMailboxMCP(ctx context.Context, config adapterConfig) error {
 		if !waited {
 			_ = command.Wait()
 		}
+		after, err := mailboxDoctorTreeDigest(ctx, config.mailboxState)
+		if err != nil || before != after {
+			resultErr = errors.New("mailbox MCP changed state during doctor")
+		}
 	}()
 	writer := bufio.NewWriter(stdin)
 	decoder := json.NewDecoder(io.LimitReader(stdout, maximumMailboxDoctorOutput+1))
@@ -367,14 +371,10 @@ func probeMailboxMCP(ctx context.Context, config adapterConfig) error {
 	}
 	_ = command.Wait()
 	waited = true
-	after, err := mailboxDoctorTreeDigest(config.mailboxState)
-	if err != nil || before != after {
-		return errors.New("mailbox MCP changed state during doctor")
-	}
 	return nil
 }
 
-func mailboxDoctorTreeDigest(root string) ([sha256.Size]byte, error) {
+func mailboxDoctorTreeDigest(ctx context.Context, root string) ([sha256.Size]byte, error) {
 	hash := sha256.New()
 	entries := 0
 	var totalBytes int64
@@ -386,6 +386,9 @@ func mailboxDoctorTreeDigest(root string) ([sha256.Size]byte, error) {
 		return err
 	}
 	err := filepath.WalkDir(root, func(path string, entry os.DirEntry, walkErr error) error {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
 		if walkErr != nil {
 			return walkErr
 		}
@@ -418,9 +421,12 @@ func mailboxDoctorTreeDigest(root string) ([sha256.Size]byte, error) {
 		if err != nil {
 			return err
 		}
-		_, copyErr := io.CopyN(hash, file, info.Size())
+		_, copyErr := io.CopyN(hash, mailboxDoctorContextReader{ctx: ctx, reader: file}, info.Size())
 		var extra [1]byte
-		extraCount, extraErr := file.Read(extra[:])
+		extraCount, extraErr := 0, ctx.Err()
+		if extraErr == nil {
+			extraCount, extraErr = file.Read(extra[:])
+		}
 		closeErr := file.Close()
 		if copyErr != nil || extraCount != 0 || !errors.Is(extraErr, io.EOF) || closeErr != nil {
 			return errors.New("mailbox state changed during inspection")
@@ -433,6 +439,18 @@ func mailboxDoctorTreeDigest(root string) ([sha256.Size]byte, error) {
 	var digest [sha256.Size]byte
 	copy(digest[:], hash.Sum(nil))
 	return digest, nil
+}
+
+type mailboxDoctorContextReader struct {
+	ctx    context.Context
+	reader io.Reader
+}
+
+func (reader mailboxDoctorContextReader) Read(buffer []byte) (int, error) {
+	if err := reader.ctx.Err(); err != nil {
+		return 0, err
+	}
+	return reader.reader.Read(buffer)
 }
 
 func validateMailboxDoctorConfiguration(config adapterConfig) (string, error) {

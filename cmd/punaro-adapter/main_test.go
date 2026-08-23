@@ -430,6 +430,55 @@ exit 0
 	}
 }
 
+func TestMailboxDoctorRejectsStateMutationAfterFailedHandshake(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("POSIX helper fixture")
+	}
+	tests := []struct {
+		name   string
+		script string
+	}{
+		{
+			name: "initialize",
+			script: `#!/bin/sh
+read initialize
+printf '%s\n' changed >"$2/doctor-mutated"
+printf '%s\n' '{"jsonrpc":"2.0","id":1,"error":{"code":-32000,"message":"failed"}}'
+`,
+		},
+		{
+			name: "tools list",
+			script: `#!/bin/sh
+read initialize
+printf '%s\n' '{"jsonrpc":"2.0","id":1,"result":{"protocolVersion":"2024-11-05","capabilities":{},"serverInfo":{"name":"fixture","version":"1"}}}'
+read initialized
+read tools
+printf '%s\n' changed >"$2/doctor-mutated"
+printf '%s\n' '{"jsonrpc":"2.0","id":2,"error":{"code":-32000,"message":"failed"}}'
+`,
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			directory := t.TempDir()
+			state := filepath.Join(directory, "mailbox")
+			if err := os.Mkdir(state, 0o700); err != nil {
+				t.Fatal(err)
+			}
+			helper := filepath.Join(directory, "agent-mailbox")
+			if err := os.WriteFile(helper, []byte(test.script), 0o700); err != nil { // #nosec G306 -- executable test helper.
+				t.Fatal(err)
+			}
+			ctx, cancel := context.WithTimeout(t.Context(), 5*time.Second)
+			defer cancel()
+			err := probeMailboxMCP(ctx, adapterConfig{mailboxBinary: helper, mailboxState: state})
+			if err == nil || err.Error() != "mailbox MCP changed state during doctor" {
+				t.Fatalf("mutation after failed %s handshake was not reported: %v", test.name, err)
+			}
+		})
+	}
+}
+
 func TestInstalledAgentMailboxDoctorSmoke(t *testing.T) {
 	binary, err := exec.LookPath("agent-mailbox")
 	if err != nil {

@@ -970,6 +970,16 @@ func TestDoctorClassifiesEveryExtendedServerDependency(t *testing.T) {
 	}
 }
 
+func TestServerDoctorBackupInspectionHonorsCanceledContext(t *testing.T) {
+	root := t.TempDir()
+	ctx, cancel := context.WithCancel(t.Context())
+	cancel()
+	available, fresh := inspectServerBackups(ctx, root, time.Now().UTC())
+	if available.Known || fresh.Known {
+		t.Fatalf("canceled backup inspection reported known results: available=%#v fresh=%#v", available, fresh)
+	}
+}
+
 func TestServerDoctorRequiresReleasePostgreSQLMajor(t *testing.T) {
 	preserveDependencies(t)
 	directory := testInstallation(t)

@@ -1,6 +1,7 @@
 package backup
 
 import (
+	"context"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
@@ -11,6 +12,16 @@ import (
 	"testing"
 	"time"
 )
+
+func TestListContextStopsBeforeVerificationWhenCanceled(t *testing.T) {
+	root := t.TempDir()
+	requirePrivate(t, root)
+	ctx, cancel := context.WithCancel(t.Context())
+	cancel()
+	if _, err := ListContext(ctx, root); err == nil {
+		t.Fatal("canceled backup listing continued into verification")
+	}
+}
 
 func TestVerifyAcceptsExactPrivateBackup(t *testing.T) {
 	directory := t.TempDir()
