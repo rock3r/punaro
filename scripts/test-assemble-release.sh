@@ -55,7 +55,8 @@ if grep -Fq 'gh release upload catalog dist/punaro-catalog.json' "$repo_dir/.git
 fi
 if ! grep -Fq -- '--previous-catalog' "$repo_dir/.github/workflows/release.yml" ||
 	! grep -Fq -- '--minimum-safe-sequence' "$repo_dir/.github/workflows/release.yml" ||
-	! grep -Fq -- '--critical-block' "$repo_dir/.github/workflows/release.yml"; then
+	! grep -Fq -- '--critical-block' "$repo_dir/.github/workflows/release.yml" ||
+	! grep -Fq -- '--supported-from' "$repo_dir/.github/workflows/release.yml"; then
 	printf '%s\n' 'release workflow cannot maintain retained live catalog releases' >&2
 	exit 1
 fi

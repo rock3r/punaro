@@ -99,7 +99,9 @@ Only the offline-signature publisher can make those stable assets visible.
    unsafe sequences. The workflow validates both before assembly. Use the
    safety floor only when every older rollback is intentionally retired; use a
    critical block to revoke one release while keeping older safe rollback
-   entries.
+   entries. Set `supported_from` to the comma-separated installed releases that
+   may upgrade directly to this release; this is required for rolling fleet
+   transitions after the first release.
 3. Wait for the draft release to appear. The live `catalog` prerelease is not
    touched by the unsigned workflow.
 4. Generate the offline key once, on an air-gapped or owner-only machine, and
@@ -187,7 +189,9 @@ For every release after the first, pass the verified live catalog with
 `--previous-catalog ./punaro-catalog.json`. The assembler retains its eligible
 rollback entries and safety floor; releases leave the replacement only through
 an explicit higher `--minimum-safe-sequence` or repeatable `--critical-block
-SEQUENCE`. The GitHub
+SEQUENCE`. Declare every direct rolling-upgrade source with repeatable
+`--supported-from RELEASE`; the workflow accepts the same set through its
+comma-separated `supported_from` input. The GitHub
 workflow downloads the live catalog and supplies this argument automatically,
 while the offline publisher verifies the signed replacement against the
 independently verified live pair before mutation.

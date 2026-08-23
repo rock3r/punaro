@@ -25,6 +25,11 @@ on:
         required: false
         default: ''
         type: string
+      supported_from:
+        description: Optional comma-separated older releases supported as direct upgrade sources
+        required: false
+        default: ''
+        type: string
 
 concurrency:
   group: punaro-github-release
@@ -156,6 +161,7 @@ jobs:
           INPUT_CATALOG_SEQUENCE: ${{ inputs.catalog_sequence }}
           INPUT_MINIMUM_SAFE_SEQUENCE: ${{ inputs.minimum_safe_sequence }}
           INPUT_CRITICAL_BLOCKS: ${{ inputs.critical_blocks }}
+          INPUT_SUPPORTED_FROM: ${{ inputs.supported_from }}
           GH_TOKEN: ${{ github.token }}
         run: |
           set -eu
@@ -203,12 +209,31 @@ jobs:
               fi
             done
           fi
+          supported_from=$INPUT_SUPPORTED_FROM
+          if [ -n "$supported_from" ]; then
+            IFS=, read -r -a sources <<<"$supported_from"
+            if [ "${#sources[@]}" -gt 32 ]; then
+              printf '%s\n' 'at most 32 supported upgrade sources are allowed' >&2
+              exit 2
+            fi
+            for source in "${sources[@]}"; do
+              case "$source" in
+                v[0-9]*.[0-9]*.[0-9]*) ;;
+                *) printf '%s\n' 'supported upgrade sources must be comma-separated release names' >&2; exit 2 ;;
+              esac
+              if [ "$source" = "$release" ]; then
+                printf '%s\n' 'the target release cannot be its own upgrade source' >&2
+                exit 2
+              fi
+            done
+          fi
           {
             printf 'release=%s\n' "$release"
             printf 'sequence=%s\n' "$sequence"
             printf 'catalog_sequence=%s\n' "$catalog_sequence"
             printf 'minimum_safe_sequence=%s\n' "$minimum_safe_sequence"
             printf 'critical_blocks=%s\n' "$critical_blocks"
+            printf 'supported_from=%s\n' "$supported_from"
           } >>"$GITHUB_OUTPUT"
       - name: Assemble unsigned catalog and manifest
         env:
@@ -217,6 +242,7 @@ jobs:
           CATALOG_SEQUENCE: ${{ steps.identity.outputs.catalog_sequence }}
           MINIMUM_SAFE_SEQUENCE: ${{ steps.identity.outputs.minimum_safe_sequence }}
           CRITICAL_BLOCKS: ${{ steps.identity.outputs.critical_blocks }}
+          SUPPORTED_FROM: ${{ steps.identity.outputs.supported_from }}
           GH_TOKEN: ${{ github.token }}
         run: |
           set -eu
@@ -229,6 +255,12 @@ jobs:
             IFS=, read -r -a blocks <<<"$CRITICAL_BLOCKS"
             for block in "${blocks[@]}"; do
               policy_args+=(--critical-block "$block")
+            done
+          fi
+          if [ -n "$SUPPORTED_FROM" ]; then
+            IFS=, read -r -a sources <<<"$SUPPORTED_FROM"
+            for source in "${sources[@]}"; do
+              policy_args+=(--supported-from "$source")
             done
           fi
           if catalog_state=$(gh release view catalog --json isDraft 2>/dev/null) &&

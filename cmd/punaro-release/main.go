@@ -25,7 +25,10 @@ import (
 
 var publicationNow = func() time.Time { return time.Now().UTC() }
 
-const maximumReleaseCriticalBlocks = 32
+const (
+	maximumReleaseCriticalBlocks = 32
+	maximumReleaseSupportedFrom  = 32
+)
 
 func main() {
 	if err := run(os.Args[1:]); err != nil {
@@ -103,6 +106,14 @@ func runAssemble(args []string) error {
 	minSafe := flags.Int64("minimum-safe-sequence", 0, "lowest sequence still safe for automatic updates")
 	minBootstrap := flags.String("minimum-bootstrap-release", "", "oldest bootstrap that may install this release")
 	previousCatalogFile := flags.String("previous-catalog", "", "verified live catalog whose eligible releases must be retained")
+	supportedFrom := []string{}
+	flags.Func("supported-from", "older release supported as a direct upgrade source; repeat at most 32 times", func(value string) error {
+		if len(supportedFrom) >= maximumReleaseSupportedFrom {
+			return errors.New("too many supported upgrade sources")
+		}
+		supportedFrom = append(supportedFrom, value)
+		return nil
+	})
 	criticalBlocks := []int64{}
 	flags.Func("critical-block", "release sequence to block; repeat at most 32 times", func(value string) error {
 		if len(criticalBlocks) >= maximumReleaseCriticalBlocks {
@@ -167,6 +178,7 @@ func runAssemble(args []string) error {
 		MinimumRecoveryProtocol: 1,
 		MinimumBootstrapRelease: bootstrapRelease,
 		PreviousCatalog:         previousCatalog,
+		SupportedFrom:           supportedFrom,
 		CriticalBlocks:          criticalBlocks,
 	})
 	return err

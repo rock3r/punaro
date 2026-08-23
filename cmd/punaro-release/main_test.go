@@ -31,6 +31,7 @@ func TestReleaseToolAssemblesSignsAndVerifiesExactBytes(t *testing.T) {
 		"--published-at", "2026-08-16T12:00:00Z",
 		"--expires-at", "2026-08-23T12:00:00Z",
 		"--minimum-bootstrap-release", "v0.1.0",
+		"--supported-from", "v0.0.9",
 		"--critical-block", "9",
 	}); err != nil {
 		t.Fatal(err)
@@ -71,6 +72,9 @@ func TestReleaseToolAssemblesSignsAndVerifiesExactBytes(t *testing.T) {
 	if parsed.MinimumBootstrapRelease != "v0.1.0" {
 		t.Fatalf("minimum bootstrap=%q", parsed.MinimumBootstrapRelease)
 	}
+	if len(parsed.SupportedFrom) != 1 || parsed.SupportedFrom[0] != "v0.0.9" {
+		t.Fatalf("supported from=%v", parsed.SupportedFrom)
+	}
 	if parsed.ComposeSHA256 != operator.ComposeManifestSHA256() {
 		t.Fatalf("compose digest=%q want generated artifact %q", parsed.ComposeSHA256, operator.ComposeManifestSHA256())
 	}
@@ -98,6 +102,16 @@ func TestReleaseToolBoundsCriticalBlockInputs(t *testing.T) {
 	}
 	if err := run(args); err == nil {
 		t.Fatal("release assembly accepted too many critical blocks")
+	}
+}
+
+func TestReleaseToolBoundsSupportedFromInputs(t *testing.T) {
+	args := []string{"assemble"}
+	for sequence := 1; sequence <= maximumReleaseSupportedFrom+1; sequence++ {
+		args = append(args, "--supported-from", "v0.1.0")
+	}
+	if err := run(args); err == nil {
+		t.Fatal("release assembly accepted too many supported upgrade sources")
 	}
 }
 
