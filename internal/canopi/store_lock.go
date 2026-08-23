@@ -63,14 +63,22 @@ func openStateLockFile(path string) (*os.File, error) {
 			return nil, err
 		}
 		if !privateStateFile(path, before) {
-			removed, err := removeStateLockIfSame(path, before)
+			err := withStateRepairLock(path, func() error {
+				current, err := os.Lstat(path)
+				if errors.Is(err, os.ErrNotExist) {
+					return nil
+				}
+				if err != nil || privateStateFile(path, current) {
+					return err
+				}
+				removed, err := removeStateLockIfSame(path, current)
+				if err != nil || !removed {
+					return err
+				}
+				return syncStateDirectory(filepath.Dir(path))
+			})
 			if err != nil {
 				return nil, err
-			}
-			if removed {
-				if err := syncStateDirectory(filepath.Dir(path)); err != nil {
-					return nil, err
-				}
 			}
 			continue
 		}

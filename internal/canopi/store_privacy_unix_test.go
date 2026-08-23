@@ -7,7 +7,48 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+	"time"
 )
+
+func TestStateRepairLockSerializesConcurrentRepair(t *testing.T) {
+	path := filepath.Join(t.TempDir(), ".canopi-lock-test")
+	firstEntered := make(chan struct{})
+	releaseFirst := make(chan struct{})
+	firstDone := make(chan error, 1)
+	go func() {
+		firstDone <- withStateRepairLock(path, func() error {
+			close(firstEntered)
+			<-releaseFirst
+			return nil
+		})
+	}()
+	<-firstEntered
+	secondEntered := make(chan struct{})
+	secondDone := make(chan error, 1)
+	go func() {
+		secondDone <- withStateRepairLock(path, func() error {
+			close(secondEntered)
+			return nil
+		})
+	}()
+	select {
+	case <-secondEntered:
+		t.Fatal("second state-lock repair entered while the first held the directory repair lock")
+	case <-time.After(50 * time.Millisecond):
+	}
+	close(releaseFirst)
+	if err := <-firstDone; err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case <-secondEntered:
+	case <-time.After(time.Second):
+		t.Fatal("second state-lock repair did not enter after the first released")
+	}
+	if err := <-secondDone; err != nil {
+		t.Fatal(err)
+	}
+}
 
 const emptyPersistedState = `{"revision":0,"records":[],"seen_event_ids":[]}`
 

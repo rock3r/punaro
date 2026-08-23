@@ -35,6 +35,46 @@ func TestSpoolDirectoryMustBelongToCurrentUser(t *testing.T) {
 	}
 }
 
+func TestSpoolRepairLockSerializesConcurrentRepair(t *testing.T) {
+	path := filepath.Join(t.TempDir(), ".enqueue.lock")
+	firstEntered := make(chan struct{})
+	releaseFirst := make(chan struct{})
+	firstDone := make(chan error, 1)
+	go func() {
+		firstDone <- withSpoolRepairLock(path, func() error {
+			close(firstEntered)
+			<-releaseFirst
+			return nil
+		})
+	}()
+	<-firstEntered
+	secondEntered := make(chan struct{})
+	secondDone := make(chan error, 1)
+	go func() {
+		secondDone <- withSpoolRepairLock(path, func() error {
+			close(secondEntered)
+			return nil
+		})
+	}()
+	select {
+	case <-secondEntered:
+		t.Fatal("second spool-lock repair entered while the first held the directory repair lock")
+	case <-time.After(50 * time.Millisecond):
+	}
+	close(releaseFirst)
+	if err := <-firstDone; err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case <-secondEntered:
+	case <-time.After(time.Second):
+		t.Fatal("second spool-lock repair did not enter after the first released")
+	}
+	if err := <-secondDone; err != nil {
+		t.Fatal(err)
+	}
+}
+
 func TestSpoolLocksRejectPreexistingSymlinks(t *testing.T) {
 	for _, name := range []string{".enqueue.lock", ".drain.lock", ".supervisor.lock"} {
 		t.Run(name, func(t *testing.T) {

@@ -1797,6 +1797,8 @@ directory, existing state, and replacement temporary. Windows replacement
 hard-links the old target as a recovery copy, flushes that directory entry,
 publishes with `MoveFileEx` replacement plus write-through semantics, flushes
 the directory again, and restores the backup at startup if the target is absent.
+Each replacement also recovers or clears a leftover backup before creating the
+next one, preventing a failed flush or cleanup from wedging later writes.
 A kernel-held lifetime lock keyed by the state path excludes overlapping
 collector writers and is released by orderly close or process exit. Windows
 derives that lock key from the final path of an open state or parent-directory
@@ -1805,12 +1807,13 @@ Unix resolves the existing state path or its parent before deriving the key,
 collapsing aliases introduced by symlinks in ancestor directories.
 The fixed lock file uses exclusive creation and no-follow opening on both
 platforms; unsafe pre-existing entries are removed, directory-synced, and
-recreated with current-user-only protection. Repair rechecks that the path still
-names the inspected inode immediately before unlinking it; a changed path is
-retried without disturbing another collector's replacement lock.
+recreated with current-user-only protection. Repair is serialized cross-process
+with the parent-directory kernel lock on Unix and a case-normalized named kernel
+mutex on Windows before rechecking and unlinking the unsafe entry.
 Signal shutdown waits for the HTTP server to drain active handlers before closing
 the store and releasing this lifetime lock, so a rolling replacement cannot load
-or write state while an old ingestion is still persisting.
+or write state while an old ingestion is still persisting. This drain is
+deliberately unbounded rather than releasing the writer lock after a timeout.
 Snapshot and image ETags change only with state revision or rendered response
 content. Snapshot responses use a weak revision validator because their
 generation timestamp changes without a semantic state change; rendered PNGs

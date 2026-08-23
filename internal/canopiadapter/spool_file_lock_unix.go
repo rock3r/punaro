@@ -6,9 +6,24 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"path/filepath"
 
 	"golang.org/x/sys/unix"
 )
+
+func withSpoolRepairLock(path string, repair func() error) error {
+	descriptor, err := unix.Open(filepath.Dir(path), unix.O_RDONLY|unix.O_DIRECTORY|unix.O_CLOEXEC, 0) // #nosec G304 -- parent is the validated private spool directory.
+	if err != nil {
+		return err
+	}
+	directory := os.NewFile(uintptr(descriptor), filepath.Dir(path)) // #nosec G115 -- successful descriptors are nonnegative.
+	defer func() { _ = directory.Close() }()
+	if err := unix.Flock(descriptor, unix.LOCK_EX); err != nil {
+		return err
+	}
+	defer func() { _ = unix.Flock(descriptor, unix.LOCK_UN) }()
+	return repair()
+}
 
 func tryLockSpoolFile(file *os.File) (bool, error) {
 	fd, err := spoolFileDescriptor(file)

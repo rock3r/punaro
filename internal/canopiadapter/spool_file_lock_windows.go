@@ -3,11 +3,40 @@
 package canopiadapter
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"errors"
 	"os"
+	"path/filepath"
+	"runtime"
+	"strings"
 
 	"golang.org/x/sys/windows"
 )
+
+func withSpoolRepairLock(path string, repair func() error) error {
+	runtime.LockOSThread()
+	defer runtime.UnlockOSThread()
+	digest := sha256.Sum256([]byte(strings.ToLower(filepath.Clean(path))))
+	name, err := windows.UTF16PtrFromString("Local\\CanopiSpoolRepair-" + hex.EncodeToString(digest[:]))
+	if err != nil {
+		return err
+	}
+	mutex, err := windows.CreateMutex(nil, false, name)
+	if err != nil && !errors.Is(err, windows.ERROR_ALREADY_EXISTS) {
+		return err
+	}
+	defer func() { _ = windows.CloseHandle(mutex) }()
+	wait, err := windows.WaitForSingleObject(mutex, windows.INFINITE)
+	if err != nil || (wait != windows.WAIT_OBJECT_0 && wait != windows.WAIT_ABANDONED) {
+		if err != nil {
+			return err
+		}
+		return os.ErrInvalid
+	}
+	defer func() { _ = windows.ReleaseMutex(mutex) }()
+	return repair()
+}
 
 func tryLockSpoolFile(file *os.File) (bool, error) {
 	var overlapped windows.Overlapped

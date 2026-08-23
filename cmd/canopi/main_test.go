@@ -40,6 +40,31 @@ func TestServeUntilShutdownWaitsForActiveHandlers(t *testing.T) {
 	}
 }
 
+func TestServeUntilShutdownDoesNotDeadlineActiveHandlers(t *testing.T) {
+	shutdownContext := make(chan context.Context, 1)
+	shutdownStarted := make(chan struct{})
+	signals := make(chan os.Signal, 1)
+	done := make(chan error, 1)
+	go func() {
+		done <- serveUntilShutdown(func() error {
+			<-shutdownStarted
+			return http.ErrServerClosed
+		}, signals, func(ctx context.Context) error {
+			shutdownContext <- ctx
+			close(shutdownStarted)
+			return nil
+		})
+	}()
+	signals <- os.Interrupt
+	ctx := <-shutdownContext
+	if _, hasDeadline := ctx.Deadline(); hasDeadline {
+		t.Fatal("shutdown context has a deadline that can release the store lock before handlers exit")
+	}
+	if err := <-done; !errors.Is(err, http.ErrServerClosed) {
+		t.Fatalf("serveUntilShutdown() = %v, want ErrServerClosed", err)
+	}
+}
+
 func TestParseConfigRequiresExplicitLANBinding(t *testing.T) {
 	directory := t.TempDir()
 	common := []string{"--token-file", filepath.Join(directory, "token"), "--state-file", filepath.Join(directory, "state.json")}

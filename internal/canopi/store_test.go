@@ -334,6 +334,11 @@ func TestWindowsStateReplacementContractUsesWriteThroughRecovery(t *testing.T) {
 			t.Fatalf("Windows state replacement is missing %q", required)
 		}
 	}
+	recoverIndex := strings.Index(source, "if err := recoverStateReplacement(target)")
+	linkIndex := strings.Index(source, "os.Link(target, backup)")
+	if recoverIndex < 0 || linkIndex < 0 || recoverIndex > linkIndex {
+		t.Fatal("Windows state replacement does not recover a leftover backup before creating the next one")
+	}
 }
 
 func TestWindowsStateLockIdentityContractIsCaseInsensitive(t *testing.T) {
@@ -355,7 +360,7 @@ func TestWindowsStateLockUsesExclusiveNoReparseOpens(t *testing.T) {
 		t.Fatal(err)
 	}
 	source := string(payload)
-	for _, required := range []string{"CREATE_NEW", "OPEN_EXISTING", "FILE_FLAG_OPEN_REPARSE_POINT", "FILE_ATTRIBUTE_REPARSE_POINT"} {
+	for _, required := range []string{"CREATE_NEW", "OPEN_EXISTING", "FILE_FLAG_OPEN_REPARSE_POINT", "FILE_ATTRIBUTE_REPARSE_POINT", "CreateMutex", "WaitForSingleObject", "LockOSThread", "strings.ToLower"} {
 		if !strings.Contains(source, required) {
 			t.Fatalf("Windows state lock open is missing %q", required)
 		}

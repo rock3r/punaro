@@ -38,6 +38,11 @@ func recoverStateReplacement(path string) error {
 }
 
 func replaceStateFile(temporary, target string) error {
+	// A prior post-publication cleanup or directory-flush failure can leave the
+	// fixed backup name behind while this process keeps serving writes.
+	if err := recoverStateReplacement(target); err != nil {
+		return err
+	}
 	backup := stateReplacementBackup(target)
 	flags := uint32(windows.MOVEFILE_WRITE_THROUGH)
 	if _, err := os.Lstat(target); err == nil {

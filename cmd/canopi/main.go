@@ -130,9 +130,9 @@ func serveUntilShutdown(serve func() error, shutdownSignals <-chan os.Signal, sh
 		defer close(shutdownDone)
 		select {
 		case <-shutdownSignals:
-			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-			defer cancel()
-			_ = shutdown(ctx)
+			// State correctness takes precedence over a bounded process exit:
+			// retain the lifetime writer lock until every handler has drained.
+			_ = shutdown(context.Background())
 		case <-stop:
 		}
 	}()
