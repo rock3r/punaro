@@ -1819,11 +1819,12 @@ spools must be current-user-owned and receive a protected DACL containing only
 the current user's full-access ACE. One
 cross-process worker retries queued events with their original IDs until
 acknowledged, while continuing past a rejected event so independent later
-updates are not starved. Per-attempt network timeouts and recoverable stale
-worker locks keep provider hooks isolated from collector outages. An active
-enqueue lock is heartbeated so slow durable writes cannot be reclaimed as
-stale. Under that lock, every enqueue removes crash-left temporary event files
-before admitting new work. The same protected-token checks apply on the adapter
+updates are not starved. Per-attempt network timeouts and kernel-released file
+locks keep provider hooks isolated from collector outages. Enqueue, drain, and
+supervisor ownership is bound to each process's open handle, so process exit
+releases it and neither stale timestamps nor wall-clock jumps can fence out a
+live holder. Under the enqueue lock, every enqueue removes crash-left temporary
+event files before admitting new work. The same protected-token checks apply on the adapter
 host. A persistent
 `supervise` mode runs under the host service manager, holds a singleton lease,
 polls even while the spool is empty, and provides a durable wake/restart path

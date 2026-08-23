@@ -22,11 +22,7 @@ const (
 	maxSpoolEventBytes    = 64 << 10
 	spoolLockAttempts     = 10
 	spoolLockDelay        = 5 * time.Millisecond
-	enqueueLockStaleAfter = 2 * time.Second
-	enqueueLockHeartbeat  = 250 * time.Millisecond
-	drainLockStaleAfter   = 2 * time.Minute
 	supervisorPoll        = 250 * time.Millisecond
-	supervisorHeartbeat   = 30 * time.Second
 )
 
 // ErrSpoolFull reports that the bounded durable adapter queue is full.
@@ -134,15 +130,14 @@ func (s Spool) Drain(ctx context.Context, deliver func(context.Context, protocol
 		return err
 	}
 	for {
-		lockPath := filepath.Join(config.Directory, ".drain.lock")
-		release, acquired, err := tryAcquireDrainLock(lockPath)
+		release, acquired, err := tryAcquireDrainLock(filepath.Join(config.Directory, ".drain.lock"))
 		if err != nil {
 			return err
 		}
 		if !acquired {
 			return nil
 		}
-		err = config.drainLocked(ctx, deliver, func() { _ = touchLock(lockPath) })
+		err = config.drainLocked(ctx, deliver)
 		release()
 		if err != nil {
 			return err
@@ -168,28 +163,12 @@ func (s Spool) Serve(ctx context.Context, deliver func(context.Context, protocol
 	if err := config.ensureDirectory(); err != nil {
 		return err
 	}
-	lockPath := filepath.Join(config.Directory, ".supervisor.lock")
-	release, acquired, err := tryAcquireSupervisorLock(lockPath)
+	release, acquired, err := tryAcquireSupervisorLock(filepath.Join(config.Directory, ".supervisor.lock"))
 	if err != nil || !acquired {
 		return err
 	}
 	defer release()
-	heartbeatDone := make(chan struct{})
-	defer close(heartbeatDone)
-	go func() {
-		ticker := time.NewTicker(supervisorHeartbeat)
-		defer ticker.Stop()
-		for {
-			select {
-			case <-heartbeatDone:
-				return
-			case <-ticker.C:
-				_ = touchLock(lockPath)
-			}
-		}
-	}()
 	for {
-		_ = touchLock(lockPath)
 		if err := config.Drain(ctx, deliver); err != nil {
 			return err
 		}
@@ -303,7 +282,7 @@ func (s Spool) eventFiles() ([]string, error) {
 	return files, nil
 }
 
-func (s Spool) drainLocked(ctx context.Context, deliver func(context.Context, protocol.Event) error, heartbeat func()) error {
+func (s Spool) drainLocked(ctx context.Context, deliver func(context.Context, protocol.Event) error) error {
 	backoff := s.RetryMin
 	for {
 		files, err := s.eventFiles()
@@ -324,7 +303,6 @@ func (s Spool) drainLocked(ctx context.Context, deliver func(context.Context, pr
 				_ = os.Remove(path)
 				continue
 			}
-			heartbeat()
 			attemptCtx, cancel := context.WithTimeout(ctx, time.Second)
 			err = deliver(attemptCtx, event)
 			cancel()
@@ -360,96 +338,64 @@ func (s Spool) drainLocked(ctx context.Context, deliver func(context.Context, pr
 }
 
 func acquireSpoolLock(path string) (func(), error) {
+	file, err := openSpoolLockFile(path)
+	if err != nil {
+		return nil, err
+	}
 	for range spoolLockAttempts {
-		file, err := os.OpenFile(path, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o600) // #nosec G304 -- path is inside the configured private spool.
-		if err == nil {
-			if err := file.Close(); err != nil {
-				_ = os.Remove(path)
-				return nil, err
-			}
-			done := make(chan struct{})
-			stopped := make(chan struct{})
-			go func() {
-				defer close(stopped)
-				ticker := time.NewTicker(enqueueLockHeartbeat)
-				defer ticker.Stop()
-				for {
-					select {
-					case <-done:
-						return
-					case <-ticker.C:
-						_ = touchLock(path)
-					}
-				}
-			}()
-			var once sync.Once
-			return func() {
-				once.Do(func() {
-					close(done)
-					<-stopped
-					_ = os.Remove(path)
-				})
-			}, nil
+		acquired, lockErr := tryLockSpoolFile(file)
+		if lockErr != nil {
+			_ = file.Close()
+			return nil, lockErr
 		}
-		if !errors.Is(err, os.ErrExist) {
-			return nil, err
-		}
-		if _, removedErr := removeStaleLock(path, enqueueLockStaleAfter); removedErr != nil {
-			return nil, removedErr
+		if acquired {
+			return spoolLockRelease(file), nil
 		}
 		time.Sleep(spoolLockDelay)
 	}
+	_ = file.Close()
 	return nil, errors.New("canopi spool is busy")
 }
 
 func tryAcquireDrainLock(path string) (func(), bool, error) {
-	return tryAcquireRecoverableLock(path, drainLockStaleAfter)
+	return tryAcquireRecoverableLock(path)
 }
 
 func tryAcquireSupervisorLock(path string) (func(), bool, error) {
-	return tryAcquireRecoverableLock(path, drainLockStaleAfter)
+	return tryAcquireRecoverableLock(path)
 }
 
-func tryAcquireRecoverableLock(path string, staleAfter time.Duration) (func(), bool, error) {
-	file, err := os.OpenFile(path, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o600) // #nosec G304 -- path is inside the configured private spool.
-	if errors.Is(err, os.ErrExist) {
-		removed, removeErr := removeStaleLock(path, staleAfter)
-		if removeErr != nil {
-			return nil, false, removeErr
-		}
-		if removed {
-			return tryAcquireRecoverableLock(path, staleAfter)
-		}
-		return func() {}, false, nil
-	}
+func tryAcquireRecoverableLock(path string) (func(), bool, error) {
+	file, err := openSpoolLockFile(path)
 	if err != nil {
 		return nil, false, err
 	}
-	if err := file.Close(); err != nil {
-		_ = os.Remove(path)
-		return nil, false, err
+	acquired, err := tryLockSpoolFile(file)
+	if err != nil || !acquired {
+		_ = file.Close()
+		return func() {}, false, err
 	}
-	return func() { _ = os.Remove(path) }, true, nil
+	return spoolLockRelease(file), true, nil
 }
 
-func removeStaleLock(path string, maxAge time.Duration) (bool, error) {
-	info, err := os.Lstat(path)
-	if errors.Is(err, os.ErrNotExist) {
-		return false, nil
-	}
+func openSpoolLockFile(path string) (*os.File, error) {
+	file, err := os.OpenFile(path, os.O_CREATE|os.O_RDWR, 0o600) // #nosec G304 -- path is inside the configured private spool.
 	if err != nil {
-		return false, err
+		return nil, err
 	}
-	if time.Since(info.ModTime()) <= maxAge {
-		return false, nil
+	if err := file.Chmod(0o600); err != nil {
+		_ = file.Close()
+		return nil, err
 	}
-	if err := os.Remove(path); err != nil && !errors.Is(err, os.ErrNotExist) {
-		return false, err
-	}
-	return true, nil
+	return file, nil
 }
 
-func touchLock(path string) error {
-	now := time.Now()
-	return os.Chtimes(path, now, now)
+func spoolLockRelease(file *os.File) func() {
+	var once sync.Once
+	return func() {
+		once.Do(func() {
+			_ = unlockSpoolFile(file)
+			_ = file.Close()
+		})
+	}
 }

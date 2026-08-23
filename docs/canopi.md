@@ -220,7 +220,9 @@ normalized events are owner-only. A collector outage never causes the hook-facin
 to wait for network recovery. The adapter applies the same current-user,
 owner-only, regular-file, no-symlink token checks as the collector. Each
 serialized enqueue reclaims crash-left `.event-*.tmp` files while holding the
-cross-process enqueue lock, keeping temporary storage bounded across restarts.
+cross-process kernel lock, keeping temporary storage bounded across restarts.
+Enqueue, drain, and supervisor locks are tied to open file handles; the kernel
+releases them on process exit, and wall-clock jumps cannot reclaim a live holder.
 
 Run the durable worker as a continuously supervised companion using the same
 environment (for example with `Restart=always`/`KeepAlive` in the host service
