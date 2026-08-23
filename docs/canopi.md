@@ -148,6 +148,8 @@ state path rejects overlapping collector writers and is released by `Close` or
 process exit. Windows canonicalizes case aliases before deriving the lock path.
 It resolves the existing state file or its parent by handle, collapsing extended
 device paths, short names, case variants, and directory aliases to one identity.
+Unix resolves the existing state path or its parent before hashing, so paths
+whose ancestors traverse symlinks cannot acquire separate writer locks.
 
 In another terminal, generate the selected 3 waiting / 4 done / 12 working
 overflow state:
@@ -234,6 +236,11 @@ Enqueue, drain, and supervisor locks are tied to open file handles; the kernel
 releases them on process exit, and wall-clock jumps cannot reclaim a live holder.
 Queued files are inspected and decoded through the 64 KiB stream limit, so a
 corrupt oversized spool entry is removed without an unbounded allocation.
+Every queued child is also opened without following links and must remain a
+private current-user-owned regular file across the open; entries planted before
+the spool directory was tightened are discarded before capacity accounting or
+delivery rather than authenticated to the collector. Newly enqueued files receive
+the same protection before publication.
 
 Run the durable worker as a continuously supervised companion using the same
 environment (for example with `Restart=always`/`KeepAlive` in the host service

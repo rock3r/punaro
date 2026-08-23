@@ -2,6 +2,7 @@ package canopiadapter
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"os"
 	"path/filepath"
@@ -169,6 +170,43 @@ func TestSpoolQueuedEventReadsAreBoundedBeforeAllocation(t *testing.T) {
 	}
 	if _, err := os.Lstat(path); !errors.Is(err, os.ErrNotExist) {
 		t.Fatalf("oversized queued event was not removed: %v", err)
+	}
+}
+
+func TestSpoolRejectsUnprotectedPreexistingEvent(t *testing.T) {
+	directory := t.TempDir()
+	payload, err := json.Marshal(spoolEvent("foreign-event"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(directory, "foreign.json")
+	// #nosec G306 -- deliberately shared permissions model an entry planted before startup.
+	if err := os.WriteFile(path, payload, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(path, 0o644); err != nil { // #nosec G302 -- deliberately unsafe test fixture.
+		t.Fatal(err)
+	}
+	delivered := false
+	spool := Spool{Directory: directory, MaxEvents: 1}
+	legitimate := spoolEvent("legitimate-event")
+	if err := spool.Enqueue(legitimate); err != nil {
+		t.Fatalf("Enqueue() behind planted entry = %v", err)
+	}
+	if err := spool.Drain(context.Background(), func(_ context.Context, event protocol.Event) error {
+		if event.EventID != legitimate.EventID {
+			t.Fatalf("delivered planted event %q", event.EventID)
+		}
+		delivered = true
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if !delivered {
+		t.Fatal("legitimate event behind planted entry was not delivered")
+	}
+	if _, err := os.Lstat(path); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("unprotected pre-existing spool event was not removed: %v", err)
 	}
 }
 

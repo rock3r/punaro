@@ -1801,6 +1801,8 @@ A kernel-held lifetime lock keyed by the state path excludes overlapping
 collector writers and is released by orderly close or process exit. Windows
 derives that lock key from the final path of an open state or parent-directory
 handle, collapsing case, extended-device, short-name, and directory aliases.
+Unix resolves the existing state path or its parent before deriving the key,
+collapsing aliases introduced by symlinks in ancestor directories.
 Snapshot and image ETags change only with state revision or rendered response
 content. Snapshot responses use a weak revision validator because their
 generation timestamp changes without a semantic state change; rendered PNGs
@@ -1841,6 +1843,10 @@ by a directory `FlushFileBuffers`, matching the Unix directory-sync durability
 contract before the provider hook is told enqueueing succeeded.
 Queued event reads stat the opened file and remain stream-limited to 64 KiB, so
 corrupt oversized entries cannot turn the event-count bound into unbounded memory.
+Each queued child must also be a stable, no-follow, private current-user-owned
+regular file. Event enumeration discards pre-existing foreign or shared children
+after the parent is tightened and before capacity accounting or delivery; enqueue
+protects new files before publication.
 
 Structurally valid event batches continue across per-event admission failures
 and return ordered per-event status records with HTTP 207 when mixed; only a

@@ -3,6 +3,7 @@
 package canopi
 
 import (
+	"errors"
 	"os"
 	"path/filepath"
 	"testing"
@@ -47,5 +48,30 @@ func TestOpenStoreRejectsUnprotectedAndLinkedStateFiles(t *testing.T) {
 func TestOpenStoreRequiresAbsoluteCleanStatePath(t *testing.T) {
 	if _, err := OpenStore("relative-state.json", DefaultConfig()); err == nil {
 		t.Fatal("OpenStore() accepted a relative state path")
+	}
+}
+
+func TestOpenStoreExcludesWriterThroughSymlinkedParentAlias(t *testing.T) {
+	root := t.TempDir()
+	realDirectory := filepath.Join(root, "real")
+	if err := os.Mkdir(realDirectory, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	stateDirectory := filepath.Join(realDirectory, "state")
+	if err := os.Mkdir(stateDirectory, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	aliasDirectory := filepath.Join(root, "alias")
+	if err := os.Symlink(realDirectory, aliasDirectory); err != nil {
+		t.Fatal(err)
+	}
+	first, err := OpenStore(filepath.Join(stateDirectory, "state.json"), DefaultConfig())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = first.Close() }()
+	second, err := OpenStore(filepath.Join(aliasDirectory, "state", "state.json"), DefaultConfig())
+	if !errors.Is(err, ErrStateStoreLocked) || second != nil {
+		t.Fatalf("OpenStore() through parent alias = %#v, %v; want ErrStateStoreLocked", second, err)
 	}
 }

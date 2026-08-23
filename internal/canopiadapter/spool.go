@@ -1,6 +1,7 @@
 package canopiadapter
 
 import (
+	"bytes"
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
@@ -82,7 +83,7 @@ func (s Spool) Enqueue(event protocol.Event) error {
 	}
 	temporaryName := temporary.Name()
 	defer func() { _ = os.Remove(temporaryName) }()
-	if err := temporary.Chmod(0o600); err != nil {
+	if err := protectSpoolFile(temporaryName, temporary); err != nil {
 		_ = temporary.Close()
 		return err
 	}
@@ -273,9 +274,31 @@ func (s Spool) eventFiles() ([]string, error) {
 		return nil, err
 	}
 	files := make([]string, 0, len(entries))
+	removed := false
 	for _, entry := range entries {
-		if entry.Type().IsRegular() && strings.HasSuffix(entry.Name(), ".json") {
-			files = append(files, filepath.Join(s.Directory, entry.Name()))
+		if !entry.Type().IsRegular() || !strings.HasSuffix(entry.Name(), ".json") {
+			continue
+		}
+		path := filepath.Join(s.Directory, entry.Name())
+		info, err := os.Lstat(path)
+		if errors.Is(err, os.ErrNotExist) {
+			continue
+		}
+		if err != nil {
+			return nil, err
+		}
+		if !privateSpoolFile(path, info) {
+			if err := os.Remove(path); err != nil && !errors.Is(err, os.ErrNotExist) {
+				return nil, err
+			}
+			removed = true
+			continue
+		}
+		files = append(files, path)
+	}
+	if removed {
+		if err := syncDirectory(s.Directory); err != nil {
+			return nil, err
 		}
 	}
 	sort.Strings(files)
@@ -294,28 +317,18 @@ func (s Spool) drainLocked(ctx context.Context, deliver func(context.Context, pr
 		}
 		hadFailure := false
 		for _, path := range files {
-			file, err := os.Open(path) // #nosec G304 -- eventFiles returns entries from the configured private spool.
+			payload, err := readPrivateSpoolFile(path, maxSpoolEventBytes)
 			if err != nil {
-				return err
-			}
-			info, err := file.Stat()
-			if err != nil {
-				_ = file.Close()
-				return err
-			}
-			if !info.Mode().IsRegular() || info.Size() > maxSpoolEventBytes {
-				_ = file.Close()
-				_ = os.Remove(path)
+				if removeErr := s.removeQueuedSpoolFile(path); removeErr != nil {
+					return removeErr
+				}
 				continue
 			}
-			event, decodeErr := protocol.DecodeEvent(io.LimitReader(file, maxSpoolEventBytes+1), maxSpoolEventBytes)
-			closeErr := file.Close()
-			if closeErr != nil {
-				return closeErr
-			}
-			err = decodeErr
+			event, err := protocol.DecodeEvent(bytes.NewReader(payload), maxSpoolEventBytes)
 			if err != nil {
-				_ = os.Remove(path)
+				if removeErr := s.removeQueuedSpoolFile(path); removeErr != nil {
+					return removeErr
+				}
 				continue
 			}
 			attemptCtx, cancel := context.WithTimeout(ctx, time.Second)
@@ -350,6 +363,37 @@ func (s Spool) drainLocked(ctx context.Context, deliver func(context.Context, pr
 			backoff = s.RetryMax
 		}
 	}
+}
+
+func readPrivateSpoolFile(path string, maxBytes int64) ([]byte, error) {
+	before, err := os.Lstat(path)
+	if err != nil || !privateSpoolFile(path, before) {
+		return nil, errors.New("queued Canopi event must be a private current-user-owned regular file")
+	}
+	file, err := openSpoolEventFile(path)
+	if err != nil {
+		return nil, errors.New("queued Canopi event must be a private current-user-owned regular file")
+	}
+	defer func() { _ = file.Close() }()
+	after, err := file.Stat()
+	if err != nil || !os.SameFile(before, after) || !privateSpoolFile(path, after) {
+		return nil, errors.New("queued Canopi event changed while opening")
+	}
+	if after.Size() > maxBytes {
+		return nil, errors.New("queued Canopi event exceeds size limit")
+	}
+	payload, err := io.ReadAll(io.LimitReader(file, maxBytes+1))
+	if err != nil || int64(len(payload)) > maxBytes {
+		return nil, errors.New("invalid queued Canopi event")
+	}
+	return payload, nil
+}
+
+func (s Spool) removeQueuedSpoolFile(path string) error {
+	if err := os.Remove(path); err != nil && !errors.Is(err, os.ErrNotExist) {
+		return err
+	}
+	return syncDirectory(s.Directory)
 }
 
 func acquireSpoolLock(path string) (func(), error) {
