@@ -179,6 +179,18 @@ func TestPublicationCatalogMustRetainEligibleLiveReleases(t *testing.T) {
 	}
 }
 
+func TestPublicationCatalogAllowsRetiredCriticalBlocks(t *testing.T) {
+	now := time.Date(2026, 8, 23, 16, 0, 0, 0, time.UTC)
+	first := punarorelease.CatalogRelease{Release: "v0.1.0-alpha.1", Sequence: 1, ManifestPath: "v0.1.0-alpha.1/punaro-release.json", ManifestLength: 100, ManifestSHA256: strings.Repeat("a", 64)}
+	second := punarorelease.CatalogRelease{Release: "v0.1.0-alpha.2", Sequence: 2, ManifestPath: "v0.1.0-alpha.2/punaro-release.json", ManifestLength: 100, ManifestSHA256: strings.Repeat("b", 64)}
+	third := punarorelease.CatalogRelease{Release: "v0.1.0-alpha.3", Sequence: 3, ManifestPath: "v0.1.0-alpha.3/punaro-release.json", ManifestLength: 100, ManifestSHA256: strings.Repeat("c", 64)}
+	previous := punarorelease.Catalog{Sequence: 2, MinimumSafeSequence: 1, Releases: []punarorelease.CatalogRelease{first, second}, CriticalBlocks: []int64{1}}
+	candidate := punarorelease.Catalog{Sequence: 3, PublishedAt: now.Add(-time.Hour).Format(time.RFC3339), ExpiresAt: now.Add(time.Hour).Format(time.RFC3339), MinimumSafeSequence: 2, Releases: []punarorelease.CatalogRelease{second, third}}
+	if err := validatePublicationCatalog(candidate, &previous, now); err != nil {
+		t.Fatalf("retired below-floor critical block was retained: %v", err)
+	}
+}
+
 func TestReleaseToolRefusesExistingPublicKeyWithoutWritingPrivate(t *testing.T) {
 	dir := t.TempDir()
 	privatePath := filepath.Join(dir, "release.key")

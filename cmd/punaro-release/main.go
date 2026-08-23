@@ -287,6 +287,9 @@ func validatePublicationCatalog(candidate punarorelease.Catalog, previous *punar
 			blocked[sequence] = true
 		}
 		for _, priorBlock := range previous.CriticalBlocks {
+			if priorBlock < candidate.MinimumSafeSequence {
+				continue
+			}
 			if !blocked[priorBlock] {
 				return errors.New("candidate release catalog removes a live critical block")
 			}
