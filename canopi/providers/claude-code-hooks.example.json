@@ -8,6 +8,7 @@
     "PostToolBatch": [{ "hooks": [{ "type": "command", "command": "/absolute/path/to/canopi-claude-hook", "timeout": 2 }] }],
     "PermissionRequest": [{ "hooks": [{ "type": "command", "command": "/absolute/path/to/canopi-claude-hook", "timeout": 2 }] }],
     "Elicitation": [{ "hooks": [{ "type": "command", "command": "/absolute/path/to/canopi-claude-hook", "timeout": 2 }] }],
+    "ElicitationResult": [{ "hooks": [{ "type": "command", "command": "/absolute/path/to/canopi-claude-hook", "timeout": 2 }] }],
     "Notification": [{ "hooks": [{ "type": "command", "command": "/absolute/path/to/canopi-claude-hook", "timeout": 2 }] }],
     "Stop": [{ "hooks": [{ "type": "command", "command": "/absolute/path/to/canopi-claude-hook", "timeout": 2 }] }],
     "TaskCompleted": [{ "hooks": [{ "type": "command", "command": "/absolute/path/to/canopi-claude-hook", "timeout": 2 }] }],

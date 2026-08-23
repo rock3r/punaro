@@ -65,6 +65,35 @@ func TestServeUntilShutdownDoesNotDeadlineActiveHandlers(t *testing.T) {
 	}
 }
 
+func TestServeUntilShutdownDrainsAfterUnexpectedServeError(t *testing.T) {
+	serveFailure := errors.New("listener failed")
+	shutdownStarted := make(chan context.Context, 1)
+	allowShutdown := make(chan struct{})
+	done := make(chan error, 1)
+	go func() {
+		done <- serveUntilShutdown(func() error {
+			return serveFailure
+		}, make(chan os.Signal), func(ctx context.Context) error {
+			shutdownStarted <- ctx
+			<-allowShutdown
+			return nil
+		})
+	}()
+	ctx := <-shutdownStarted
+	if _, hasDeadline := ctx.Deadline(); hasDeadline {
+		t.Fatal("unexpected Serve failure used a bounded shutdown context")
+	}
+	select {
+	case err := <-done:
+		t.Fatalf("serveUntilShutdown() returned before unexpected-exit drain completed: %v", err)
+	case <-time.After(50 * time.Millisecond):
+	}
+	close(allowShutdown)
+	if err := <-done; !errors.Is(err, serveFailure) {
+		t.Fatalf("serveUntilShutdown() = %v, want listener failure", err)
+	}
+}
+
 func TestParseConfigRequiresExplicitLANBinding(t *testing.T) {
 	directory := t.TempDir()
 	common := []string{"--token-file", filepath.Join(directory, "token"), "--state-file", filepath.Join(directory, "state.json")}

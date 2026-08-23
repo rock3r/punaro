@@ -167,10 +167,11 @@ following links; an unsafe pre-existing entry is removed, directory-synced, and
 recreated with current-user-only protection. Cross-process repair is serialized
 by the parent-directory kernel lock on Unix and a handle-canonicalized named
 kernel mutex on Windows before the entry is rechecked and unlinked.
-Signal-driven shutdown waits for `http.Server.Shutdown` to finish draining active
-handlers before `Store.Close` releases that lifetime lock, fencing rolling restarts
-until every acknowledged write from the old collector has completed. The drain
-has no timeout that could release the lock while a persistence handler remains active.
+Every server exit, including a signal or unexpected listener failure, waits for
+`http.Server.Shutdown` to finish draining active handlers before `Store.Close`
+releases that lifetime lock, fencing rolling restarts until every acknowledged
+write from the old collector has completed. The drain has no timeout that could
+release the lock while a persistence handler remains active.
 
 In another terminal, generate the selected 3 waiting / 4 done / 12 working
 overflow state:
@@ -216,6 +217,7 @@ first-party hook reference. It consumes the common `session_id`, `cwd`, and
 
 - `PermissionRequest` -> waiting / permission;
 - `Elicitation` and input-requiring `Notification` variants -> waiting;
+- `ElicitationResult` -> working, clearing the completed wait;
 - prompt, tool, batch, session and subagent-start activity -> working;
 - `Stop` and `SubagentStop` -> done;
 - `TaskCompleted` is ignored because the current hook lacks a separately

@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"strings"
 	"testing"
 	"time"
@@ -73,6 +74,34 @@ func TestMapClaudeHookDoesNotLetAssistantTextOverrideTerminalHook(t *testing.T) 
 	encoded, _ := json.Marshal(event)
 	if strings.Contains(string(encoded), "Which database") {
 		t.Fatalf("normalized event leaked final assistant text: %s", encoded)
+	}
+}
+
+func TestMapClaudeElicitationResultClearsWaitingState(t *testing.T) {
+	config := AdapterConfig{MachineID: "studio-m2", TaskTitle: "Punaro / choice", EventIDKey: []byte("test-secret")}
+	waiting, emit, err := MapClaudeHook([]byte(`{"session_id":"session-1","cwd":"/src/punaro","hook_event_name":"Elicitation"}`), config, time.Now())
+	if err != nil || !emit || waiting.State != protocol.StateWaitingForUser || waiting.WaitingReason != protocol.WaitingReasonElicitation {
+		t.Fatalf("MapClaudeHook(Elicitation) = %+v, %t, %v", waiting, emit, err)
+	}
+	resumed, emit, err := MapClaudeHook([]byte(`{"session_id":"session-1","cwd":"/src/punaro","hook_event_name":"ElicitationResult"}`), config, time.Now())
+	if err != nil || !emit || resumed.State != protocol.StateWorking || resumed.WaitingReason != "" {
+		t.Fatalf("MapClaudeHook(ElicitationResult) = %+v, %t, %v", resumed, emit, err)
+	}
+}
+
+func TestClaudeHookExampleSubscribesToElicitationResult(t *testing.T) {
+	payload, err := os.ReadFile("../../canopi/providers/claude-code-hooks.example.json")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var config struct {
+		Hooks map[string]json.RawMessage `json:"hooks"`
+	}
+	if err := json.Unmarshal(payload, &config); err != nil {
+		t.Fatal(err)
+	}
+	if _, subscribed := config.Hooks["ElicitationResult"]; !subscribed {
+		t.Fatal("Claude hook example does not subscribe to ElicitationResult")
 	}
 }
 

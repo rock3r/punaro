@@ -130,11 +130,12 @@ func serveUntilShutdown(serve func() error, shutdownSignals <-chan os.Signal, sh
 		defer close(shutdownDone)
 		select {
 		case <-shutdownSignals:
-			// State correctness takes precedence over a bounded process exit:
-			// retain the lifetime writer lock until every handler has drained.
-			_ = shutdown(context.Background())
 		case <-stop:
 		}
+		// State correctness takes precedence over a bounded process exit:
+		// retain the lifetime writer lock until every handler has drained,
+		// whether Serve stopped because of a signal or an unexpected error.
+		_ = shutdown(context.Background())
 	}()
 	err := serve()
 	close(stop)

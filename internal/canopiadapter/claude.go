@@ -118,8 +118,10 @@ func classifyClaudeHook(hook claudeHook) (protocol.State, protocol.WaitingReason
 	switch hook.HookEventName {
 	case "PermissionRequest":
 		return protocol.StateWaitingForUser, protocol.WaitingReasonPermission, true
-	case "Elicitation", "ElicitationResult":
+	case "Elicitation":
 		return protocol.StateWaitingForUser, protocol.WaitingReasonElicitation, true
+	case "ElicitationResult":
+		return protocol.StateWorking, "", true
 	case "Notification":
 		switch hook.NotificationType {
 		case "permission_prompt":
