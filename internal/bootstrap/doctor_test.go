@@ -3,6 +3,7 @@ package bootstrap
 import (
 	"context"
 	"crypto/sha256"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -157,6 +158,25 @@ func TestReadDoctorDirectoryEntriesStopsAtLimit(t *testing.T) {
 	}
 	if entries, ok := readDoctorDirectoryEntries(t.Context(), directory, maximumDoctorSlotEntries); ok || entries != nil {
 		t.Fatalf("oversized slot directory accepted: entries=%d ok=%t", len(entries), ok)
+	}
+}
+
+func TestDoctorRunPIDReadIsBoundedAndContextAware(t *testing.T) {
+	directory := t.TempDir()
+	path := filepath.Join(directory, runPIDFile)
+	if err := os.WriteFile(path, []byte(strings.Repeat("x", maximumDoctorStateBytes+1)), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := doctorLoadRunPID(t.Context(), directory); err == nil {
+		t.Fatal("oversized run PID record was accepted")
+	}
+	if err := os.WriteFile(path, []byte(`{"schema":1,"pid":42,"path":"/tmp/punaro-adapter"}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(t.Context())
+	cancel()
+	if _, err := doctorLoadRunPID(ctx, directory); !errors.Is(err, context.Canceled) {
+		t.Fatalf("canceled run PID read error=%v", err)
 	}
 }
 

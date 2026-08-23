@@ -233,6 +233,14 @@ func doctorReadJournal(ctx context.Context, directory string) (journal, error) {
 	return parseJournal(body)
 }
 
+func doctorLoadRunPID(ctx context.Context, directory string) (runPIDRecord, error) {
+	body, exists, err := doctorReadOptionalState(ctx, filepath.Join(directory, runPIDFile), maximumDoctorStateBytes)
+	if err != nil || !exists {
+		return runPIDRecord{}, err
+	}
+	return parseRunPID(body)
+}
+
 func doctorLoadRecovery(ctx context.Context, directory string) (recoveryState, error) {
 	body, exists, err := doctorReadOptionalState(ctx, filepath.Join(directory, recoveryFile), maximumDoctorStateBytes)
 	if err != nil || !exists {
@@ -702,7 +710,7 @@ func doctorRunningState(ctx context.Context, request DoctorRequest, current slot
 	runningDigest, runningOK := hashExactArtifact(ctx, runningPath, -1, 0o755)
 	runningOK = runningOK && currentDigest != "" && runningDigest == currentDigest
 	checks = append(checks, boolBootstrapCheck(runningOK, "running_artifact", "restart_adapter_service"))
-	record, err := loadRunPID(request.Directory)
+	record, err := doctorLoadRunPID(ctx, request.Directory)
 	processOK := err == nil && record.PID > 0 && filepath.Clean(record.Path) == runningPath && matchProcessImage(record.PID, record.Path) == processImageMatch
 	checks = append(checks, boolBootstrapCheck(processOK, "supervisor_process", "restart_adapter_service"))
 	_, readyErr := readReadyFile(filepath.Join(request.Directory, readyFile))

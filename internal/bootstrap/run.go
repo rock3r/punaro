@@ -396,6 +396,10 @@ func loadRunPID(directory string) (runPIDRecord, error) {
 	if err != nil {
 		return runPIDRecord{}, err
 	}
+	return parseRunPID(body)
+}
+
+func parseRunPID(body []byte) (runPIDRecord, error) {
 	var record runPIDRecord
 	if json.Unmarshal(body, &record) != nil || record.Schema != 1 {
 		return runPIDRecord{}, errors.New("bootstrap run is already active")
