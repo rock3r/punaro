@@ -108,23 +108,38 @@ func run(args []string, stderr io.Writer) int {
 	}
 	shutdownSignals := make(chan os.Signal, 1)
 	signal.Notify(shutdownSignals, os.Interrupt, syscall.SIGTERM)
-	go func() {
-		<-shutdownSignals
-		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-		defer cancel()
-		_ = server.Shutdown(ctx)
-	}()
+	defer signal.Stop(shutdownSignals)
 	serve := server.Serve
 	if config.tlsCertFile != "" {
 		serve = func(listener net.Listener) error {
 			return server.ServeTLS(listener, "", "")
 		}
 	}
-	if err := serve(networkListener); err != nil && !errors.Is(err, http.ErrServerClosed) {
-		_, _ = fmt.Fprintf(stderr, "canopi server error: %v\n", err)
+	serveErr := serveUntilShutdown(func() error { return serve(networkListener) }, shutdownSignals, server.Shutdown)
+	if serveErr != nil && !errors.Is(serveErr, http.ErrServerClosed) {
+		_, _ = fmt.Fprintf(stderr, "canopi server error: %v\n", serveErr)
 		return 1
 	}
 	return 0
+}
+
+func serveUntilShutdown(serve func() error, shutdownSignals <-chan os.Signal, shutdown func(context.Context) error) error {
+	stop := make(chan struct{})
+	shutdownDone := make(chan struct{})
+	go func() {
+		defer close(shutdownDone)
+		select {
+		case <-shutdownSignals:
+			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			defer cancel()
+			_ = shutdown(ctx)
+		case <-stop:
+		}
+	}()
+	err := serve()
+	close(stop)
+	<-shutdownDone
+	return err
 }
 
 func parseConfig(args []string) (serverConfig, error) {

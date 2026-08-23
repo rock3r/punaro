@@ -14,22 +14,8 @@ func acquireStateStoreLock(statePath string) (func() error, error) {
 	if err != nil {
 		return nil, err
 	}
-	file, err := os.OpenFile(path, os.O_CREATE|os.O_RDWR, 0o600) // #nosec G304 -- path is derived inside the protected state directory.
+	file, err := openStateLockFile(path)
 	if err != nil {
-		return nil, err
-	}
-	named, err := os.Lstat(path)
-	if err != nil {
-		_ = file.Close()
-		return nil, err
-	}
-	opened, err := file.Stat()
-	if err != nil || named.Mode()&os.ModeSymlink != 0 || !os.SameFile(named, opened) {
-		_ = file.Close()
-		return nil, errors.New("canopi state lock changed while opening")
-	}
-	if err := protectStateFile(path, file); err != nil {
-		_ = file.Close()
 		return nil, err
 	}
 	acquired, err := tryLockStateFile(file)
@@ -53,6 +39,50 @@ func acquireStateStoreLock(statePath string) (func() error, error) {
 		})
 		return releaseErr
 	}, nil
+}
+
+func openStateLockFile(path string) (*os.File, error) {
+	for range 2 {
+		file, err := createStateLockFile(path)
+		if err == nil {
+			if err := protectStateFile(path, file); err != nil {
+				_ = file.Close()
+				_ = os.Remove(path)
+				return nil, err
+			}
+			return file, nil
+		}
+		if !errors.Is(err, os.ErrExist) {
+			return nil, err
+		}
+		before, err := os.Lstat(path)
+		if errors.Is(err, os.ErrNotExist) {
+			continue
+		}
+		if err != nil {
+			return nil, err
+		}
+		if !privateStateFile(path, before) {
+			if err := os.Remove(path); err != nil && !errors.Is(err, os.ErrNotExist) {
+				return nil, err
+			}
+			if err := syncStateDirectory(filepath.Dir(path)); err != nil {
+				return nil, err
+			}
+			continue
+		}
+		file, err = openExistingStateLockFile(path)
+		if err != nil {
+			return nil, err
+		}
+		after, err := file.Stat()
+		if err != nil || !os.SameFile(before, after) || !privateStateFile(path, after) {
+			_ = file.Close()
+			return nil, errors.New("canopi state lock changed while opening")
+		}
+		return file, nil
+	}
+	return nil, errors.New("cannot replace unprotected Canopi state lock")
 }
 
 func stateStoreLockPath(statePath string) (string, error) {

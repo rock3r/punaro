@@ -1803,6 +1803,12 @@ derives that lock key from the final path of an open state or parent-directory
 handle, collapsing case, extended-device, short-name, and directory aliases.
 Unix resolves the existing state path or its parent before deriving the key,
 collapsing aliases introduced by symlinks in ancestor directories.
+The fixed lock file uses exclusive creation and no-follow opening on both
+platforms; unsafe pre-existing entries are removed, directory-synced, and
+recreated with current-user-only protection.
+Signal shutdown waits for the HTTP server to drain active handlers before closing
+the store and releasing this lifetime lock, so a rolling replacement cannot load
+or write state while an old ingestion is still persisting.
 Snapshot and image ETags change only with state revision or rendered response
 content. Snapshot responses use a weak revision validator because their
 generation timestamp changes without a semantic state change; rendered PNGs
@@ -1834,9 +1840,10 @@ updates are not starved. Per-attempt network timeouts and kernel-released file
 locks keep provider hooks isolated from collector outages. Enqueue, drain, and
 supervisor ownership is bound to each process's open handle, so process exit
 releases it and neither stale timestamps nor wall-clock jumps can fence out a
-live holder. Concurrent enqueues wait on that kernel lock until the prior bounded
-local publication completes rather than timing out and losing an event; no
-collector network I/O runs under it. Under the enqueue lock, every enqueue removes
+live holder. Concurrent enqueues wait at most 250 ms for the primary lane. Longer
+contention publishes through an atomically claimed, fsynced reserve slot within
+the same total event bound, staying below Claude's two-second hook deadline; no
+collector network I/O runs under the primary lock. Under the enqueue lock, every enqueue removes
 crash-left temporary event files before admitting new work. The same protected-token checks apply on the adapter
 host. A persistent
 `supervise` mode runs under the host service manager, holds a singleton lease,
@@ -1854,6 +1861,10 @@ protects new files before publication.
 Fixed-name enqueue, drain, and supervisor locks are created exclusively and
 opened without following links. Pre-existing entries that fail current-user
 ownership or privacy checks are removed, directory-synced, and safely recreated.
+One sixteenth of the configured capacity (at least one, at most 256) is reserved
+for contention slots, so the primary and fallback lanes remain jointly bounded.
+Kernel locks on active fallback temporaries distinguish live publication from
+crash leftovers during cleanup.
 
 Structurally valid event batches continue across per-event admission failures
 and return ordered per-event status records with HTTP 207 when mixed; only a

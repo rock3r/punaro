@@ -282,7 +282,7 @@ func TestSpoolSupervisorDeliversEventEnqueuedAfterStartup(t *testing.T) {
 func TestEnqueueWaitsForActiveLockAndPersistsAfterRelease(t *testing.T) {
 	directory := t.TempDir()
 	lock := filepath.Join(directory, ".enqueue.lock")
-	release, err := acquireSpoolLock(lock)
+	release, err := acquireSpoolLock(context.Background(), lock)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -311,5 +311,44 @@ func TestEnqueueWaitsForActiveLockAndPersistsAfterRelease(t *testing.T) {
 	}
 	if got, err := spool.Pending(); err != nil || got != 1 {
 		t.Fatalf("Pending() after contention = %d, %v; want 1", got, err)
+	}
+}
+
+func TestEnqueueUsesDurableContentionLaneBeforeProviderDeadline(t *testing.T) {
+	directory := t.TempDir()
+	release, err := acquireSpoolLock(context.Background(), filepath.Join(directory, ".enqueue.lock"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	done := make(chan error, 1)
+	spool := Spool{Directory: directory, MaxEvents: 1, EnqueueLockTimeout: 20 * time.Millisecond}
+	go func() { done <- spool.Enqueue(spoolEvent("event-via-contention-lane")) }()
+	select {
+	case err := <-done:
+		if err != nil {
+			release()
+			t.Fatalf("Enqueue() contention fallback = %v", err)
+		}
+	case <-time.After(100 * time.Millisecond):
+		release()
+		t.Fatal("Enqueue() exceeded the bounded contention wait")
+	}
+	if err := spool.Enqueue(spoolEvent("contention-lane-overflow")); !errors.Is(err, ErrSpoolFull) {
+		release()
+		t.Fatalf("second contention event = %v, want ErrSpoolFull", err)
+	}
+	release()
+	if got, err := spool.Pending(); err != nil || got != 1 {
+		t.Fatalf("Pending() after contention fallback = %d, %v; want 1", got, err)
+	}
+	delivered := ""
+	if err := spool.Drain(context.Background(), func(_ context.Context, event protocol.Event) error {
+		delivered = event.EventID
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if delivered != "event-via-contention-lane" {
+		t.Fatalf("contention delivery = %q", delivered)
 	}
 }

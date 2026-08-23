@@ -79,8 +79,10 @@ independent events behind it. A crashed worker leaves its events queued and its
 kernel-held lock is released automatically. Enqueue, drain, and supervisor locks
 cannot be reclaimed from a live process by stale timestamps or wall-clock jumps.
 A concurrent enqueue waits for the live kernel lock and completes its bounded
-local publication instead of timing out and dropping the event; collector network
-I/O remains detached and never occurs while that enqueue lock is held.
+primary-lane publication for up to 250 ms. If contention outlives that bound, it
+atomically claims one of the capacity-reserved, fsynced contention slots instead
+of waiting past Claude's two-second hook deadline or dropping the event. Collector
+network I/O remains detached and never occurs while the enqueue lock is held.
 Missing configuration, malformed provider input, spool or process-launch
 failure, token-file failure, network failure, and collector rejection all leave
 the coding agent unblocked and produce no provider-visible output.
@@ -154,6 +156,12 @@ It resolves the existing state file or its parent by handle, collapsing extended
 device paths, short names, case variants, and directory aliases to one identity.
 Unix resolves the existing state path or its parent before hashing, so paths
 whose ancestors traverse symlinks cannot acquire separate writer locks.
+The predictable state-lock file itself is created exclusively and opened without
+following links; an unsafe pre-existing entry is removed, directory-synced, and
+recreated with current-user-only protection.
+Signal-driven shutdown waits for `http.Server.Shutdown` to finish draining active
+handlers before `Store.Close` releases that lifetime lock, fencing rolling restarts
+until every acknowledged write from the old collector has completed.
 
 In another terminal, generate the selected 3 waiting / 4 done / 12 working
 overflow state:
@@ -249,6 +257,11 @@ The fixed enqueue, drain, and supervisor lock names use create-exclusive and
 no-follow opens with the same ownership and privacy validation. Unsafe entries
 left from a previously shared directory are removed, directory-synced, and
 replaced instead of permanently blocking the adapter.
+The configured spool capacity includes a fixed contention reserve (one sixteenth,
+at least one and at most 256 slots). Normal and contention lanes therefore remain
+jointly bounded while concurrent hooks can publish without waiting past their
+provider deadline. Active contention temporaries hold kernel locks, so cleanup
+can reclaim crash leftovers without deleting an in-progress publication.
 
 Run the durable worker as a continuously supervised companion using the same
 environment (for example with `Restart=always`/`KeepAlive` in the host service

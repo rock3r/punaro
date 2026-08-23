@@ -75,3 +75,26 @@ func TestOpenStoreExcludesWriterThroughSymlinkedParentAlias(t *testing.T) {
 		t.Fatalf("OpenStore() through parent alias = %#v, %v; want ErrStateStoreLocked", second, err)
 	}
 }
+
+func TestOpenStoreRecoversPreexistingStateLockSymlink(t *testing.T) {
+	statePath := filepath.Join(t.TempDir(), "state.json")
+	lockPath, err := stateStoreLockPath(statePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(filepath.Base(lockPath), lockPath); err != nil {
+		t.Fatal(err)
+	}
+	store, err := OpenStore(statePath, DefaultConfig())
+	if err != nil {
+		t.Fatalf("OpenStore() did not recover planted state lock: %v", err)
+	}
+	defer func() { _ = store.Close() }()
+	info, err := os.Lstat(lockPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !privateStateFile(lockPath, info) {
+		t.Fatal("recovered state lock is not a private current-user file")
+	}
+}

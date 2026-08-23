@@ -1,10 +1,44 @@
 package main
 
 import (
+	"context"
+	"errors"
+	"net/http"
+	"os"
 	"path/filepath"
 	"testing"
 	"time"
 )
+
+func TestServeUntilShutdownWaitsForActiveHandlers(t *testing.T) {
+	shutdownStarted := make(chan struct{})
+	allowShutdown := make(chan struct{})
+	serveReturned := make(chan struct{})
+	signals := make(chan os.Signal, 1)
+	done := make(chan error, 1)
+	go func() {
+		done <- serveUntilShutdown(func() error {
+			<-shutdownStarted
+			close(serveReturned)
+			return http.ErrServerClosed
+		}, signals, func(context.Context) error {
+			close(shutdownStarted)
+			<-allowShutdown
+			return nil
+		})
+	}()
+	signals <- os.Interrupt
+	<-serveReturned
+	select {
+	case err := <-done:
+		t.Fatalf("serveUntilShutdown() returned before Shutdown completed: %v", err)
+	case <-time.After(50 * time.Millisecond):
+	}
+	close(allowShutdown)
+	if err := <-done; !errors.Is(err, http.ErrServerClosed) {
+		t.Fatalf("serveUntilShutdown() = %v, want ErrServerClosed", err)
+	}
+}
 
 func TestParseConfigRequiresExplicitLANBinding(t *testing.T) {
 	directory := t.TempDir()

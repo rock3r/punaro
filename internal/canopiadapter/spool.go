@@ -7,6 +7,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"os"
 	"path/filepath"
@@ -21,6 +22,8 @@ import (
 const (
 	defaultMaxSpoolEvents = 4_096
 	maxSpoolEventBytes    = 64 << 10
+	defaultEnqueueWait    = 250 * time.Millisecond
+	enqueueLockPoll       = 5 * time.Millisecond
 	supervisorPoll        = 250 * time.Millisecond
 )
 
@@ -33,6 +36,8 @@ type Spool struct {
 	MaxEvents int
 	RetryMin  time.Duration
 	RetryMax  time.Duration
+	// EnqueueLockTimeout bounds the primary lane below the provider hook deadline.
+	EnqueueLockTimeout time.Duration
 }
 
 // Enqueue durably records an event. Re-enqueueing the same event ID is harmless.
@@ -47,27 +52,6 @@ func (s Spool) Enqueue(event protocol.Event) error {
 	if err := config.ensureDirectory(); err != nil {
 		return err
 	}
-	release, err := acquireSpoolLock(filepath.Join(config.Directory, ".enqueue.lock"))
-	if err != nil {
-		return err
-	}
-	defer release()
-	if err := config.removeOrphanTemporaries(); err != nil {
-		return err
-	}
-	target := config.eventPath(event.EventID)
-	if _, err := os.Lstat(target); err == nil {
-		return nil
-	} else if !errors.Is(err, os.ErrNotExist) {
-		return err
-	}
-	files, err := config.eventFiles()
-	if err != nil {
-		return err
-	}
-	if len(files) >= config.MaxEvents {
-		return ErrSpoolFull
-	}
 	payload, err := json.Marshal(event)
 	if err != nil {
 		return err
@@ -75,7 +59,61 @@ func (s Spool) Enqueue(event protocol.Event) error {
 	if len(payload) > maxSpoolEventBytes {
 		return errors.New("normalized Canopi event exceeds spool limit")
 	}
-	temporary, err := os.CreateTemp(config.Directory, ".event-*.tmp")
+	waitCtx, cancel := context.WithTimeout(context.Background(), config.EnqueueLockTimeout)
+	defer cancel()
+	release, err := acquireSpoolLock(waitCtx, filepath.Join(config.Directory, ".enqueue.lock"))
+	if errors.Is(err, context.DeadlineExceeded) {
+		return config.enqueueContention(event, payload)
+	}
+	if err != nil {
+		return err
+	}
+	defer release()
+	return config.enqueueLocked(event, payload)
+}
+
+func (s Spool) enqueueLocked(event protocol.Event, payload []byte) error {
+	if err := s.removeOrphanTemporaries(); err != nil {
+		return err
+	}
+	target := s.eventPath(event.EventID)
+	match, occupied, err := queuedSpoolEventMatches(target, event.EventID)
+	if err == nil && match {
+		return nil
+	}
+	if err != nil && occupied {
+		if err := s.removeQueuedSpoolFile(target); err != nil {
+			return err
+		}
+		occupied = false
+	} else if err != nil {
+		return err
+	}
+	if occupied {
+		return ErrSpoolFull
+	}
+	if s.primaryEventCapacity() == 0 {
+		return s.enqueueContention(event, payload)
+	}
+	if match, err := s.contentionEventExists(event.EventID); err != nil {
+		return err
+	} else if match {
+		return nil
+	}
+	files, err := s.eventFiles()
+	if err != nil {
+		return err
+	}
+	primaryCount := 0
+	for _, path := range files {
+		if !strings.HasPrefix(filepath.Base(path), ".contention-") {
+			primaryCount++
+		}
+	}
+	if primaryCount >= s.primaryEventCapacity() {
+		return ErrSpoolFull
+	}
+	temporary, err := os.CreateTemp(s.Directory, ".event-*.tmp")
 	if err != nil {
 		return err
 	}
@@ -99,7 +137,162 @@ func (s Spool) Enqueue(event protocol.Event) error {
 	if err := os.Link(temporaryName, target); err != nil && !errors.Is(err, os.ErrExist) {
 		return err
 	}
-	return syncDirectory(config.Directory)
+	return syncDirectory(s.Directory)
+}
+
+func (s Spool) enqueueContention(event protocol.Event, payload []byte) error {
+	match, occupied, err := queuedSpoolEventMatches(s.eventPath(event.EventID), event.EventID)
+	if err == nil && match {
+		return nil
+	}
+	if err != nil && occupied {
+		if removeErr := s.removeQueuedSpoolFile(s.eventPath(event.EventID)); removeErr != nil {
+			return removeErr
+		}
+		occupied = false
+	} else if err != nil {
+		return err
+	}
+	if occupied {
+		return ErrSpoolFull
+	}
+	files, err := s.eventFiles()
+	if err != nil {
+		return err
+	}
+	primaryCount := 0
+	for _, path := range files {
+		if !strings.HasPrefix(filepath.Base(path), ".contention-") {
+			primaryCount++
+		}
+	}
+	if primaryCount > s.primaryEventCapacity() {
+		return ErrSpoolFull
+	}
+	slots := s.contentionSlotCount()
+	digest := sha256.Sum256([]byte(event.EventID))
+	start := 0
+	for _, value := range digest[:8] {
+		start = (start*256 + int(value)) % slots
+	}
+	for offset := range slots {
+		slot := (start + offset) % slots
+		path := filepath.Join(s.Directory, fmt.Sprintf(".contention-%06d.json", slot))
+		match, occupied, err := queuedSpoolEventMatches(path, event.EventID)
+		if err != nil {
+			if removeErr := s.removeQueuedSpoolFile(path); removeErr != nil {
+				return removeErr
+			}
+			occupied = false
+		}
+		if match {
+			return nil
+		}
+		if occupied {
+			continue
+		}
+		created, err := s.publishContentionEvent(path, payload)
+		if err != nil {
+			return err
+		}
+		if created {
+			return nil
+		}
+		match, _, err = queuedSpoolEventMatches(path, event.EventID)
+		if err == nil && match {
+			return nil
+		}
+	}
+	return ErrSpoolFull
+}
+
+func (s Spool) contentionEventExists(eventID string) (bool, error) {
+	for slot := range s.contentionSlotCount() {
+		path := filepath.Join(s.Directory, fmt.Sprintf(".contention-%06d.json", slot))
+		match, _, err := queuedSpoolEventMatches(path, eventID)
+		if err != nil {
+			if removeErr := s.removeQueuedSpoolFile(path); removeErr != nil {
+				return false, removeErr
+			}
+			continue
+		}
+		if match {
+			return true, nil
+		}
+	}
+	return false, nil
+}
+
+func (s Spool) contentionSlotCount() int {
+	slots := s.MaxEvents / 16
+	if slots < 1 {
+		slots = 1
+	}
+	if slots > 256 {
+		slots = 256
+	}
+	return slots
+}
+
+func (s Spool) primaryEventCapacity() int {
+	return s.MaxEvents - s.contentionSlotCount()
+}
+
+func queuedSpoolEventMatches(path, eventID string) (match, occupied bool, err error) {
+	if _, err := os.Lstat(path); errors.Is(err, os.ErrNotExist) {
+		return false, false, nil
+	} else if err != nil {
+		return false, false, err
+	}
+	payload, err := readPrivateSpoolFile(path, maxSpoolEventBytes)
+	if err != nil {
+		return false, true, err
+	}
+	event, err := protocol.DecodeEvent(bytes.NewReader(payload), maxSpoolEventBytes)
+	if err != nil {
+		return false, true, err
+	}
+	return event.EventID == eventID, true, nil
+}
+
+func (s Spool) publishContentionEvent(target string, payload []byte) (created bool, err error) {
+	temporary, err := os.CreateTemp(s.Directory, ".contention-event-*.tmp")
+	if err != nil {
+		return false, err
+	}
+	temporaryName := temporary.Name()
+	locked := false
+	defer func() {
+		if locked {
+			_ = unlockSpoolFile(temporary)
+		}
+		_ = temporary.Close()
+		_ = os.Remove(temporaryName)
+	}()
+	if err := protectSpoolFile(temporaryName, temporary); err != nil {
+		return false, err
+	}
+	if err := lockSpoolFile(temporary); err != nil {
+		return false, err
+	}
+	locked = true
+	if _, err := temporary.Write(payload); err != nil {
+		return false, err
+	}
+	if err := temporary.Sync(); err != nil {
+		return false, err
+	}
+	linkErr := os.Link(temporaryName, target)
+	if linkErr != nil && !errors.Is(linkErr, os.ErrExist) {
+		return false, linkErr
+	}
+	if err := os.Remove(temporaryName); err != nil && !errors.Is(err, os.ErrNotExist) {
+		return false, err
+	}
+	if err := syncDirectory(s.Directory); err != nil {
+		return false, err
+	}
+	return linkErr == nil, nil
 }
 
 // Pending returns the number of durable events awaiting acknowledgement.
@@ -202,6 +395,12 @@ func (s Spool) normalized() (Spool, error) {
 	if s.RetryMin <= 0 || s.RetryMax < s.RetryMin {
 		return Spool{}, errors.New("invalid canopi spool retry policy")
 	}
+	if s.EnqueueLockTimeout == 0 {
+		s.EnqueueLockTimeout = defaultEnqueueWait
+	}
+	if s.EnqueueLockTimeout <= 0 || s.EnqueueLockTimeout >= 2*time.Second {
+		return Spool{}, errors.New("canopi enqueue lock timeout must be below two seconds")
+	}
 	return s, nil
 }
 
@@ -234,23 +433,49 @@ func (s Spool) removeOrphanTemporaries() error {
 	for {
 		names, readErr := directory.Readdirnames(128)
 		for _, name := range names {
-			if !strings.HasPrefix(name, ".event-") || !strings.HasSuffix(name, ".tmp") {
+			if (!strings.HasPrefix(name, ".event-") && !strings.HasPrefix(name, ".contention-event-")) || !strings.HasSuffix(name, ".tmp") {
 				continue
 			}
 			path := filepath.Join(s.Directory, name)
-			info, statErr := os.Lstat(path)
+			before, statErr := os.Lstat(path)
 			if errors.Is(statErr, os.ErrNotExist) {
 				continue
 			}
 			if statErr != nil {
 				return statErr
 			}
-			if !info.Mode().IsRegular() {
+			if !privateSpoolFile(path, before) {
+				if err := os.Remove(path); err != nil && !errors.Is(err, os.ErrNotExist) {
+					return err
+				}
+				removed = true
+				continue
+			}
+			file, err := openSpoolEventFile(path)
+			if err != nil {
+				return err
+			}
+			after, err := file.Stat()
+			if err != nil || !os.SameFile(before, after) || !privateSpoolFile(path, after) {
+				_ = file.Close()
+				return errors.New("queued Canopi temporary changed while opening")
+			}
+			acquired, err := tryLockSpoolFile(file)
+			if err != nil {
+				_ = file.Close()
+				return err
+			}
+			if !acquired {
+				_ = file.Close()
 				continue
 			}
 			if err := os.Remove(path); err != nil && !errors.Is(err, os.ErrNotExist) {
+				_ = unlockSpoolFile(file)
+				_ = file.Close()
 				return err
 			}
+			_ = unlockSpoolFile(file)
+			_ = file.Close()
 			removed = true
 		}
 		if errors.Is(readErr, io.EOF) {
@@ -394,16 +619,31 @@ func (s Spool) removeQueuedSpoolFile(path string) error {
 	return syncDirectory(s.Directory)
 }
 
-func acquireSpoolLock(path string) (func(), error) {
+func acquireSpoolLock(ctx context.Context, path string) (func(), error) {
 	file, err := openSpoolLockFile(path)
 	if err != nil {
 		return nil, err
 	}
-	if err := lockSpoolFile(file); err != nil {
-		_ = file.Close()
-		return nil, err
+	for {
+		acquired, err := tryLockSpoolFile(file)
+		if err != nil {
+			_ = file.Close()
+			return nil, err
+		}
+		if acquired {
+			return spoolLockRelease(file), nil
+		}
+		timer := time.NewTimer(enqueueLockPoll)
+		select {
+		case <-ctx.Done():
+			if !timer.Stop() {
+				<-timer.C
+			}
+			_ = file.Close()
+			return nil, ctx.Err()
+		case <-timer.C:
+		}
 	}
-	return spoolLockRelease(file), nil
 }
 
 func tryAcquireDrainLock(path string) (func(), bool, error) {

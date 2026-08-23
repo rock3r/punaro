@@ -22,6 +22,22 @@ func tryLockStateFile(file *os.File) (bool, error) {
 	return err == nil, err
 }
 
+func createStateLockFile(path string) (*os.File, error) {
+	descriptor, err := unix.Open(path, unix.O_CREAT|unix.O_EXCL|unix.O_RDWR|unix.O_CLOEXEC|unix.O_NOFOLLOW, 0o600) // #nosec G304 -- fixed lock name is inside the validated private state directory.
+	if err != nil {
+		return nil, &os.PathError{Op: "create", Path: path, Err: err}
+	}
+	return os.NewFile(uintptr(descriptor), path), nil // #nosec G115 -- successful descriptors are nonnegative.
+}
+
+func openExistingStateLockFile(path string) (*os.File, error) {
+	descriptor, err := unix.Open(path, unix.O_RDWR|unix.O_CLOEXEC|unix.O_NOFOLLOW, 0) // #nosec G304 -- fixed lock name is validated before and after this no-follow open.
+	if err != nil {
+		return nil, err
+	}
+	return os.NewFile(uintptr(descriptor), path), nil // #nosec G115 -- successful descriptors are nonnegative.
+}
+
 func unlockStateFile(file *os.File) error {
 	fd, err := stateFileDescriptor(file)
 	if err != nil {
