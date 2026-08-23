@@ -63,6 +63,21 @@
       "default": {}
     }
   },
+  "allOf": [
+    {
+      "if": {
+        "properties": {
+          "waiting_reason": { "type": "string" }
+        },
+        "required": ["waiting_reason"]
+      },
+      "then": {
+        "properties": {
+          "state": { "const": "waiting_for_user" }
+        }
+      }
+    }
+  ],
   "$defs": {
     "machine": {
       "type": "object",
