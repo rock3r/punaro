@@ -23,6 +23,19 @@ func TestListContextStopsBeforeVerificationWhenCanceled(t *testing.T) {
 	}
 }
 
+func TestReadManifestContextHonorsCancellation(t *testing.T) {
+	directory := t.TempDir()
+	requirePrivate(t, directory)
+	paths := writeRequiredTestFiles(t, directory)
+	manifest := testManifest(t, directory, paths)
+	writeManifest(t, directory, manifest)
+	ctx, cancel := context.WithCancel(t.Context())
+	cancel()
+	if _, _, err := readManifestContext(ctx, filepath.Join(directory, manifestName)); err == nil {
+		t.Fatal("canceled manifest read continued")
+	}
+}
+
 func TestListContextLimitStopsAfterBoundedRootEntries(t *testing.T) {
 	root := t.TempDir()
 	requirePrivate(t, root)

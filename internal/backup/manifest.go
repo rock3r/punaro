@@ -131,7 +131,7 @@ func verifyContext(ctx context.Context, directory string) (Manifest, string, err
 	if err := trustedPrivateDirectory(directory); err != nil {
 		return Manifest{}, "", errors.New("backup directory is unavailable or unsafe")
 	}
-	manifest, manifestDigest, err := readManifest(filepath.Join(directory, manifestName))
+	manifest, manifestDigest, err := readManifestContext(ctx, filepath.Join(directory, manifestName))
 	if err != nil {
 		return Manifest{}, "", errors.New("backup manifest is unavailable or invalid")
 	}
@@ -303,23 +303,16 @@ func ListContextLimit(ctx context.Context, root string, maximumEntries int) ([]S
 	return result, nil
 }
 
-func readManifest(path string) (Manifest, string, error) {
+func readManifestContext(ctx context.Context, path string) (Manifest, string, error) {
+	if ctx == nil || ctx.Err() != nil {
+		return Manifest{}, "", errors.New("manifest read was canceled")
+	}
 	info, err := os.Lstat(path)
 	if err != nil || !info.Mode().IsRegular() || info.Size() > maximumManifest || (runtime.GOOS != "windows" && info.Mode().Perm()&0o077 != 0) || trustedProtectedFile(path, maximumManifest) != nil {
 		return Manifest{}, "", errors.New("manifest file is unsafe")
 	}
-	file, err := os.Open(path) // #nosec G304 -- child of an explicit private backup directory.
-	if err != nil {
-		return Manifest{}, "", err
-	}
-	opened, statErr := file.Stat()
-	if statErr != nil || !os.SameFile(info, opened) {
-		_ = file.Close()
-		return Manifest{}, "", errors.New("manifest changed during open")
-	}
-	defer func() { _ = file.Close() }()
-	body, err := io.ReadAll(io.LimitReader(file, maximumManifest+1))
-	if err != nil || len(body) > maximumManifest || rejectDuplicateJSONKeys(body) != nil {
+	body, err := incrementalfs.ReadFile(ctx, path, maximumManifest)
+	if err != nil || rejectDuplicateJSONKeys(body) != nil {
 		return Manifest{}, "", errors.New("manifest JSON is invalid")
 	}
 	decoder := json.NewDecoder(bytes.NewReader(body))

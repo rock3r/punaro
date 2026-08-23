@@ -130,6 +130,17 @@ script_dir=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
 repo_dir=$(CDPATH= cd -- "$script_dir/.." && pwd)
 [ -f "$repo_dir/go.mod" ] && [ -d "$repo_dir/cmd/punaro-adapter" ] && [ -d "$repo_dir/cmd/punaro-bootstrap" ] && [ -d "$repo_dir/cmd/punaro-keygen" ] || fail 'run this installer from a complete Punaro source checkout'
 command -v go >/dev/null 2>&1 || fail 'Go is required to build the adapter from this checkout'
+plugin_version_count=$(grep -Ec '^[[:space:]]*"version"[[:space:]]*:[[:space:]]*"[^"]+",?[[:space:]]*$' "$repo_dir/plugin.json")
+[ "$plugin_version_count" -eq 1 ] || fail 'plugin release identity is invalid'
+plugin_version=$(sed -n 's/^[[:space:]]*"version"[[:space:]]*:[[:space:]]*"\([^"]*\)",*[[:space:]]*$/\1/p' "$repo_dir/plugin.json")
+source_release="v$plugin_version"
+case "$source_release" in v[0-9]*.[0-9]*.[0-9]*) ;; *) fail 'plugin release identity is invalid' ;; esac
+build_facts=$(
+	cd "$repo_dir"
+	env -u GOOS -u GOARCH -u CGO_ENABLED go run ./cmd/punaro-release build-facts --release "$source_release" --plugin-root "$repo_dir"
+) || fail 'source release build identity is invalid'
+skill_sha256=$(printf '%s\n' "$build_facts" | sed -n 's/.*"skill_set_sha256":"\([0-9a-f]*\)".*/\1/p')
+[ "${#skill_sha256}" -eq 64 ] || fail 'source skill identity is invalid'
 if [ "$allow_lan_http" = true ]; then
 	(
 		cd "$repo_dir"
@@ -237,8 +248,8 @@ fi
 
 (
 	cd "$repo_dir"
-	go build -trimpath -buildvcs=true -o "$build_dir/punaro-adapter" ./cmd/punaro-adapter
-	go build -trimpath -buildvcs=true -o "$build_dir/punaro-bootstrap" ./cmd/punaro-bootstrap
+	go build -trimpath -buildvcs=true -ldflags "-X main.adapterBuildRelease=$source_release -X main.adapterExpectedSkillSetDigest=$skill_sha256" -o "$build_dir/punaro-adapter" ./cmd/punaro-adapter
+	go build -trimpath -buildvcs=true -ldflags "-X main.bootstrapBuildRelease=$source_release" -o "$build_dir/punaro-bootstrap" ./cmd/punaro-bootstrap
 	go build -trimpath -buildvcs=true -o "$build_dir/punaro-trusted-attachment" ./cmd/punaro-trusted-attachment
 	go build -trimpath -buildvcs=true -o "$build_dir/punaro-memory" ./cmd/punaro-memory
 	go build -trimpath -buildvcs=true -o "$build_dir/punaro-enroll" ./cmd/punaro-enroll

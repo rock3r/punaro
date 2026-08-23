@@ -227,13 +227,16 @@ function Invoke-NativeProgramRaw([string]$Program, [string[]]$Arguments) {
     return [pscustomobject]@{ Output = $output; ExitCode = $exitCode }
 }
 
-function Build-PunaroBinary([string]$Package, [string]$Output) {
+function Build-PunaroBinary([string]$Package, [string]$Output, [string]$LdFlags = '') {
     # `go build` discovers go.mod from the working directory, not from the
     # package argument. Keep the installer usable when invoked by an absolute
     # path from PowerShell's default directory.
     Push-Location -LiteralPath $repoDir
     try {
-        $result = Invoke-NativeProgramRaw -Program 'go' -Arguments @('build', '-trimpath', '-buildvcs=true', '-o', $Output, $Package)
+        $buildArguments = @('build', '-trimpath', '-buildvcs=true')
+        if (-not [string]::IsNullOrWhiteSpace($LdFlags)) { $buildArguments += @('-ldflags', $LdFlags) }
+        $buildArguments += @('-o', $Output, $Package)
+        $result = Invoke-NativeProgramRaw -Program 'go' -Arguments $buildArguments
         if ($result.ExitCode -ne 0) { Stop-Install "could not build $Package" }
     } finally {
         Pop-Location
@@ -268,6 +271,20 @@ if (-not (Test-Path -LiteralPath (Join-Path $repoDir 'go.mod') -PathType Leaf) -
     Stop-Install 'run this installer from a complete Punaro source checkout'
 }
 try { Get-Command 'go' -CommandType Application -ErrorAction Stop | Out-Null } catch { Stop-Install 'Go is required to build the adapter from this checkout' }
+$pluginPath = Join-Path $repoDir 'plugin.json'
+try { $plugin = Get-Content -LiteralPath $pluginPath -Raw | ConvertFrom-Json } catch { Stop-Install 'plugin release identity is invalid' }
+$sourceRelease = "v$([string]$plugin.version)"
+if ($sourceRelease -notmatch '^v[0-9]+\.[0-9]+\.[0-9]+(?:-[0-9A-Za-z.-]+)?$') { Stop-Install 'plugin release identity is invalid' }
+Push-Location -LiteralPath $repoDir
+try {
+    $factsResult = Invoke-NativeProgramRaw -Program 'go' -Arguments @('run', './cmd/punaro-release', 'build-facts', '--release', $sourceRelease, '--plugin-root', $repoDir)
+} finally {
+    Pop-Location
+}
+if ($factsResult.ExitCode -ne 0) { Stop-Install 'source release build identity is invalid' }
+try { $buildFacts = (($factsResult.Output | ForEach-Object { [string]$_ }) -join "`n") | ConvertFrom-Json } catch { Stop-Install 'source release build identity is invalid' }
+$skillSha256 = [string]$buildFacts.skill_set_sha256
+if ($skillSha256 -notmatch '^[0-9a-f]{64}$') { Stop-Install 'source skill identity is invalid' }
 $validationArguments = @('run', './cmd/punaro-adapter', 'validate-relay-transport', '--relay-url', $RelayUrl)
 if ($AllowLanHttp) { $validationArguments += @('--allow-lan-http', '--trusted-lan-cidr', $TrustedLanCidr) }
 Push-Location -LiteralPath $repoDir
@@ -333,8 +350,8 @@ try {
 Stop-PunaroOrphanAdapter -BootstrapDirectory $bootstrapDir
 Wait-PunaroReplaceableBinary -Path (Join-Path $binDir 'punaro-adapter.exe')
 Wait-PunaroReplaceableBinary -Path (Join-Path $binDir 'punaro-bootstrap.exe')
-Build-PunaroBinary -Package (Join-Path $repoDir 'cmd\punaro-adapter') -Output (Join-Path $binDir 'punaro-adapter.exe')
-Build-PunaroBinary -Package (Join-Path $repoDir 'cmd\punaro-bootstrap') -Output (Join-Path $binDir 'punaro-bootstrap.exe')
+Build-PunaroBinary -Package (Join-Path $repoDir 'cmd\punaro-adapter') -Output (Join-Path $binDir 'punaro-adapter.exe') -LdFlags "-X main.adapterBuildRelease=$sourceRelease -X main.adapterExpectedSkillSetDigest=$skillSha256"
+Build-PunaroBinary -Package (Join-Path $repoDir 'cmd\punaro-bootstrap') -Output (Join-Path $binDir 'punaro-bootstrap.exe') -LdFlags "-X main.bootstrapBuildRelease=$sourceRelease"
 Build-PunaroBinary -Package (Join-Path $repoDir 'cmd\punaro-trusted-attachment') -Output (Join-Path $binDir 'punaro-trusted-attachment.exe')
 Build-PunaroBinary -Package (Join-Path $repoDir 'cmd\punaro-memory') -Output (Join-Path $binDir 'punaro-memory.exe')
 Build-PunaroBinary -Package (Join-Path $repoDir 'cmd\punaro-enroll') -Output (Join-Path $binDir 'punaro-enroll.exe')

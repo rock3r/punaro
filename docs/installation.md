@@ -104,8 +104,11 @@ that mailbox state, run from the reviewed Punaro checkout:
   --agent-guidance-dir /path/to/agent-project
 ```
 
-The machine ID must be unique. The script derives the exclusive endpoint
-namespace `agent/laptop-review/`, builds `punaro-adapter` and
+The machine ID must be unique. The script derives the checked-in plugin release
+and skill digest and embeds them into the fixed bootstrap and adapter binaries,
+so doctor can compare the installed supervisor to signed-release compatibility
+policy. It also derives the exclusive endpoint namespace
+`agent/laptop-review/`, builds `punaro-adapter` and
 `punaro-bootstrap`, seeds the current bootstrap slot from that checkout,
 creates the local `group/punaro-attached` group, writes owner-only local
 state, installs the launchd (macOS) or user-systemd (Linux) service

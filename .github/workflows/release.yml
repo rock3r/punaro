@@ -15,6 +15,10 @@ on:
         description: Monotonic catalog sequence
         required: true
         type: string
+      minimum_bootstrap_release:
+        description: Oldest installed fixed bootstrap compatible with this release
+        required: true
+        type: string
       minimum_safe_sequence:
         description: Optional higher safety floor (retires all lower release sequences)
         required: false
@@ -159,6 +163,7 @@ jobs:
           INPUT_RELEASE: ${{ inputs.release }}
           INPUT_SEQUENCE: ${{ inputs.sequence }}
           INPUT_CATALOG_SEQUENCE: ${{ inputs.catalog_sequence }}
+          INPUT_MINIMUM_BOOTSTRAP_RELEASE: ${{ inputs.minimum_bootstrap_release }}
           INPUT_MINIMUM_SAFE_SEQUENCE: ${{ inputs.minimum_safe_sequence }}
           INPUT_CRITICAL_BLOCKS: ${{ inputs.critical_blocks }}
           INPUT_SUPPORTED_FROM: ${{ inputs.supported_from }}
@@ -168,6 +173,7 @@ jobs:
           release=$INPUT_RELEASE
           sequence=$INPUT_SEQUENCE
           catalog_sequence=$INPUT_CATALOG_SEQUENCE
+          minimum_bootstrap_release=$INPUT_MINIMUM_BOOTSTRAP_RELEASE
           case "$release" in
             v[0-9]*.[0-9]*.[0-9]*) ;;
             *) printf '%s\n' "unsupported release name: $release" >&2; exit 2 ;;
@@ -182,6 +188,10 @@ jobs:
             printf '%s\n' 'sequences must be at least 1' >&2
             exit 2
           fi
+          case "$minimum_bootstrap_release" in
+            v[0-9]*.[0-9]*.[0-9]*) ;;
+            *) printf '%s\n' 'minimum bootstrap release must be a product release name' >&2; exit 2 ;;
+          esac
           minimum_safe_sequence=$INPUT_MINIMUM_SAFE_SEQUENCE
           if [ -n "$minimum_safe_sequence" ]; then
             case "$minimum_safe_sequence" in
@@ -231,6 +241,7 @@ jobs:
             printf 'release=%s\n' "$release"
             printf 'sequence=%s\n' "$sequence"
             printf 'catalog_sequence=%s\n' "$catalog_sequence"
+            printf 'minimum_bootstrap_release=%s\n' "$minimum_bootstrap_release"
             printf 'minimum_safe_sequence=%s\n' "$minimum_safe_sequence"
             printf 'critical_blocks=%s\n' "$critical_blocks"
             printf 'supported_from=%s\n' "$supported_from"
@@ -240,6 +251,7 @@ jobs:
           RELEASE: ${{ steps.identity.outputs.release }}
           SEQUENCE: ${{ steps.identity.outputs.sequence }}
           CATALOG_SEQUENCE: ${{ steps.identity.outputs.catalog_sequence }}
+          MINIMUM_BOOTSTRAP_RELEASE: ${{ steps.identity.outputs.minimum_bootstrap_release }}
           MINIMUM_SAFE_SEQUENCE: ${{ steps.identity.outputs.minimum_safe_sequence }}
           CRITICAL_BLOCKS: ${{ steps.identity.outputs.critical_blocks }}
           SUPPORTED_FROM: ${{ steps.identity.outputs.supported_from }}
@@ -288,6 +300,7 @@ jobs:
             --release "$RELEASE" \
             --sequence "$SEQUENCE" \
             --catalog-sequence "$CATALOG_SEQUENCE" \
+            --minimum-bootstrap-release "$MINIMUM_BOOTSTRAP_RELEASE" \
             --image "${{ needs.image.outputs.image }}" \
             "${policy_args[@]}" \
             "${previous_args[@]}"

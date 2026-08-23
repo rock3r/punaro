@@ -91,9 +91,14 @@ Only the offline-signature publisher can make those stable assets visible.
    gh workflow run release.yml --repo rock3r/punaro --ref main \
      -f release=v0.1.0-alpha.1 \
      -f sequence=1 \
-     -f catalog_sequence=1
+     -f catalog_sequence=1 \
+     -f minimum_bootstrap_release=v0.1.0-alpha.1
    ```
 
+   `minimum_bootstrap_release` is the oldest fixed, installer-owned bootstrap
+   executable that can safely supervise the target release. Keep it at
+   `v0.1.0-alpha.1` for alpha.2 unless the bootstrap protocol actually becomes
+   incompatible; signed slot updates do not replace that fixed executable.
    Later dispatches may set `minimum_safe_sequence` to retire every lower
    sequence, and `critical_blocks` to a comma-separated list of individual
    unsafe sequences. The workflow validates both before assembly. Use the
@@ -183,6 +188,7 @@ go run ./cmd/punaro-release assemble \
   --release v0.1.0-alpha.1 \
   --sequence 1 \
   --catalog-sequence 1 \
+  --minimum-bootstrap-release v0.1.0-alpha.1 \
   --image ghcr.io/rock3r/punaro@sha256:IMAGE_DIGEST
 go run ./cmd/punaro-release validate --dir ./dist
 ```
