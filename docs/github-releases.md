@@ -225,6 +225,10 @@ SEQUENCE`. Declare every direct rolling-upgrade source with repeatable
 `--supported-from RELEASE`; the workflow accepts the same set through its
 comma-separated `supported_from` input. The GitHub
 workflow downloads the live catalog and supplies this argument automatically.
+If the live catalog is an interrupted replacement draft, both workflow
+preflight and assembly instead recover and verify its reserved `.previous`
+document/signature pair, validate advancement against it, and supply that
+predecessor to the assembler; an incomplete recovery pair fails closed.
 Before dispatching the second or any later release, configure the repository
 Actions variable `PUNARO_RELEASE_PUBLIC_KEYS` with the exact JSON contents of
 the independently distributed `punaro-release.pub` trust root. If a published

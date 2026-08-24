@@ -163,23 +163,49 @@ jobs:
             printf '%s\n' "release $release already exists" >&2
             exit 2
           fi
-          if catalog_state=$(gh release view catalog --json isDraft 2>/dev/null) &&
-             [ "$(printf '%s\n' "$catalog_state" | jq -er .isDraft)" = false ]; then
+          catalog_has_history=false
+          history_error='existing live catalog is not a verified pair'
+          if catalog_state=$(gh release view catalog --json isDraft,assets 2>/dev/null); then
+            catalog_draft=$(printf '%s\n' "$catalog_state" | jq -er 'if .isDraft == true then "true" elif .isDraft == false then "false" else error("invalid draft state") end')
+            previous_dir="$RUNNER_TEMP/preflight-catalog"
+            if [ "$catalog_draft" = false ]; then
+              mkdir "$previous_dir"
+              gh release download catalog --pattern punaro-catalog.json --dir "$previous_dir"
+              gh release download catalog --pattern punaro-catalog.sig --dir "$previous_dir"
+              catalog_has_history=true
+            else
+              recovery_assets=$(printf '%s\n' "$catalog_state" | jq -er '[.assets[].name | select(. == "punaro-catalog.previous.json" or . == "punaro-catalog.previous.sig")] | length')
+              if [ "$recovery_assets" -eq 1 ]; then
+                printf '%s\n' 'draft catalog recovery pair is incomplete' >&2
+                exit 2
+              fi
+              if [ "$recovery_assets" -eq 2 ]; then
+                recovery_dir="$RUNNER_TEMP/preflight-catalog-recovery"
+                mkdir "$previous_dir" "$recovery_dir"
+                gh release download catalog --pattern punaro-catalog.previous.json --dir "$recovery_dir"
+                gh release download catalog --pattern punaro-catalog.previous.sig --dir "$recovery_dir"
+                cp "$recovery_dir/punaro-catalog.previous.json" "$previous_dir/punaro-catalog.json"
+                cp "$recovery_dir/punaro-catalog.previous.sig" "$previous_dir/punaro-catalog.sig"
+                catalog_has_history=true
+                history_error='draft catalog predecessor is not a verified recovery pair'
+              fi
+            fi
+          fi
+          if [ "$catalog_has_history" = true ]; then
             if [ -z "$RELEASE_PUBLIC_KEYS" ]; then
               printf '%s\n' 'PUNARO_RELEASE_PUBLIC_KEYS must contain the trusted public key set before validating the live catalog' >&2
               exit 2
             fi
-            previous_dir="$RUNNER_TEMP/preflight-catalog"
-            mkdir "$previous_dir"
-            gh release download catalog --pattern punaro-catalog.json --dir "$previous_dir"
-            gh release download catalog --pattern punaro-catalog.sig --dir "$previous_dir"
             keys_file="$RUNNER_TEMP/punaro-release.pub"
             umask 077
             printf '%s' "$RELEASE_PUBLIC_KEYS" >"$keys_file"
-            go run ./cmd/punaro-release verify \
+            if ! go run ./cmd/punaro-release verify \
               --keys-file "$keys_file" \
               --document "$previous_dir/punaro-catalog.json" \
-              --signature "$previous_dir/punaro-catalog.sig"
+              --signature "$previous_dir/punaro-catalog.sig"; then
+              printf '%s\n' "$history_error" >&2
+              exit 2
+            fi
             advancement_args=()
             if [ -n "$minimum_safe_sequence" ]; then
               advancement_args+=(--minimum-safe-sequence "$minimum_safe_sequence")
@@ -355,23 +381,49 @@ jobs:
               policy_args+=(--supported-from "$source")
             done
           fi
-          if catalog_state=$(gh release view catalog --json isDraft 2>/dev/null) &&
-             [ "$(printf '%s\n' "$catalog_state" | jq -er .isDraft)" = false ]; then
+          catalog_has_history=false
+          history_error='existing live catalog is not a verified pair'
+          if catalog_state=$(gh release view catalog --json isDraft,assets 2>/dev/null); then
+            catalog_draft=$(printf '%s\n' "$catalog_state" | jq -er 'if .isDraft == true then "true" elif .isDraft == false then "false" else error("invalid draft state") end')
+            previous_dir="$RUNNER_TEMP/previous-catalog"
+            if [ "$catalog_draft" = false ]; then
+              mkdir "$previous_dir"
+              gh release download catalog --pattern punaro-catalog.json --dir "$previous_dir"
+              gh release download catalog --pattern punaro-catalog.sig --dir "$previous_dir"
+              catalog_has_history=true
+            else
+              recovery_assets=$(printf '%s\n' "$catalog_state" | jq -er '[.assets[].name | select(. == "punaro-catalog.previous.json" or . == "punaro-catalog.previous.sig")] | length')
+              if [ "$recovery_assets" -eq 1 ]; then
+                printf '%s\n' 'draft catalog recovery pair is incomplete' >&2
+                exit 2
+              fi
+              if [ "$recovery_assets" -eq 2 ]; then
+                recovery_dir="$RUNNER_TEMP/catalog-recovery"
+                mkdir "$previous_dir" "$recovery_dir"
+                gh release download catalog --pattern punaro-catalog.previous.json --dir "$recovery_dir"
+                gh release download catalog --pattern punaro-catalog.previous.sig --dir "$recovery_dir"
+                cp "$recovery_dir/punaro-catalog.previous.json" "$previous_dir/punaro-catalog.json"
+                cp "$recovery_dir/punaro-catalog.previous.sig" "$previous_dir/punaro-catalog.sig"
+                catalog_has_history=true
+                history_error='draft catalog predecessor is not a verified recovery pair'
+              fi
+            fi
+          fi
+          if [ "$catalog_has_history" = true ]; then
             if [ -z "$RELEASE_PUBLIC_KEYS" ]; then
               printf '%s\n' 'PUNARO_RELEASE_PUBLIC_KEYS must contain the trusted public key set before inheriting a live catalog' >&2
               exit 2
             fi
-            previous_dir="$RUNNER_TEMP/previous-catalog"
-            mkdir "$previous_dir"
-            gh release download catalog --pattern punaro-catalog.json --dir "$previous_dir"
-            gh release download catalog --pattern punaro-catalog.sig --dir "$previous_dir"
             keys_file="$RUNNER_TEMP/punaro-release.pub"
             umask 077
             printf '%s' "$RELEASE_PUBLIC_KEYS" >"$keys_file"
-            go run ./cmd/punaro-release verify \
+            if ! go run ./cmd/punaro-release verify \
               --keys-file "$keys_file" \
               --document "$previous_dir/punaro-catalog.json" \
-              --signature "$previous_dir/punaro-catalog.sig"
+              --signature "$previous_dir/punaro-catalog.sig"; then
+              printf '%s\n' "$history_error" >&2
+              exit 2
+            fi
             previous_args=(--previous-catalog "$previous_dir/punaro-catalog.json")
           fi
           go run ./cmd/punaro-release assemble \

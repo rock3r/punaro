@@ -43,6 +43,7 @@ if ! grep -Fq -- '--provenance mode=max' "$repo_dir/.github/workflows/release.ym
 	exit 1
 fi
 preflight_job=$(sed -n '/^  preflight:/,/^  image:/p' "$repo_dir/.github/workflows/release.yml")
+publish_job=$(sed -n '/^  publish:/,$p' "$repo_dir/.github/workflows/release.yml")
 if ! grep -Fq '  preflight:' "$repo_dir/.github/workflows/release.yml" ||
 	! grep -Fq 'needs: preflight' "$repo_dir/.github/workflows/release.yml" ||
 	! grep -Fq 'needs.preflight.outputs.release' "$repo_dir/.github/workflows/release.yml" ||
@@ -52,6 +53,21 @@ if ! grep -Fq '  preflight:' "$repo_dir/.github/workflows/release.yml" ||
 	! printf '%s\n' "$preflight_job" | grep -Fq 'punaro-release validate-request' ||
 	! printf '%s\n' "$preflight_job" | grep -Fq 'punaro-release validate-advancement'; then
 	printf '%s\n' 'release workflow does not validate every release input before the image job' >&2
+	exit 1
+fi
+for job in "$preflight_job" "$publish_job"; do
+	if ! printf '%s\n' "$job" | grep -Fq -- '--json isDraft,assets' ||
+		! printf '%s\n' "$job" | grep -Fq 'punaro-catalog.previous.json' ||
+		! printf '%s\n' "$job" | grep -Fq 'punaro-catalog.previous.sig' ||
+		! printf '%s\n' "$job" | grep -Fq 'draft catalog recovery pair is incomplete' ||
+		! printf '%s\n' "$job" | grep -Fq 'draft catalog predecessor is not a verified recovery pair'; then
+		printf '%s\n' 'release workflow does not recover and verify interrupted draft catalog history' >&2
+		exit 1
+	fi
+done
+if ! printf '%s\n' "$preflight_job" | grep -Fq -- '--previous-catalog "$previous_dir/punaro-catalog.json"' ||
+	! printf '%s\n' "$publish_job" | grep -Fq 'previous_args=(--previous-catalog "$previous_dir/punaro-catalog.json")'; then
+	printf '%s\n' 'release workflow does not carry recovered catalog history through preflight and assembly' >&2
 	exit 1
 fi
 if ! grep -Fq 'ARG PUNARO_RELEASE' "$repo_dir/Dockerfile" ||
