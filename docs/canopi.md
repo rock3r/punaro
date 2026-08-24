@@ -269,6 +269,10 @@ time to finish parsing, normalizing, and syncing an event. A non-zero adapter
 exit is therefore a durability signal, not a control signal for Claude.
 The adapter captures the hook process invocation time before reading its stdin,
 so bounded input processing cannot reorder adjacent lifecycle timestamps.
+Claude Code does not currently supply a source timestamp or monotonic hook
+sequence. Because the hooks run asynchronously to avoid slowing the coding
+agent, Canopi preserves best-effort local invocation/admission ordering; it
+does not inspect private transcripts to invent provider ordering.
 
 `CANOPI_SPOOL_DIR` is optional; when omitted, `prepare` creates
 `canopi-claude-spool` beside the token file. On Unix, the directory must belong

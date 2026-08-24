@@ -667,7 +667,19 @@ func (s Spool) eventFiles(ctx context.Context) ([]string, error) {
 				return nil, err
 			}
 			if !privateSpoolFile(path, info) {
-				removedNow, err := removeSpoolFileIfSame(path, info)
+				removedNow := false
+				err := withSpoolRepairLock(ctx, path, func() error {
+					current, statErr := os.Lstat(path)
+					if errors.Is(statErr, os.ErrNotExist) {
+						return nil
+					}
+					if statErr != nil || privateSpoolFile(path, current) {
+						return statErr
+					}
+					var removeErr error
+					removedNow, removeErr = removeSpoolFileIfSame(path, current)
+					return removeErr
+				})
 				if err != nil {
 					return nil, err
 				}

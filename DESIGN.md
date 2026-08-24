@@ -1851,6 +1851,10 @@ detached supervisor launch fails, the target remains recoverable. A hook reports
 success only after the file and directory barriers succeed; on a sync failure it
 kicks the persistent supervisor and exits non-zero. The persistent supervisor
 reopens and re-syncs the file and directory before any delivery.
+Claude Code's current hook payload has neither a source timestamp nor a
+monotonic invocation sequence. The asynchronous integration therefore uses
+best-effort local invocation/admission ordering and never reads private
+transcripts to manufacture ordering data.
 Unix
 spools must be current-user-owned and are tightened to mode `0700`; Windows
 spools must be current-user-owned and receive a protected DACL containing only
