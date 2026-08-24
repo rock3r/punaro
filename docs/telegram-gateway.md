@@ -315,7 +315,8 @@ gateway-health record; an acknowledgement failure remains an explicit blocked
 ack-phase cycle. A deleted Telegram thread therefore fails closed and is
 dropped; repair the explicit route rather than recreating a thread
 automatically. Empty cycles do not clear either terminal health outcome; a
-successful operation on the affected inbound or outbound plane does. Telegram
+successful inbound submission clears the inbound outcome, while an outbound
+send clears only failures recorded for that same conversation target. Telegram
 401, 429, 5xx, and network failures leave the delivery
 unacknowledged for retry. The returned `message_id` is stored in the outbound
 map. The bridge renders opaque agent content as escaped

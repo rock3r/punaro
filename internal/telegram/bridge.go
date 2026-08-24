@@ -52,15 +52,16 @@ const (
 // GatewayCycleError preserves only the local phase while retaining the
 // wrapped typed error for content-free terminal/transient classification.
 type GatewayCycleError struct {
-	Phase            GatewayCyclePhase
-	NonFatal         bool
-	TerminalInbound  int
-	TerminalOutbound int
-	InboundRecovery  bool
-	OutboundRecovery bool
-	OutboundBlocked  bool
-	OutboundProgress bool
-	Err              error
+	Phase                GatewayCyclePhase
+	NonFatal             bool
+	TerminalInbound      int
+	TerminalOutbound     int
+	InboundRecovery      bool
+	OutboundRecovery     bool
+	OutboundTargetEvents []GatewayOutboundTargetEvent
+	OutboundBlocked      bool
+	OutboundProgress     bool
+	Err                  error
 }
 
 func (e *GatewayCycleError) Error() string { return "telegram gateway cycle failed" }
@@ -156,41 +157,45 @@ func (b Bridge) SyncOnce(ctx context.Context, offset int64) (int64, error) {
 	outboundProgress := false
 	outboundRecovery := false
 	terminalOutbound := 0
+	var outboundTargetEvents []GatewayOutboundTargetEvent
 	var terminalOutboundErr error
 	for _, delivery := range deliveries {
 		if err := SendDelivery(ctx, b.State, b.Sender, delivery, b.Gateway.AllowedUserID); err != nil {
 			if isPermanentTelegramFailure(err) {
 				b.logEvent("telegram_send_dropped", "delivery_id="+delivery.ID, "reason=permanent_rejection")
-				if err := b.Relay.Ack(ctx, delivery); err != nil {
-					return next, &GatewayCycleError{Phase: GatewayPhaseAck, TerminalInbound: terminalInbound, TerminalOutbound: terminalOutbound + 1, InboundRecovery: inboundRecovery, OutboundRecovery: outboundRecovery, OutboundBlocked: true, OutboundProgress: outboundProgress, Err: err}
-				}
-				outboundProgress = true
 				terminalOutbound++
+				outboundTargetEvents = append(outboundTargetEvents, GatewayOutboundTargetEvent{ConversationID: delivery.Message.ConversationID, Terminal: true})
 				if terminalOutboundErr == nil || DeletedTopicFailure(err) {
 					terminalOutboundErr = err
 				}
+				if err := b.Relay.Ack(ctx, delivery); err != nil {
+					return next, &GatewayCycleError{Phase: GatewayPhaseAck, TerminalInbound: terminalInbound, TerminalOutbound: terminalOutbound, InboundRecovery: inboundRecovery, OutboundRecovery: outboundRecovery, OutboundTargetEvents: outboundTargetEvents, OutboundBlocked: true, OutboundProgress: outboundProgress, Err: err}
+				}
+				outboundProgress = true
 				continue
 			}
 			b.logEvent("telegram_send_err", "delivery_id="+delivery.ID)
-			return next, &GatewayCycleError{Phase: GatewayPhaseSend, TerminalInbound: terminalInbound, TerminalOutbound: terminalOutbound, InboundRecovery: inboundRecovery, OutboundRecovery: outboundRecovery, OutboundBlocked: true, OutboundProgress: outboundProgress, Err: err}
+			return next, &GatewayCycleError{Phase: GatewayPhaseSend, TerminalInbound: terminalInbound, TerminalOutbound: terminalOutbound, InboundRecovery: inboundRecovery, OutboundRecovery: outboundRecovery, OutboundTargetEvents: outboundTargetEvents, OutboundBlocked: true, OutboundProgress: outboundProgress, Err: err}
 		}
 		outboundRecovery = true
+		outboundTargetEvents = append(outboundTargetEvents, GatewayOutboundTargetEvent{ConversationID: delivery.Message.ConversationID})
 		b.logEvent("telegram_send_ok", "delivery_id="+delivery.ID)
 		if err := b.Relay.Ack(ctx, delivery); err != nil {
-			return next, &GatewayCycleError{Phase: GatewayPhaseAck, TerminalInbound: terminalInbound, TerminalOutbound: terminalOutbound, InboundRecovery: inboundRecovery, OutboundRecovery: outboundRecovery, OutboundBlocked: true, OutboundProgress: outboundProgress, Err: err}
+			return next, &GatewayCycleError{Phase: GatewayPhaseAck, TerminalInbound: terminalInbound, TerminalOutbound: terminalOutbound, InboundRecovery: inboundRecovery, OutboundRecovery: outboundRecovery, OutboundTargetEvents: outboundTargetEvents, OutboundBlocked: true, OutboundProgress: outboundProgress, Err: err}
 		}
 		outboundProgress = true
 	}
 	if terminalInbound > 0 || terminalOutbound > 0 || inboundRecovery || outboundRecovery {
 		phase, terminalErr := GatewayPhaseInbound, terminalInboundErr
-		if terminalOutbound > 0 || outboundRecovery {
+		if terminalOutbound > 0 || terminalInbound == 0 && outboundRecovery {
 			phase, terminalErr = GatewayPhaseSend, terminalOutboundErr
 		}
 		return next, &GatewayCycleError{
 			Phase: phase, NonFatal: true,
 			TerminalInbound: terminalInbound, TerminalOutbound: terminalOutbound,
 			InboundRecovery: inboundRecovery, OutboundRecovery: outboundRecovery,
-			Err: terminalErr,
+			OutboundTargetEvents: outboundTargetEvents,
+			Err:                  terminalErr,
 		}
 	}
 	return next, nil

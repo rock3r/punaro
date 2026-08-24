@@ -225,6 +225,33 @@ func TestBridgeReportsPermanentInboundDropAfterContinuingPage(t *testing.T) {
 	}
 }
 
+func TestBridgePreservesPermanentInboundDropWhenOutboundTargetRecovers(t *testing.T) {
+	t.Parallel()
+	state, err := Open(filepath.Join(t.TempDir(), "telegram.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = state.Close() })
+	if err := state.SetRoute(55, 7, "conversation-1"); err != nil {
+		t.Fatal(err)
+	}
+	bridge := Bridge{
+		Relay:    &fakeBridgeRelay{deliveries: []relay.Delivery{{ID: "delivery-1", Message: relay.Message{ConversationID: "conversation-1", FromEndpoint: "agent/a", Body: "reply"}}}},
+		Endpoint: relay.TelegramGatewayEndpoint,
+		State:    state,
+		Poller:   fakePoller{updates: []Update{{ID: 10, UserID: 55, ChatID: 55, ThreadID: 7, Text: "poison"}}},
+		Gateway: Gateway{AllowedUserID: 55, State: state, Submit: func(context.Context, Submission) error {
+			return permanentRelayFixtureError{}
+		}},
+		Sender: &scriptedRichSender{},
+	}
+	next, err := bridge.SyncOnce(t.Context(), 10)
+	var cycleErr *GatewayCycleError
+	if next != 11 || !errors.As(err, &cycleErr) || cycleErr.Phase != GatewayPhaseInbound || cycleErr.TerminalInbound != 1 || ClassifyGatewayCycleFailure(err) != GatewayFailureInboundRelayPermanent {
+		t.Fatalf("next=%d err=%#v class=%s", next, cycleErr, ClassifyGatewayCycleFailure(err))
+	}
+}
+
 func TestBridgeReportsPlaneRecoveryEvidence(t *testing.T) {
 	t.Parallel()
 	state, err := Open(filepath.Join(t.TempDir(), "telegram.db"))

@@ -360,9 +360,12 @@ func TestFailedGatewayCycleRecordPreservesNonFatalTerminalDropCounts(t *testing.
 func TestFailedGatewayCycleRecordPreservesPlaneRecoveryEvidence(t *testing.T) {
 	t.Parallel()
 	now := time.Date(2026, 8, 23, 12, 0, 0, 0, time.UTC)
-	err := &telegram.GatewayCycleError{Phase: telegram.GatewayPhaseSend, NonFatal: true, InboundRecovery: true, OutboundRecovery: true}
+	err := &telegram.GatewayCycleError{
+		Phase: telegram.GatewayPhaseSend, NonFatal: true, InboundRecovery: true, OutboundRecovery: true,
+		OutboundTargetEvents: []telegram.GatewayOutboundTargetEvent{{ConversationID: "conversation-1"}},
+	}
 	record := failedGatewayCycleRecord(now, 42, err)
-	if !isNonFatalGatewayCycle(err) || record.Failure != telegram.GatewayFailureNone || !record.InboundRecovery || !record.OutboundRecovery || !record.PollOK || !record.RelayOK || !record.TelegramOK {
+	if !isNonFatalGatewayCycle(err) || record.Failure != telegram.GatewayFailureNone || !record.InboundRecovery || len(record.OutboundTargetEvents) != 1 || record.OutboundTargetEvents[0].ConversationID != "conversation-1" || !record.PollOK || !record.RelayOK || !record.TelegramOK {
 		t.Fatalf("record=%#v", record)
 	}
 }

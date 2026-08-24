@@ -95,6 +95,10 @@ func Open(database string) (*State, error) {
 			terminal_inbound INTEGER NOT NULL,
 			terminal_outbound INTEGER NOT NULL
 		)`,
+		`CREATE TABLE IF NOT EXISTS gateway_terminal_outbound_targets (
+			conversation_id TEXT PRIMARY KEY,
+			failures INTEGER NOT NULL CHECK (failures > 0)
+		)`,
 	} {
 		if _, err := db.ExecContext(context.Background(), statement); err != nil {
 			_ = db.Close()
@@ -126,20 +130,27 @@ const (
 	GatewayFailureDeletedTopic              GatewayFailureClass = "deleted_topic"
 )
 
-// GatewayCycleRecord contains only aggregate cycle health.
+// GatewayOutboundTargetEvent records content-free evidence that a conversation
+// target either rejected a delivery terminally or later accepted one.
+type GatewayOutboundTargetEvent struct {
+	ConversationID string
+	Terminal       bool
+}
+
+// GatewayCycleRecord contains only content-free cycle health evidence.
 type GatewayCycleRecord struct {
-	At               time.Time
-	Offset           int64
-	PollOK           bool
-	RelayOK          bool
-	TelegramOK       bool
-	OutboundBlocked  bool
-	OutboundProgress bool
-	TerminalInbound  int
-	TerminalOutbound int
-	InboundRecovery  bool
-	OutboundRecovery bool
-	Failure          GatewayFailureClass
+	At                   time.Time
+	Offset               int64
+	PollOK               bool
+	RelayOK              bool
+	TelegramOK           bool
+	OutboundBlocked      bool
+	OutboundProgress     bool
+	TerminalInbound      int
+	TerminalOutbound     int
+	InboundRecovery      bool
+	OutboundTargetEvents []GatewayOutboundTargetEvent
+	Failure              GatewayFailureClass
 }
 
 // GatewayStateSnapshot is the bounded, content-free state used by doctor.
@@ -180,13 +191,27 @@ func (s *State) RecordGatewayCycle(record GatewayCycleRecord) error {
 	if record.At.IsZero() || record.Offset < 0 || record.OutboundProgress && !record.OutboundBlocked || record.TerminalInbound < 0 || record.TerminalOutbound < 0 || record.Failure == GatewayFailureNone && (record.TerminalInbound > 0 || record.TerminalOutbound > 0) || !validGatewayFailure(record.Failure) {
 		return fmt.Errorf("invalid gateway cycle record")
 	}
+	terminalTargetEvents := 0
+	for _, event := range record.OutboundTargetEvents {
+		if strings.TrimSpace(event.ConversationID) == "" {
+			return fmt.Errorf("invalid gateway cycle record")
+		}
+		if event.Terminal {
+			terminalTargetEvents++
+		}
+	}
 	now := record.At.UTC().UnixMilli()
+	tx, err := s.db.BeginTx(context.Background(), nil)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = tx.Rollback() }()
 	var previousOffset, previousProgress int64
 	var previousConsecutive, previousTerminalInbound, previousTerminalOutbound int
 	var previousFailure string
 	var previousOutboundProgress sql.NullInt64
 	var previousOutboundBlocked bool
-	err := s.db.QueryRowContext(context.Background(), `SELECT offset,last_progress_at,last_outbound_progress_at,outbound_blocked,consecutive_failures,last_failure,terminal_inbound,terminal_outbound FROM gateway_health WHERE id = 1`).Scan(&previousOffset, &previousProgress, &previousOutboundProgress, &previousOutboundBlocked, &previousConsecutive, &previousFailure, &previousTerminalInbound, &previousTerminalOutbound)
+	err = tx.QueryRowContext(context.Background(), `SELECT offset,last_progress_at,last_outbound_progress_at,outbound_blocked,consecutive_failures,last_failure,terminal_inbound,terminal_outbound FROM gateway_health WHERE id = 1`).Scan(&previousOffset, &previousProgress, &previousOutboundProgress, &previousOutboundBlocked, &previousConsecutive, &previousFailure, &previousTerminalInbound, &previousTerminalOutbound)
 	first := errors.Is(err, sql.ErrNoRows)
 	if err != nil && !first {
 		return err
@@ -230,16 +255,39 @@ func (s *State) RecordGatewayCycle(record GatewayCycleRecord) error {
 	if outboundDelta == 0 && (record.Failure == GatewayFailureOutboundTelegramPermanent || record.Failure == GatewayFailureDeletedTopic) {
 		outboundDelta = 1
 	}
-	terminalInbound, terminalOutbound := inboundDelta, outboundDelta
+	if terminalTargetEvents > outboundDelta {
+		return fmt.Errorf("invalid gateway cycle record")
+	}
+	var previousTargetedOutbound int
+	if err := tx.QueryRowContext(context.Background(), `SELECT COALESCE(SUM(failures), 0) FROM gateway_terminal_outbound_targets`).Scan(&previousTargetedOutbound); err != nil {
+		return err
+	}
+	legacyTerminalOutbound := previousTerminalOutbound - previousTargetedOutbound
+	if legacyTerminalOutbound < 0 {
+		legacyTerminalOutbound = 0
+	}
+	for _, event := range record.OutboundTargetEvents {
+		if event.Terminal {
+			if _, err := tx.ExecContext(context.Background(), `INSERT INTO gateway_terminal_outbound_targets(conversation_id,failures) VALUES(?,1) ON CONFLICT(conversation_id) DO UPDATE SET failures=failures+1`, event.ConversationID); err != nil {
+				return err
+			}
+			continue
+		}
+		if _, err := tx.ExecContext(context.Background(), `DELETE FROM gateway_terminal_outbound_targets WHERE conversation_id=?`, event.ConversationID); err != nil {
+			return err
+		}
+	}
+	var targetedTerminalOutbound int
+	if err := tx.QueryRowContext(context.Background(), `SELECT COALESCE(SUM(failures), 0) FROM gateway_terminal_outbound_targets`).Scan(&targetedTerminalOutbound); err != nil {
+		return err
+	}
+	terminalInbound := inboundDelta
+	terminalOutbound := legacyTerminalOutbound + outboundDelta - terminalTargetEvents + targetedTerminalOutbound
 	if !first {
 		terminalInbound += previousTerminalInbound
-		terminalOutbound += previousTerminalOutbound
 	}
 	if inboundDelta == 0 && record.InboundRecovery {
 		terminalInbound = 0
-	}
-	if outboundDelta == 0 && record.OutboundRecovery {
-		terminalOutbound = 0
 	}
 	effectiveFailure := record.Failure
 	if effectiveFailure == GatewayFailureNone && (terminalInbound > 0 || terminalOutbound > 0) {
@@ -261,7 +309,7 @@ func (s *State) RecordGatewayCycle(record GatewayCycleRecord) error {
 	} else if effectiveFailure != GatewayFailureNone {
 		consecutiveFailures = previousConsecutive
 	}
-	_, err = s.db.ExecContext(context.Background(), `INSERT INTO gateway_health(
+	_, err = tx.ExecContext(context.Background(), `INSERT INTO gateway_health(
 		id,last_cycle_at,last_success_at,last_poll_at,last_relay_at,last_telegram_at,last_progress_at,last_outbound_progress_at,offset,outbound_blocked,consecutive_failures,last_failure,terminal_inbound,terminal_outbound
 	) VALUES (1,?,?,?,?,?,?,?,?,?,?,?,?,?)
 	ON CONFLICT(id) DO UPDATE SET
@@ -279,7 +327,10 @@ func (s *State) RecordGatewayCycle(record GatewayCycleRecord) error {
 		terminal_inbound=excluded.terminal_inbound,
 		terminal_outbound=excluded.terminal_outbound`,
 		now, successAt, pollAt, relayAt, telegramAt, progressAt, outboundProgressAt, record.Offset, outboundBlocked, consecutiveFailures, string(effectiveFailure), terminalInbound, terminalOutbound)
-	return err
+	if err != nil {
+		return err
+	}
+	return tx.Commit()
 }
 
 // InspectGatewayState opens the database read-only and returns bounded
