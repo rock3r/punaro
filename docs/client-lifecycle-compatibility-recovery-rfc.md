@@ -446,7 +446,9 @@ A separately signed, short-lived release catalog lists the current release
 manifests, minimum safe sequences, and critical-release blocks. It has no key
 delegation. Online update and automatic recovery require a fresh catalog. This
 lets Punaro retire a vulnerable release without making the immutable manifest
-itself unverifiable years later.
+itself unverifiable years later. The named current release must have the
+highest retained release sequence, so a new installation cannot default to an
+older release that an already-updated client would reject as a downgrade.
 
 Artifact paths are relative names beneath a fixed configured release origin.
 They cannot contain a scheme, host, credentials, query, fragment, empty path

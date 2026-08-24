@@ -109,6 +109,22 @@ func TestParseCatalogRejectsCriticallyBlockedCurrentRelease(t *testing.T) {
 	}
 }
 
+func TestParseCatalogRejectsCurrentReleaseBelowHighestSequence(t *testing.T) {
+	body := strings.Replace(validCatalogJSON(), "\n  ],\n  \"critical_blocks\"", `,
+    {
+      "release": "v0.2.0",
+      "sequence": 2,
+      "manifest_path": "v0.2.0/punaro-release.json",
+      "manifest_length": 128,
+      "manifest_sha256": "`+testDigestB+`"
+    }
+  ],
+  "critical_blocks"`, 1)
+	if _, err := ParseCatalog([]byte(body)); err == nil {
+		t.Fatal("catalog accepted an older current release")
+	}
+}
+
 func TestParseCatalogRejectsFutureCriticalBlock(t *testing.T) {
 	body := strings.Replace(validCatalogJSON(), `"critical_blocks": []`, `"critical_blocks": [100]`, 1)
 	if _, err := ParseCatalog([]byte(body)); err == nil {

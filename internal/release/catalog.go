@@ -60,6 +60,7 @@ func (catalog Catalog) validate() error {
 	seenName := map[string]struct{}{}
 	seenSequence := map[int64]struct{}{}
 	lowest := catalog.Releases[0].Sequence
+	highest := catalog.Releases[0].Sequence
 	foundCurrent := false
 	currentSequence := int64(0)
 	for _, entry := range catalog.Releases {
@@ -77,12 +78,15 @@ func (catalog Catalog) validate() error {
 		if entry.Sequence < lowest {
 			lowest = entry.Sequence
 		}
+		if entry.Sequence > highest {
+			highest = entry.Sequence
+		}
 		if entry.Release == catalog.CurrentRelease {
 			foundCurrent = true
 			currentSequence = entry.Sequence
 		}
 	}
-	if !foundCurrent || catalog.MinimumSafeSequence > lowest {
+	if !foundCurrent || currentSequence != highest || catalog.MinimumSafeSequence > lowest {
 		return errors.New("invalid catalog coverage")
 	}
 	if len(catalog.CriticalBlocks) > maxCatalogCriticalBlocks {
