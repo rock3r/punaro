@@ -123,10 +123,14 @@ func removeStateLockIfSame(path string, inspected os.FileInfo) (bool, error) {
 }
 
 func stateStoreLockPath(statePath string) (string, error) {
+	canonicalPath, err := canonicalStatePath(statePath)
+	if err != nil {
+		return "", err
+	}
 	identity, err := canonicalStateLockIdentity(statePath)
 	if err != nil {
 		return "", err
 	}
 	digest := sha256.Sum256([]byte(identity))
-	return filepath.Join(filepath.Dir(identity), ".canopi-lock-"+hex.EncodeToString(digest[:8])), nil
+	return filepath.Join(filepath.Dir(canonicalPath), ".canopi-lock-"+hex.EncodeToString(digest[:8])), nil
 }

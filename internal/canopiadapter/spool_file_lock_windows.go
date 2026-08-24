@@ -4,88 +4,98 @@ package canopiadapter
 
 import (
 	"context"
-	"crypto/sha256"
-	"encoding/hex"
 	"errors"
 	"os"
 	"path/filepath"
-	"runtime"
-	"strings"
 	"time"
+	"unsafe"
 
 	"golang.org/x/sys/windows"
 )
 
 func withSpoolRepairLock(ctx context.Context, path string, repair func() error) error {
-	runtime.LockOSThread()
-	defer runtime.UnlockOSThread()
-	identity, err := canonicalWindowsSpoolRepairIdentity(path)
+	coordinatorPath := filepath.Join(filepath.Dir(path), ".canopi-spool-repair.lock")
+	file, err := openSpoolRepairCoordinator(coordinatorPath)
 	if err != nil {
 		return err
 	}
-	digest := sha256.Sum256([]byte(identity))
-	name, err := windows.UTF16PtrFromString("Global\\CanopiSpoolRepair-" + hex.EncodeToString(digest[:]))
-	if err != nil {
-		return err
-	}
-	mutex, err := windows.CreateMutex(nil, false, name)
-	if err != nil && !errors.Is(err, windows.ERROR_ALREADY_EXISTS) {
-		return err
-	}
-	defer func() { _ = windows.CloseHandle(mutex) }()
-	waitTimeout := uint32(windows.INFINITE)
-	if deadline, ok := ctx.Deadline(); ok {
-		remaining := time.Until(deadline)
-		if remaining <= 0 {
-			return ctx.Err()
-		}
-		milliseconds := (remaining + time.Millisecond - 1) / time.Millisecond
-		if milliseconds < time.Duration(windows.INFINITE) {
-			waitTimeout = uint32(milliseconds) // #nosec G115 -- value is bounded below INFINITE.
-		}
-	}
-	wait, err := windows.WaitForSingleObject(mutex, waitTimeout)
-	if wait == uint32(windows.WAIT_TIMEOUT) {
-		return context.DeadlineExceeded
-	}
-	if err != nil || (wait != windows.WAIT_OBJECT_0 && wait != windows.WAIT_ABANDONED) {
+	defer func() { _ = file.Close() }()
+	for {
+		acquired, err := tryLockSpoolFile(file)
 		if err != nil {
 			return err
 		}
-		return os.ErrInvalid
+		if acquired {
+			break
+		}
+		timer := time.NewTimer(enqueueLockPoll)
+		select {
+		case <-ctx.Done():
+			if !timer.Stop() {
+				<-timer.C
+			}
+			return ctx.Err()
+		case <-timer.C:
+		}
 	}
-	defer func() { _ = windows.ReleaseMutex(mutex) }()
+	defer func() { _ = unlockSpoolFile(file) }()
 	return repair()
 }
 
-func canonicalWindowsSpoolRepairIdentity(path string) (string, error) {
-	parent, err := finalWindowsSpoolPath(filepath.Dir(path))
-	if err != nil {
-		return "", err
+func openSpoolRepairCoordinator(path string) (*os.File, error) {
+	for range 4 {
+		file, err := createSpoolLockFile(path)
+		if err == nil {
+			if err := protectSpoolFile(path, file); err != nil {
+				_ = file.Close()
+				_ = os.Remove(path)
+				return nil, err
+			}
+			if err := syncDirectory(filepath.Dir(path)); err != nil {
+				_ = file.Close()
+				return nil, err
+			}
+			return file, nil
+		}
+		if !errors.Is(err, os.ErrExist) {
+			return nil, err
+		}
+		before, err := os.Lstat(path)
+		if errors.Is(err, os.ErrNotExist) {
+			continue
+		}
+		if err != nil {
+			return nil, err
+		}
+		if !privateSpoolFile(path, before) {
+			removed, err := removeSpoolFileIfSame(path, before)
+			if err != nil {
+				return nil, err
+			}
+			if removed {
+				if err := syncDirectory(filepath.Dir(path)); err != nil {
+					return nil, err
+				}
+			}
+			continue
+		}
+		file, err = openExistingSpoolLockFile(path)
+		if errors.Is(err, os.ErrNotExist) {
+			continue
+		}
+		if err != nil {
+			return nil, err
+		}
+		after, err := file.Stat()
+		if err == nil && os.SameFile(before, after) && privateSpoolFile(path, after) {
+			return file, nil
+		}
+		_ = file.Close()
+		if err != nil {
+			return nil, err
+		}
 	}
-	return strings.ToLower(filepath.Join(parent, filepath.Base(path))), nil
-}
-
-func finalWindowsSpoolPath(path string) (string, error) {
-	name, err := windows.UTF16PtrFromString(path)
-	if err != nil {
-		return "", err
-	}
-	handle, err := windows.CreateFile(name, windows.FILE_READ_ATTRIBUTES, windows.FILE_SHARE_READ|windows.FILE_SHARE_WRITE|windows.FILE_SHARE_DELETE, nil, windows.OPEN_EXISTING, windows.FILE_FLAG_BACKUP_SEMANTICS, 0)
-	if err != nil {
-		return "", err
-	}
-	defer func() { _ = windows.CloseHandle(handle) }()
-	const maxFinalPathCharacters = 32_768
-	buffer := make([]uint16, maxFinalPathCharacters)
-	length, err := windows.GetFinalPathNameByHandle(handle, &buffer[0], maxFinalPathCharacters, 0)
-	if err != nil {
-		return "", err
-	}
-	if length >= maxFinalPathCharacters {
-		return "", errors.New("canonical Windows spool path exceeds limit")
-	}
-	return windows.UTF16ToString(buffer[:length]), nil
+	return nil, errors.New("cannot replace unprotected Canopi spool repair coordinator")
 }
 
 func tryLockSpoolFile(file *os.File) (bool, error) {
@@ -115,7 +125,22 @@ func openWindowsSpoolLockFile(path string, disposition uint32) (*os.File, error)
 	if err != nil {
 		return nil, err
 	}
-	handle, err := windows.CreateFile(name, windows.GENERIC_READ|windows.GENERIC_WRITE, windows.FILE_SHARE_READ|windows.FILE_SHARE_WRITE|windows.FILE_SHARE_DELETE, nil, disposition, windows.FILE_ATTRIBUTE_NORMAL|windows.FILE_FLAG_OPEN_REPARSE_POINT, 0) // #nosec G304 -- fixed lock name is inside the validated private spool and opened without following reparse points.
+	var security *windows.SecurityAttributes
+	if disposition == windows.CREATE_NEW {
+		sid := currentWindowsSpoolSID()
+		if sid == nil {
+			return nil, errors.New("cannot identify the current user for a Canopi spool lock")
+		}
+		descriptor, descriptorErr := windows.SecurityDescriptorFromString("D:P(A;;FA;;;" + sid.String() + ")")
+		if descriptorErr != nil {
+			return nil, descriptorErr
+		}
+		security = &windows.SecurityAttributes{
+			Length:             uint32(unsafe.Sizeof(windows.SecurityAttributes{})), // #nosec G115 -- Windows ABI structure size fits DWORD.
+			SecurityDescriptor: descriptor,
+		}
+	}
+	handle, err := windows.CreateFile(name, windows.GENERIC_READ|windows.GENERIC_WRITE, windows.FILE_SHARE_READ|windows.FILE_SHARE_WRITE|windows.FILE_SHARE_DELETE, security, disposition, windows.FILE_ATTRIBUTE_NORMAL|windows.FILE_FLAG_OPEN_REPARSE_POINT, 0) // #nosec G304 -- fixed lock name is inside the validated private spool and opened without following reparse points.
 	if err != nil {
 		return nil, &os.PathError{Op: "open", Path: path, Err: err}
 	}

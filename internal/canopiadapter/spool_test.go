@@ -189,7 +189,7 @@ func TestWindowsSpoolLocksUseExclusiveNoReparseOpens(t *testing.T) {
 		t.Fatal(err)
 	}
 	source := string(payload)
-	for _, required := range []string{"CREATE_NEW", "OPEN_EXISTING", "FILE_FLAG_OPEN_REPARSE_POINT", "FILE_ATTRIBUTE_REPARSE_POINT", "CreateMutex", "WaitForSingleObject", "LockOSThread", "GetFinalPathNameByHandle", "strings.ToLower", "Global\\\\CanopiSpoolRepair-"} {
+	for _, required := range []string{"CREATE_NEW", "OPEN_EXISTING", "FILE_FLAG_OPEN_REPARSE_POINT", "FILE_ATTRIBUTE_REPARSE_POINT", "SecurityAttributes", "D:P(A;;FA;;;", "LockFileEx", ".canopi-spool-repair.lock"} {
 		if !strings.Contains(source, required) {
 			t.Fatalf("Windows spool lock open is missing %q", required)
 		}

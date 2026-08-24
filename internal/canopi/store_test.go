@@ -357,13 +357,24 @@ func TestWindowsStateLockIdentityContractIsCaseInsensitive(t *testing.T) {
 	}
 }
 
+func TestStateLockPathUsesCasePreservedCanonicalDirectory(t *testing.T) {
+	payload, err := os.ReadFile("store_lock.go")
+	if err != nil {
+		t.Fatal(err)
+	}
+	source := string(payload)
+	if !strings.Contains(source, "filepath.Dir(canonicalPath)") || strings.Contains(source, "filepath.Dir(identity)") {
+		t.Fatal("state lock path is not rooted in the case-preserved canonical directory")
+	}
+}
+
 func TestWindowsStateLockUsesExclusiveNoReparseOpens(t *testing.T) {
 	payload, err := os.ReadFile("store_lock_windows.go")
 	if err != nil {
 		t.Fatal(err)
 	}
 	source := string(payload)
-	for _, required := range []string{"CREATE_NEW", "OPEN_EXISTING", "FILE_FLAG_OPEN_REPARSE_POINT", "FILE_ATTRIBUTE_REPARSE_POINT", "CreateMutex", "WaitForSingleObject", "LockOSThread", "strings.ToLower", "Global\\\\CanopiStateRepair-"} {
+	for _, required := range []string{"CREATE_NEW", "OPEN_EXISTING", "FILE_FLAG_OPEN_REPARSE_POINT", "FILE_ATTRIBUTE_REPARSE_POINT", "SecurityAttributes", "D:P(A;;FA;;;", "LockFileEx", ".canopi-state-repair.lock"} {
 		if !strings.Contains(source, required) {
 			t.Fatalf("Windows state lock open is missing %q", required)
 		}

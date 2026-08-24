@@ -168,9 +168,10 @@ to the no-link checks above rather than resolving a file link to its target.
 The predictable state-lock file itself is created exclusively and opened without
 following links; an unsafe pre-existing entry is removed, directory-synced, and
 recreated with current-user-only protection. Cross-process repair is serialized
-by the parent-directory kernel lock on Unix and a handle-canonicalized,
-cross-session named kernel mutex on Windows before the entry is rechecked and
-unlinked.
+by the parent-directory kernel lock on Unix and a no-reparse, current-user-only
+coordinator file inside the protected state directory on Windows before the
+entry is rechecked and unlinked. Its byte-range lock crosses Windows sessions
+without exposing a publicly claimable named mutex.
 Every server exit, including a signal or unexpected listener failure, waits for
 `http.Server.Shutdown` to finish draining active handlers before `Store.Close`
 releases that lifetime lock, fencing rolling restarts until every acknowledged
@@ -275,10 +276,11 @@ The fixed enqueue, drain, and supervisor lock names use create-exclusive and
 no-follow opens with the same ownership and privacy validation. Unsafe entries
 left from a previously shared directory are removed, directory-synced, and
 replaced instead of permanently blocking the adapter. Repair is serialized by
-the parent-directory kernel lock on Unix and a handle-canonicalized,
-cross-session named kernel mutex on Windows, so concurrent hooks cannot unlink
-each other's replacement locks even when a service and interactive agent run in
-different sessions.
+the parent-directory kernel lock on Unix and a no-reparse, current-user-only
+coordinator file inside the protected spool on Windows. Its byte-range lock
+crosses Windows sessions without exposing a publicly claimable named mutex, so
+concurrent hooks cannot unlink each other's replacement locks even when a
+service and interactive agent run in different sessions.
 The configured spool capacity includes a fixed contention reserve (one sixteenth,
 at least one and at most 256 slots). Normal and contention lanes therefore remain
 jointly bounded while concurrent hooks can publish without waiting past their

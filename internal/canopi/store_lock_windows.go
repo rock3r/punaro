@@ -3,39 +3,82 @@
 package canopi
 
 import (
-	"crypto/sha256"
-	"encoding/hex"
 	"errors"
 	"os"
 	"path/filepath"
-	"runtime"
-	"strings"
+	"unsafe"
 
 	"golang.org/x/sys/windows"
 )
 
 func withStateRepairLock(path string, repair func() error) error {
-	runtime.LockOSThread()
-	defer runtime.UnlockOSThread()
-	digest := sha256.Sum256([]byte(strings.ToLower(filepath.Clean(path))))
-	name, err := windows.UTF16PtrFromString("Global\\CanopiStateRepair-" + hex.EncodeToString(digest[:]))
+	coordinatorPath := filepath.Join(filepath.Dir(path), ".canopi-state-repair.lock")
+	file, err := openStateRepairCoordinator(coordinatorPath)
 	if err != nil {
 		return err
 	}
-	mutex, err := windows.CreateMutex(nil, false, name)
-	if err != nil && !errors.Is(err, windows.ERROR_ALREADY_EXISTS) {
+	defer func() { _ = file.Close() }()
+	if err := lockStateFile(file); err != nil {
 		return err
 	}
-	defer func() { _ = windows.CloseHandle(mutex) }()
-	wait, err := windows.WaitForSingleObject(mutex, windows.INFINITE)
-	if err != nil || (wait != windows.WAIT_OBJECT_0 && wait != windows.WAIT_ABANDONED) {
-		if err != nil {
-			return err
-		}
-		return os.ErrInvalid
-	}
-	defer func() { _ = windows.ReleaseMutex(mutex) }()
+	defer func() { _ = unlockStateFile(file) }()
 	return repair()
+}
+
+func openStateRepairCoordinator(path string) (*os.File, error) {
+	for range 4 {
+		file, err := createStateLockFile(path)
+		if err == nil {
+			if err := protectStateFile(path, file); err != nil {
+				_ = file.Close()
+				_ = os.Remove(path)
+				return nil, err
+			}
+			if err := syncStateDirectory(filepath.Dir(path)); err != nil {
+				_ = file.Close()
+				return nil, err
+			}
+			return file, nil
+		}
+		if !errors.Is(err, os.ErrExist) {
+			return nil, err
+		}
+		before, err := os.Lstat(path)
+		if errors.Is(err, os.ErrNotExist) {
+			continue
+		}
+		if err != nil {
+			return nil, err
+		}
+		if !privateStateFile(path, before) {
+			removed, err := removeStateLockIfSame(path, before)
+			if err != nil {
+				return nil, err
+			}
+			if removed {
+				if err := syncStateDirectory(filepath.Dir(path)); err != nil {
+					return nil, err
+				}
+			}
+			continue
+		}
+		file, err = openExistingStateLockFile(path)
+		if errors.Is(err, os.ErrNotExist) {
+			continue
+		}
+		if err != nil {
+			return nil, err
+		}
+		after, err := file.Stat()
+		if err == nil && os.SameFile(before, after) && privateStateFile(path, after) {
+			return file, nil
+		}
+		_ = file.Close()
+		if err != nil {
+			return nil, err
+		}
+	}
+	return nil, errors.New("cannot replace unprotected Canopi state repair coordinator")
 }
 
 func tryLockStateFile(file *os.File) (bool, error) {
@@ -45,6 +88,11 @@ func tryLockStateFile(file *os.File) (bool, error) {
 		return false, nil
 	}
 	return err == nil, err
+}
+
+func lockStateFile(file *os.File) error {
+	var overlapped windows.Overlapped
+	return windows.LockFileEx(windows.Handle(file.Fd()), windows.LOCKFILE_EXCLUSIVE_LOCK, 0, 1, 0, &overlapped)
 }
 
 func createStateLockFile(path string) (*os.File, error) {
@@ -60,7 +108,22 @@ func openWindowsStateLockFile(path string, disposition uint32) (*os.File, error)
 	if err != nil {
 		return nil, err
 	}
-	handle, err := windows.CreateFile(name, windows.GENERIC_READ|windows.GENERIC_WRITE, windows.FILE_SHARE_READ|windows.FILE_SHARE_WRITE|windows.FILE_SHARE_DELETE, nil, disposition, windows.FILE_ATTRIBUTE_NORMAL|windows.FILE_FLAG_OPEN_REPARSE_POINT, 0) // #nosec G304 -- fixed lock name is inside the validated private state directory and opened without following reparse points.
+	var security *windows.SecurityAttributes
+	if disposition == windows.CREATE_NEW {
+		user, userErr := windows.GetCurrentProcessToken().GetTokenUser()
+		if userErr != nil || user.User.Sid == nil {
+			return nil, errors.New("cannot identify the current user for a Canopi state lock")
+		}
+		descriptor, descriptorErr := windows.SecurityDescriptorFromString("D:P(A;;FA;;;" + user.User.Sid.String() + ")")
+		if descriptorErr != nil {
+			return nil, descriptorErr
+		}
+		security = &windows.SecurityAttributes{
+			Length:             uint32(unsafe.Sizeof(windows.SecurityAttributes{})), // #nosec G115 -- Windows ABI structure size fits DWORD.
+			SecurityDescriptor: descriptor,
+		}
+	}
+	handle, err := windows.CreateFile(name, windows.GENERIC_READ|windows.GENERIC_WRITE, windows.FILE_SHARE_READ|windows.FILE_SHARE_WRITE|windows.FILE_SHARE_DELETE, security, disposition, windows.FILE_ATTRIBUTE_NORMAL|windows.FILE_FLAG_OPEN_REPARSE_POINT, 0) // #nosec G304 -- fixed lock name is inside the validated private state directory and opened without following reparse points.
 	if err != nil {
 		return nil, &os.PathError{Op: "open", Path: path, Err: err}
 	}
