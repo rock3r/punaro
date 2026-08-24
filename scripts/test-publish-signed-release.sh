@@ -136,4 +136,42 @@ if [ "$(grep -Fc 'release edit v0.1.0-alpha.1 --repo rock3r/punaro --draft=false
 	exit 1
 fi
 
+recovery="$temporary/recovery"
+prepare_case "$recovery"
+mkdir -p "$recovery/state/remote/catalog"
+printf '%s\n' interrupted-candidate >"$recovery/state/remote/catalog/punaro-catalog.json"
+printf '%s\n' interrupted-signature >"$recovery/state/remote/catalog/punaro-catalog.sig"
+printf '%s\n' previous-catalog >"$recovery/state/remote/catalog/punaro-catalog.previous.json"
+printf '%s\n' previous-signature >"$recovery/state/remote/catalog/punaro-catalog.previous.sig"
+printf '%s\n' true >"$recovery/state/catalog-draft"
+printf '%s\n' false >"$recovery/state/release-draft"
+printf '%s\n' true >"$recovery/state/release-prerelease"
+touch "$recovery/state/fail-previous-publication-check"
+if PATH="$recovery/bin:$PATH" \
+	PUNARO_FAKE_GH_STATE="$recovery/state" \
+	PUNARO_FAKE_GH_LOG="$recovery/gh.log" \
+	PUNARO_FAKE_GO_LOG="$recovery/go.log" \
+	"$repo_dir/scripts/publish-signed-release.sh" --release v0.1.0-alpha.1 --dir "$recovery/documents" --keys-file "$recovery/release.pub" >/dev/null 2>&1; then
+	printf '%s\n' 'interrupted replacement forgot the verified predecessor sequence' >&2
+	exit 1
+fi
+if grep -Eq '^release (upload|edit|create|delete-asset) ' "$recovery/gh.log"; then
+	printf '%s\n' 'interrupted replacement mutated GitHub before predecessor sequence validation' >&2
+	exit 1
+fi
+rm "$recovery/state/fail-previous-publication-check"
+PATH="$recovery/bin:$PATH" \
+	PUNARO_FAKE_GH_STATE="$recovery/state" \
+	PUNARO_FAKE_GH_LOG="$recovery/gh.log" \
+	PUNARO_FAKE_GO_LOG="$recovery/go.log" \
+	"$repo_dir/scripts/publish-signed-release.sh" --release v0.1.0-alpha.1 --dir "$recovery/documents" --keys-file "$recovery/release.pub" >/dev/null
+if [ "$(cat "$recovery/state/catalog-draft")" != false ] || ! cmp -s "$recovery/documents/punaro-catalog.json" "$recovery/state/remote/catalog/punaro-catalog.json"; then
+	printf '%s\n' 'interrupted replacement did not resume from its verified predecessor' >&2
+	exit 1
+fi
+if [ "$(cat "$recovery/state/remote/catalog/punaro-catalog.previous.json")" != previous-catalog ] || [ "$(cat "$recovery/state/remote/catalog/punaro-catalog.previous.sig")" != previous-signature ]; then
+	printf '%s\n' 'successful recovery discarded the durable predecessor pair' >&2
+	exit 1
+fi
+
 printf '%s\n' 'publish_signed_release_tests_passed'

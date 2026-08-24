@@ -81,6 +81,7 @@ catalog_restore_required=false
 catalog_redraft_required=false
 previous_catalog=
 previous_catalog_signature=
+catalog_has_history=false
 artifact_names="$download_dir/artifact-names"
 jq -r '.artifacts[].path | split("/") | last' "$manifest" >"$artifact_names"
 download_release_candidate() {
@@ -147,7 +148,7 @@ cmp -s "$catalog" "$draft_release_dir/punaro-catalog.json" || fail 'draft catalo
 
 catalog_exists=false
 catalog_draft=false
-if catalog_state=$(gh release view catalog --repo "$repository" --json isDraft 2>/dev/null); then
+if catalog_state=$(gh release view catalog --repo "$repository" --json isDraft,assets 2>/dev/null); then
 	catalog_exists=true
 	catalog_draft=$(printf '%s\n' "$catalog_state" | jq -er 'if .isDraft == true then "true" elif .isDraft == false then "false" else error("invalid draft state") end')
 	if [ "$catalog_draft" = false ]; then
@@ -160,10 +161,31 @@ if catalog_state=$(gh release view catalog --repo "$repository" --json isDraft 2
 			cd "$repo_dir"
 			go run ./cmd/punaro-release verify --keys-file "$keys_file" --document "$previous_catalog" --signature "$previous_catalog_signature"
 		) || fail 'existing live catalog is not a restorable verified pair'
+		catalog_has_history=true
+	else
+		recovery_assets=$(printf '%s\n' "$catalog_state" | jq -er '[.assets[].name | select(. == "punaro-catalog.previous.json" or . == "punaro-catalog.previous.sig")] | length')
+		if [ "$recovery_assets" -eq 1 ]; then
+			fail 'draft catalog recovery pair is incomplete'
+		fi
+		if [ "$recovery_assets" -eq 2 ]; then
+			recovery_dir="$download_dir/catalog-recovery"
+			previous_catalog_dir="$download_dir/previous-catalog"
+			mkdir "$recovery_dir" "$previous_catalog_dir"
+			gh release download catalog --repo "$repository" --pattern punaro-catalog.previous.json --pattern punaro-catalog.previous.sig --dir "$recovery_dir"
+			previous_catalog="$previous_catalog_dir/punaro-catalog.json"
+			previous_catalog_signature="$previous_catalog_dir/punaro-catalog.sig"
+			cp "$recovery_dir/punaro-catalog.previous.json" "$previous_catalog"
+			cp "$recovery_dir/punaro-catalog.previous.sig" "$previous_catalog_signature"
+			(
+				cd "$repo_dir"
+				go run ./cmd/punaro-release verify --keys-file "$keys_file" --document "$previous_catalog" --signature "$previous_catalog_signature"
+			) || fail 'draft catalog predecessor is not a verified recovery pair'
+			catalog_has_history=true
+		fi
 	fi
 fi
 
-if [ "$catalog_exists" = true ] && [ "$catalog_draft" = false ]; then
+if [ "$catalog_has_history" = true ]; then
 	(
 		cd "$repo_dir"
 		go run ./cmd/punaro-release publication-check --catalog "$catalog" --previous-catalog "$previous_catalog"
@@ -184,8 +206,14 @@ fi
 
 if [ "$catalog_exists" = true ] && [ "$catalog_draft" = false ]; then
 	# A clobber is delete-then-upload per asset. Hide the release before changing
-	# either member of the signed pair, and keep the previously verified pair for
-	# an equally hidden restoration on every failure.
+	# either member of the signed pair. First retain the previously verified pair
+	# under reserved recovery names so a later invocation can recover history even
+	# if every in-process restoration attempt is interrupted or fails.
+	previous_catalog_recovery="$download_dir/punaro-catalog.previous.json"
+	previous_catalog_recovery_signature="$download_dir/punaro-catalog.previous.sig"
+	cp "$previous_catalog" "$previous_catalog_recovery"
+	cp "$previous_catalog_signature" "$previous_catalog_recovery_signature"
+	gh release upload catalog "$previous_catalog_recovery" "$previous_catalog_recovery_signature" --repo "$repository" --clobber
 	catalog_restore_required=true
 	gh release edit catalog --repo "$repository" --draft=true --prerelease
 	gh release upload catalog "$catalog" "$catalog_signature" --repo "$repository" --clobber

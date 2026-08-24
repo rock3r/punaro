@@ -23,7 +23,15 @@ case "$operation" in
 	view)
 		if [ "$tag" = catalog ]; then
 			[ -d "$remote/catalog" ] || exit 1
-			printf '{"isDraft":%s}\n' "$(cat "$state/catalog-draft")"
+			assets='[]'
+			if [ -f "$remote/catalog/punaro-catalog.previous.json" ] && [ -f "$remote/catalog/punaro-catalog.previous.sig" ]; then
+				assets='[{"name":"punaro-catalog.previous.json"},{"name":"punaro-catalog.previous.sig"}]'
+			elif [ -f "$remote/catalog/punaro-catalog.previous.json" ]; then
+				assets='[{"name":"punaro-catalog.previous.json"}]'
+			elif [ -f "$remote/catalog/punaro-catalog.previous.sig" ]; then
+				assets='[{"name":"punaro-catalog.previous.sig"}]'
+			fi
+			printf '{"isDraft":%s,"assets":%s}\n' "$(cat "$state/catalog-draft")" "$assets"
 		else
 			printf '{"tagName":"%s","isDraft":%s,"isPrerelease":%s}\n' \
 				"$tag" "$(cat "$state/release-draft")" "$(cat "$state/release-prerelease")"
@@ -47,12 +55,13 @@ case "$operation" in
 		copy_assets "$tag" "$destination"
 		;;
 	upload)
-		if [ "$tag" = catalog ] && [ "$(cat "$state/catalog-draft")" = false ]; then
-			touch "$state/unsafe-live-catalog-upload"
-		fi
 		mkdir -p "$remote/$tag"
 		for source in "$@"; do
 			if [ -f "$source" ]; then
+				asset=$(basename -- "$source")
+				if [ "$tag" = catalog ] && [ "$(cat "$state/catalog-draft")" = false ] && { [ "$asset" = punaro-catalog.json ] || [ "$asset" = punaro-catalog.sig ]; }; then
+					touch "$state/unsafe-live-catalog-upload"
+				fi
 				cp "$source" "$remote/$tag/"
 			fi
 		done

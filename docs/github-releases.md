@@ -165,10 +165,15 @@ Only the offline-signature publisher can make those stable assets visible.
    immutable versioned prerelease available first.
    Initial live-catalog publication stays draft until both signed assets are
    uploaded. On replacement, the publisher first downloads and verifies the
-   existing pair, retains it until the new pair is remotely re-downloaded and
-   verified, and restores the previous pair (with bounded retries) after any
-   partial upload, signal, or verification failure. If that happens after the
-   versioned prerelease is visible, rerunning the helper is safe: it accepts
+   existing pair and uploads that signed predecessor under reserved recovery
+   asset names before hiding the live catalog. It retains those recovery assets
+   across successful publication, remotely re-downloads and verifies the new
+   pair, and restores the previous pair (with bounded retries) after any partial
+   upload, signal, or verification failure. A later invocation that encounters
+   an interrupted replacement draft must verify and sequence against that
+   retained predecessor; it cannot treat the draft as history-free. If a
+   failure happens after the versioned prerelease is visible, rerunning the
+   helper is safe: it accepts
    only that exact retryable prerelease and rechecks all signed bytes before
    advancing the catalog. A first or previously interrupted draft catalog is
    returned to draft state after any failed exposure or remote verification,
