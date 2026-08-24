@@ -131,10 +131,10 @@ func (s Spool) enqueueLocked(ctx context.Context, event protocol.Event, payload 
 	if s.primaryEventCapacity() == 0 {
 		return s.enqueueContention(ctx, event, payload)
 	}
-	if match, err := s.contentionEventExists(ctx, event.EventID); err != nil {
+	if contentionPath, match, err := s.contentionEventExists(ctx, event.EventID); err != nil {
 		return err
 	} else if match {
-		return s.syncQueuedSpoolEvent(target)
+		return s.syncQueuedSpoolEvent(contentionPath)
 	}
 	files, err := s.eventFiles(ctx)
 	if err != nil {
@@ -278,10 +278,10 @@ func (s Spool) publishIntoContentionSlot(ctx context.Context, path, eventID stri
 	return matched, created, occupied, err
 }
 
-func (s Spool) contentionEventExists(ctx context.Context, eventID string) (bool, error) {
+func (s Spool) contentionEventExists(ctx context.Context, eventID string) (string, bool, error) {
 	for slot := range s.contentionSlotCount() {
 		if err := contextErr(ctx); err != nil {
-			return false, err
+			return "", false, err
 		}
 		path := filepath.Join(s.Directory, fmt.Sprintf(".contention-%06d.json", slot))
 		match := false
@@ -306,13 +306,13 @@ func (s Spool) contentionEventExists(ctx context.Context, eventID string) (bool,
 			return syncDirectory(s.Directory)
 		})
 		if err != nil {
-			return false, err
+			return "", false, err
 		}
 		if match {
-			return true, nil
+			return path, true, nil
 		}
 	}
-	return false, nil
+	return "", false, nil
 }
 
 func (s Spool) contentionSlotCount() int {

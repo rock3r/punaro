@@ -5,28 +5,40 @@ package canopi
 import (
 	"errors"
 	"os"
-	"path/filepath"
 	"unsafe"
 
 	"golang.org/x/sys/windows"
 )
 
-func pinnedWindowsStateDirectoryPath(directory *os.File) (string, error) {
-	const maxFinalPathCharacters = 32_768
-	buffer := make([]uint16, maxFinalPathCharacters)
-	length, err := windows.GetFinalPathNameByHandle(windows.Handle(directory.Fd()), &buffer[0], maxFinalPathCharacters, 0)
-	if err != nil || length >= maxFinalPathCharacters {
-		return "", errors.New("resolve pinned Canopi state directory")
-	}
-	return windows.UTF16ToString(buffer[:length]), nil
-}
-
 func recoverPinnedStateReplacement(directory *os.File, targetName string) error {
-	path, err := pinnedWindowsStateDirectoryPath(directory)
+	backupName := stateTemporaryPrefix(targetName) + "backup"
+	backup, err := openPrivateStateFileInPinnedDirectory(directory, backupName)
+	if errors.Is(err, windows.ERROR_FILE_NOT_FOUND) || errors.Is(err, windows.ERROR_PATH_NOT_FOUND) {
+		return nil
+	}
 	if err != nil {
 		return err
 	}
-	return recoverStateReplacement(filepath.Join(path, targetName))
+	target, targetErr := openPrivateStateFileInPinnedDirectory(directory, targetName)
+	if targetErr == nil {
+		_ = target.Close()
+		if err := discardPinnedWindowsStateFile(backup); err != nil {
+			return err
+		}
+		return windows.FlushFileBuffers(windows.Handle(directory.Fd()))
+	}
+	if !errors.Is(targetErr, windows.ERROR_FILE_NOT_FOUND) && !errors.Is(targetErr, windows.ERROR_PATH_NOT_FOUND) {
+		_ = backup.Close()
+		return targetErr
+	}
+	if err := renamePinnedWindowsStateFile(directory, backup, targetName); err != nil {
+		_ = backup.Close()
+		return err
+	}
+	if err := backup.Close(); err != nil {
+		return err
+	}
+	return windows.FlushFileBuffers(windows.Handle(directory.Fd()))
 }
 
 func openPrivateStateFileInPinnedDirectory(directory *os.File, targetName string) (*os.File, error) {
@@ -37,7 +49,7 @@ func openPrivateStateFileInPinnedDirectory(directory *os.File, targetName string
 	oa := &windows.OBJECT_ATTRIBUTES{Length: uint32(unsafe.Sizeof(windows.OBJECT_ATTRIBUTES{})), RootDirectory: windows.Handle(directory.Fd()), ObjectName: objectName, Attributes: windows.OBJ_DONT_REPARSE}
 	var iosb windows.IO_STATUS_BLOCK
 	var handle windows.Handle
-	if err := windows.NtCreateFile(&handle, windows.FILE_GENERIC_READ, oa, &iosb, nil, windows.FILE_ATTRIBUTE_NORMAL, windows.FILE_SHARE_READ, windows.FILE_OPEN, windows.FILE_NON_DIRECTORY_FILE|windows.FILE_SYNCHRONOUS_IO_NONALERT, 0, 0); err != nil {
+	if err := windows.NtCreateFile(&handle, windows.FILE_GENERIC_READ|windows.DELETE, oa, &iosb, nil, windows.FILE_ATTRIBUTE_NORMAL, windows.FILE_SHARE_READ|windows.FILE_SHARE_DELETE, windows.FILE_OPEN, windows.FILE_NON_DIRECTORY_FILE|windows.FILE_SYNCHRONOUS_IO_NONALERT, 0, 0); err != nil {
 		return nil, err
 	}
 	file := os.NewFile(uintptr(handle), targetName) // #nosec G115 -- successful Win32 handles are nonnegative.
