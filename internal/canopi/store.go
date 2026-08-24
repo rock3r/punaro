@@ -268,7 +268,7 @@ func OpenStore(path string, config Config) (*Store, error) {
 	}
 	for _, eventID := range persisted.SeenOrder {
 		if _, duplicate := store.seen[eventID]; duplicate {
-			continue
+			return nil, fmt.Errorf("duplicate persisted Canopi event ID %q", eventID)
 		}
 		store.seen[eventID] = struct{}{}
 		store.seenOrder = append(store.seenOrder, eventID)

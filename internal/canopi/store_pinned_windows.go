@@ -8,7 +8,9 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"os"
+	"strings"
 	"unsafe"
 
 	"golang.org/x/sys/windows"
@@ -36,12 +38,15 @@ func persistStoreInPinnedDirectory(directory *os.File, targetName string, state 
 	if int64(len(payload)) > maxBytes {
 		return ErrStateByteLimit
 	}
+	if err := reclaimPinnedWindowsStateTemporaries(directory, targetName); err != nil {
+		return fmt.Errorf("reclaim Canopi state temporaries: %w", err)
+	}
 	for range 8 {
 		var suffix [12]byte
 		if _, err := rand.Read(suffix[:]); err != nil {
 			return fmt.Errorf("random Canopi state temporary name: %w", err)
 		}
-		temporaryName := ".canopi-state-" + hex.EncodeToString(suffix[:]) + ".tmp"
+		temporaryName := stateTemporaryPrefix(targetName) + hex.EncodeToString(suffix[:]) + ".tmp"
 		temporary, err := createPinnedWindowsStateFile(directory, temporaryName)
 		if errors.Is(err, windows.ERROR_FILE_EXISTS) {
 			continue
@@ -77,6 +82,46 @@ func persistStoreInPinnedDirectory(directory *os.File, targetName string, state 
 		return nil
 	}
 	return errors.New("cannot allocate Canopi state temporary")
+}
+
+func reclaimPinnedWindowsStateTemporaries(directory *os.File, targetName string) error {
+	if _, err := directory.Seek(0, io.SeekStart); err != nil {
+		return err
+	}
+	for {
+		names, readErr := directory.Readdirnames(128)
+		for _, name := range names {
+			if !pinnedWindowsStateTemporaryName(targetName, name) {
+				continue
+			}
+			file, err := openPrivateStateFileInPinnedDirectory(directory, name)
+			if errors.Is(err, windows.ERROR_FILE_NOT_FOUND) {
+				continue
+			}
+			if err != nil {
+				continue
+			}
+			if err := discardPinnedWindowsStateFile(file); err != nil {
+				return err
+			}
+		}
+		if errors.Is(readErr, io.EOF) {
+			return nil
+		}
+		if readErr != nil {
+			return readErr
+		}
+	}
+}
+
+func pinnedWindowsStateTemporaryName(targetName, name string) bool {
+	prefix := stateTemporaryPrefix(targetName)
+	value := strings.TrimSuffix(strings.TrimPrefix(name, prefix), ".tmp")
+	if !strings.HasPrefix(name, prefix) || !strings.HasSuffix(name, ".tmp") || len(value) != 24 {
+		return false
+	}
+	_, err := hex.DecodeString(value)
+	return err == nil
 }
 
 func createPinnedWindowsStateFile(directory *os.File, name string) (*os.File, error) {
