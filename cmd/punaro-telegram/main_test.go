@@ -307,15 +307,16 @@ func TestFailedGatewayCycleRecordPreservesCompletedPhaseEvidence(t *testing.T) {
 	for _, test := range []struct {
 		phase                     telegram.GatewayCyclePhase
 		poll, relayOK, telegramOK bool
+		outbound, progress        bool
 	}{
 		{phase: telegram.GatewayPhaseInbound, poll: true},
 		{phase: telegram.GatewayPhaseLease, poll: true},
-		{phase: telegram.GatewayPhaseSend, poll: true, relayOK: true},
-		{phase: telegram.GatewayPhaseAck, poll: true, relayOK: true, telegramOK: true},
+		{phase: telegram.GatewayPhaseSend, poll: true, relayOK: true, outbound: true},
+		{phase: telegram.GatewayPhaseAck, poll: true, relayOK: true, telegramOK: true, outbound: true, progress: true},
 	} {
 		t.Run(string(test.phase), func(t *testing.T) {
-			record := failedGatewayCycleRecord(now, 42, &telegram.GatewayCycleError{Phase: test.phase, Err: errors.New("fixture")})
-			if record.At != now || record.Offset != 42 || record.PollOK != test.poll || record.RelayOK != test.relayOK || record.TelegramOK != test.telegramOK {
+			record := failedGatewayCycleRecord(now, 42, &telegram.GatewayCycleError{Phase: test.phase, OutboundBlocked: test.outbound, OutboundProgress: test.progress, Err: errors.New("fixture")})
+			if record.At != now || record.Offset != 42 || record.PollOK != test.poll || record.RelayOK != test.relayOK || record.TelegramOK != test.telegramOK || record.OutboundBlocked != test.outbound || record.OutboundProgress != test.progress {
 				t.Fatalf("record=%#v", record)
 			}
 		})

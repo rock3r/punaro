@@ -232,6 +232,8 @@ func failedGatewayCycleRecord(at time.Time, offset int64, err error) telegram.Ga
 	record := telegram.GatewayCycleRecord{At: at, Offset: offset, Failure: telegram.ClassifyGatewayCycleFailure(err)}
 	var cycleErr *telegram.GatewayCycleError
 	if errors.As(err, &cycleErr) {
+		record.OutboundBlocked = cycleErr.OutboundBlocked
+		record.OutboundProgress = cycleErr.OutboundProgress
 		switch cycleErr.Phase {
 		case telegram.GatewayPhaseInbound, telegram.GatewayPhaseLease:
 			record.PollOK = true

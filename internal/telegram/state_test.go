@@ -124,6 +124,78 @@ func TestGatewayHealthSeparatesTerminalFailureClassesAndStuckProgress(t *testing
 	}
 }
 
+func TestGatewayHealthOutboundStallIgnoresInboundOffsetProgress(t *testing.T) {
+	t.Parallel()
+	database := filepath.Join(t.TempDir(), "telegram.db")
+	state, err := Open(database)
+	if err != nil {
+		t.Fatal(err)
+	}
+	now := testCallbackNow
+	for cycle := range 3 {
+		if err := state.RecordGatewayCycle(GatewayCycleRecord{
+			At:              now.Add(time.Duration(cycle) * time.Minute),
+			Offset:          int64(8 + cycle),
+			PollOK:          true,
+			RelayOK:         true,
+			Failure:         GatewayFailureOutboundTelegramPermanent,
+			OutboundBlocked: true,
+		}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := state.Close(); err != nil {
+		t.Fatal(err)
+	}
+	snapshot, err := InspectGatewayState(t.Context(), database, now.Add(10*time.Minute))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !snapshot.StuckHead {
+		t.Fatalf("continuous inbound progress masked a stuck outbound head: %#v", snapshot)
+	}
+}
+
+func TestOpenMigratesOutboundProgressLedgerInPlace(t *testing.T) {
+	t.Parallel()
+	database := filepath.Join(t.TempDir(), "telegram.db")
+	db, err := sql.Open("sqlite", database)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.ExecContext(t.Context(), `CREATE TABLE gateway_health (
+		id INTEGER PRIMARY KEY CHECK (id = 1),
+		last_cycle_at INTEGER NOT NULL,
+		last_success_at INTEGER,
+		last_poll_at INTEGER,
+		last_relay_at INTEGER,
+		last_telegram_at INTEGER,
+		last_progress_at INTEGER NOT NULL,
+		offset INTEGER NOT NULL,
+		consecutive_failures INTEGER NOT NULL,
+		last_failure TEXT NOT NULL,
+		terminal_inbound INTEGER NOT NULL,
+		terminal_outbound INTEGER NOT NULL
+	)`); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.Close(); err != nil {
+		t.Fatal(err)
+	}
+	state, err := Open(database)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = state.Close() }()
+	if err := state.RecordGatewayCycle(GatewayCycleRecord{At: testCallbackNow, Offset: 1, PollOK: true, RelayOK: true, OutboundBlocked: true, Failure: GatewayFailureTransient}); err != nil {
+		t.Fatal(err)
+	}
+	var columns int
+	if err := state.db.QueryRowContext(t.Context(), `SELECT COUNT(*) FROM pragma_table_info('gateway_health') WHERE name IN ('last_outbound_progress_at','outbound_blocked')`).Scan(&columns); err != nil || columns != 2 {
+		t.Fatalf("outbound progress columns=%d err=%v", columns, err)
+	}
+}
+
 func TestGatewayHealthClearsTerminalFailuresAfterSuccessfulRecovery(t *testing.T) {
 	t.Parallel()
 	database := filepath.Join(t.TempDir(), "telegram.db")

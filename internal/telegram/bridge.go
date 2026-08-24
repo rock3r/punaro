@@ -52,8 +52,10 @@ const (
 // GatewayCycleError preserves only the local phase while retaining the
 // wrapped typed error for content-free terminal/transient classification.
 type GatewayCycleError struct {
-	Phase GatewayCyclePhase
-	Err   error
+	Phase            GatewayCyclePhase
+	OutboundBlocked  bool
+	OutboundProgress bool
+	Err              error
 }
 
 func (e *GatewayCycleError) Error() string { return "telegram gateway cycle failed" }
@@ -116,15 +118,17 @@ func (b Bridge) SyncOnce(ctx context.Context, offset int64) (int64, error) {
 	if err != nil {
 		return next, &GatewayCycleError{Phase: GatewayPhaseLease, Err: err}
 	}
+	outboundProgress := false
 	for _, delivery := range deliveries {
 		if err := SendDelivery(ctx, b.State, b.Sender, delivery, b.Gateway.AllowedUserID); err != nil {
 			b.logEvent("telegram_send_err", "delivery_id="+delivery.ID)
-			return next, &GatewayCycleError{Phase: GatewayPhaseSend, Err: err}
+			return next, &GatewayCycleError{Phase: GatewayPhaseSend, OutboundBlocked: true, OutboundProgress: outboundProgress, Err: err}
 		}
 		b.logEvent("telegram_send_ok", "delivery_id="+delivery.ID)
 		if err := b.Relay.Ack(ctx, delivery); err != nil {
-			return next, &GatewayCycleError{Phase: GatewayPhaseAck, Err: err}
+			return next, &GatewayCycleError{Phase: GatewayPhaseAck, OutboundBlocked: true, OutboundProgress: outboundProgress, Err: err}
 		}
+		outboundProgress = true
 	}
 	return next, nil
 }

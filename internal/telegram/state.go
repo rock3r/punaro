@@ -87,7 +87,9 @@ func Open(database string) (*State, error) {
 			last_relay_at INTEGER,
 			last_telegram_at INTEGER,
 			last_progress_at INTEGER NOT NULL,
+			last_outbound_progress_at INTEGER,
 			offset INTEGER NOT NULL,
+			outbound_blocked INTEGER NOT NULL DEFAULT 0,
 			consecutive_failures INTEGER NOT NULL,
 			last_failure TEXT NOT NULL,
 			terminal_inbound INTEGER NOT NULL,
@@ -100,6 +102,10 @@ func Open(database string) (*State, error) {
 		}
 	}
 	if err := ensureClaimExecutionChatID(db); err != nil {
+		_ = db.Close()
+		return nil, fmt.Errorf("initialize telegram state: %w", err)
+	}
+	if err := ensureGatewayHealthOutboundProgress(db); err != nil {
 		_ = db.Close()
 		return nil, fmt.Errorf("initialize telegram state: %w", err)
 	}
@@ -122,12 +128,14 @@ const (
 
 // GatewayCycleRecord contains only aggregate cycle health.
 type GatewayCycleRecord struct {
-	At         time.Time
-	Offset     int64
-	PollOK     bool
-	RelayOK    bool
-	TelegramOK bool
-	Failure    GatewayFailureClass
+	At               time.Time
+	Offset           int64
+	PollOK           bool
+	RelayOK          bool
+	TelegramOK       bool
+	OutboundBlocked  bool
+	OutboundProgress bool
+	Failure          GatewayFailureClass
 }
 
 // GatewayStateSnapshot is the bounded, content-free state used by doctor.
@@ -165,20 +173,28 @@ func validGatewayFailure(class GatewayFailureClass) bool {
 // RecordGatewayCycle updates the content-free liveness ledger during normal
 // gateway operation. Doctor itself never calls this method.
 func (s *State) RecordGatewayCycle(record GatewayCycleRecord) error {
-	if record.At.IsZero() || record.Offset < 0 || !validGatewayFailure(record.Failure) {
+	if record.At.IsZero() || record.Offset < 0 || record.OutboundProgress && !record.OutboundBlocked || !validGatewayFailure(record.Failure) {
 		return fmt.Errorf("invalid gateway cycle record")
 	}
 	now := record.At.UTC().UnixMilli()
-	var previousOffset int64
-	err := s.db.QueryRowContext(context.Background(), `SELECT offset FROM gateway_health WHERE id = 1`).Scan(&previousOffset)
+	var previousOffset, previousProgress int64
+	var previousOutboundProgress sql.NullInt64
+	var previousOutboundBlocked bool
+	err := s.db.QueryRowContext(context.Background(), `SELECT offset,last_progress_at,last_outbound_progress_at,outbound_blocked FROM gateway_health WHERE id = 1`).Scan(&previousOffset, &previousProgress, &previousOutboundProgress, &previousOutboundBlocked)
 	first := errors.Is(err, sql.ErrNoRows)
 	if err != nil && !first {
 		return err
 	}
 	progressAt := now
 	if !first && previousOffset == record.Offset {
-		if err := s.db.QueryRowContext(context.Background(), `SELECT last_progress_at FROM gateway_health WHERE id = 1`).Scan(&progressAt); err != nil {
-			return err
+		progressAt = previousProgress
+	}
+	outboundProgressAt := now
+	if !first && record.OutboundBlocked && !record.OutboundProgress && previousOutboundBlocked {
+		if previousOutboundProgress.Valid {
+			outboundProgressAt = previousOutboundProgress.Int64
+		} else {
+			outboundProgressAt = previousProgress
 		}
 	}
 	successAt, pollAt, relayAt, telegramAt := any(nil), any(nil), any(nil), any(nil)
@@ -204,8 +220,8 @@ func (s *State) RecordGatewayCycle(record GatewayCycleRecord) error {
 		outboundDelta = 1
 	}
 	_, err = s.db.ExecContext(context.Background(), `INSERT INTO gateway_health(
-		id,last_cycle_at,last_success_at,last_poll_at,last_relay_at,last_telegram_at,last_progress_at,offset,consecutive_failures,last_failure,terminal_inbound,terminal_outbound
-	) VALUES (1,?,?,?,?,?,?,?,?,?,?,?)
+		id,last_cycle_at,last_success_at,last_poll_at,last_relay_at,last_telegram_at,last_progress_at,last_outbound_progress_at,offset,outbound_blocked,consecutive_failures,last_failure,terminal_inbound,terminal_outbound
+	) VALUES (1,?,?,?,?,?,?,?,?,?,?,?,?,?)
 	ON CONFLICT(id) DO UPDATE SET
 		last_cycle_at=excluded.last_cycle_at,
 		last_success_at=COALESCE(excluded.last_success_at,gateway_health.last_success_at),
@@ -213,12 +229,14 @@ func (s *State) RecordGatewayCycle(record GatewayCycleRecord) error {
 		last_relay_at=COALESCE(excluded.last_relay_at,gateway_health.last_relay_at),
 		last_telegram_at=COALESCE(excluded.last_telegram_at,gateway_health.last_telegram_at),
 		last_progress_at=excluded.last_progress_at,
+		last_outbound_progress_at=excluded.last_outbound_progress_at,
 		offset=excluded.offset,
+		outbound_blocked=excluded.outbound_blocked,
 		consecutive_failures=CASE WHEN excluded.last_failure='' THEN 0 ELSE gateway_health.consecutive_failures+1 END,
 		last_failure=excluded.last_failure,
 		terminal_inbound=CASE WHEN excluded.last_failure='' THEN 0 ELSE gateway_health.terminal_inbound+excluded.terminal_inbound END,
 		terminal_outbound=CASE WHEN excluded.last_failure='' THEN 0 ELSE gateway_health.terminal_outbound+excluded.terminal_outbound END`,
-		now, successAt, pollAt, relayAt, telegramAt, progressAt, record.Offset, consecutiveDelta, string(record.Failure), inboundDelta, outboundDelta)
+		now, successAt, pollAt, relayAt, telegramAt, progressAt, outboundProgressAt, record.Offset, record.OutboundBlocked, consecutiveDelta, string(record.Failure), inboundDelta, outboundDelta)
 	return err
 }
 
@@ -257,10 +275,11 @@ func InspectGatewayState(parent context.Context, database string, now time.Time)
 		return GatewayStateSnapshot{}, fmt.Errorf("gateway state unavailable")
 	}
 	snapshot.RoutesConsistent = inconsistent == 0
-	var cycle, success, poll, relayAt, telegramAt, progress sql.NullInt64
+	var cycle, success, poll, relayAt, telegramAt, progress, outboundProgress sql.NullInt64
+	var outboundBlocked bool
 	var lastFailure string
-	err = db.QueryRowContext(ctx, `SELECT last_cycle_at,last_success_at,last_poll_at,last_relay_at,last_telegram_at,last_progress_at,consecutive_failures,last_failure,terminal_inbound,terminal_outbound FROM gateway_health WHERE id=1`).Scan(
-		&cycle, &success, &poll, &relayAt, &telegramAt, &progress, &snapshot.ConsecutiveFailures, &lastFailure, &snapshot.TerminalInbound, &snapshot.TerminalOutbound)
+	err = db.QueryRowContext(ctx, `SELECT last_cycle_at,last_success_at,last_poll_at,last_relay_at,last_telegram_at,last_progress_at,last_outbound_progress_at,outbound_blocked,consecutive_failures,last_failure,terminal_inbound,terminal_outbound FROM gateway_health WHERE id=1`).Scan(
+		&cycle, &success, &poll, &relayAt, &telegramAt, &progress, &outboundProgress, &outboundBlocked, &snapshot.ConsecutiveFailures, &lastFailure, &snapshot.TerminalInbound, &snapshot.TerminalOutbound)
 	if errors.Is(err, sql.ErrNoRows) {
 		return snapshot, nil
 	}
@@ -274,7 +293,7 @@ func InspectGatewayState(parent context.Context, database string, now time.Time)
 	snapshot.HasTelegram = telegramAt.Valid
 	snapshot.LastFailure = GatewayFailureClass(lastFailure)
 	now = now.UTC()
-	for _, value := range []sql.NullInt64{cycle, success, poll, relayAt, telegramAt, progress} {
+	for _, value := range []sql.NullInt64{cycle, success, poll, relayAt, telegramAt, progress, outboundProgress} {
 		if value.Valid && time.UnixMilli(value.Int64).After(now) {
 			return GatewayStateSnapshot{}, fmt.Errorf("gateway state unavailable")
 		}
@@ -290,8 +309,33 @@ func InspectGatewayState(parent context.Context, database string, now time.Time)
 	snapshot.LastPollAge = age(poll)
 	snapshot.LastRelayAge = age(relayAt)
 	snapshot.LastTelegramAge = age(telegramAt)
-	snapshot.StuckHead = snapshot.ConsecutiveFailures >= 3 && age(progress) >= 5*time.Minute
+	stuckProgress := progress
+	if outboundBlocked {
+		stuckProgress = outboundProgress
+	}
+	snapshot.StuckHead = snapshot.ConsecutiveFailures >= 3 && stuckProgress.Valid && age(stuckProgress) >= 5*time.Minute
 	return snapshot, nil
+}
+
+func ensureGatewayHealthOutboundProgress(db *sql.DB) error {
+	for _, column := range []struct {
+		name      string
+		statement string
+	}{
+		{name: "last_outbound_progress_at", statement: "ALTER TABLE gateway_health ADD COLUMN last_outbound_progress_at INTEGER"},
+		{name: "outbound_blocked", statement: "ALTER TABLE gateway_health ADD COLUMN outbound_blocked INTEGER NOT NULL DEFAULT 0"},
+	} {
+		var count int
+		if err := db.QueryRowContext(context.Background(), `SELECT COUNT(*) FROM pragma_table_info('gateway_health') WHERE name = ?`, column.name).Scan(&count); err != nil {
+			return err
+		}
+		if count == 0 {
+			if _, err := db.ExecContext(context.Background(), column.statement); err != nil {
+				return err
+			}
+		}
+	}
+	return nil
 }
 
 func ensureClaimExecutionChatID(db *sql.DB) error {
