@@ -23,20 +23,22 @@ production_compose_test=scripts/test-production-compose.sh
 production_compose_bootstrap_test=scripts/test-production-compose-bootstrap.sh
 memory_onboarding_e2e_test=scripts/test-memory-onboarding-e2e.sh
 release_artifact_builder=scripts/build-release-artifacts.sh
+release_candidate_tag_generator=scripts/release-candidate-tag.sh
+release_candidate_tag_test=scripts/test-release-candidate-tag.sh
 release_assemble_test=scripts/test-assemble-release.sh
 release_publish_test=scripts/test-publish-signed-release.sh
 macos_sign_script=scripts/sign-notarize-macos.sh
 macos_import_script=scripts/import-macos-signing-cert.sh
 macos_sign_test=scripts/test-sign-notarize-macos.sh
 
-for path in "$unit" "$example" "$launch_agent" "$adapter_installer" "$client_installer" "$adapter_installer_test" "$server_installer" "$server_installer_test" "$attachment_relay_configurer" "$attachment_relay_configurer_test" "$agent_guidance_installer" "$agent_guidance_installer_test" "$windows_client_installer" "$windows_guidance_installer" "$windows_client_installer_test" "$windows_adapter_runner" "$windows_environment_importer" "$production_compose_verifier" "$production_compose_test" "$production_compose_bootstrap_test" "$memory_onboarding_e2e_test" "$release_artifact_builder" "$release_assemble_test" "$release_publish_test" "$macos_sign_script" "$macos_import_script" "$macos_sign_test" scripts/production-compose deploy/compose/postgres-bootstrap.sh deploy/compose/postgres-entrypoint.sh docker-compose.memory-onboarding-e2e.yml .github/workflows/release.yml .github/workflows/macos-notarize.yml deploy/macos/hardened-runtime.entitlements; do
+for path in "$unit" "$example" "$launch_agent" "$adapter_installer" "$client_installer" "$adapter_installer_test" "$server_installer" "$server_installer_test" "$attachment_relay_configurer" "$attachment_relay_configurer_test" "$agent_guidance_installer" "$agent_guidance_installer_test" "$windows_client_installer" "$windows_guidance_installer" "$windows_client_installer_test" "$windows_adapter_runner" "$windows_environment_importer" "$production_compose_verifier" "$production_compose_test" "$production_compose_bootstrap_test" "$memory_onboarding_e2e_test" "$release_artifact_builder" "$release_candidate_tag_generator" "$release_candidate_tag_test" "$release_assemble_test" "$release_publish_test" "$macos_sign_script" "$macos_import_script" "$macos_sign_test" scripts/production-compose deploy/compose/postgres-bootstrap.sh deploy/compose/postgres-entrypoint.sh docker-compose.memory-onboarding-e2e.yml .github/workflows/release.yml .github/workflows/macos-notarize.yml deploy/macos/hardened-runtime.entitlements; do
 	if [ ! -f "$path" ]; then
 		printf '%s\n' "missing adapter deployment artifact: $path" >&2
 		exit 1
 	fi
 done
 
-for executable in "$adapter_installer" "$client_installer" "$adapter_installer_test" "$server_installer" "$server_installer_test" "$attachment_relay_configurer" "$attachment_relay_configurer_test" "$agent_guidance_installer" "$agent_guidance_installer_test" "$windows_client_installer_test" "$production_compose_verifier" "$production_compose_test" "$production_compose_bootstrap_test" "$memory_onboarding_e2e_test" "$release_artifact_builder" "$release_assemble_test" "$release_publish_test" "$macos_sign_script" "$macos_import_script" "$macos_sign_test" scripts/production-compose deploy/compose/postgres-bootstrap.sh deploy/compose/postgres-entrypoint.sh; do
+for executable in "$adapter_installer" "$client_installer" "$adapter_installer_test" "$server_installer" "$server_installer_test" "$attachment_relay_configurer" "$attachment_relay_configurer_test" "$agent_guidance_installer" "$agent_guidance_installer_test" "$windows_client_installer_test" "$production_compose_verifier" "$production_compose_test" "$production_compose_bootstrap_test" "$memory_onboarding_e2e_test" "$release_artifact_builder" "$release_candidate_tag_generator" "$release_candidate_tag_test" "$release_assemble_test" "$release_publish_test" "$macos_sign_script" "$macos_import_script" "$macos_sign_test" scripts/production-compose deploy/compose/postgres-bootstrap.sh deploy/compose/postgres-entrypoint.sh; do
 	if [ ! -x "$executable" ]; then
 		printf '%s\n' "deployment helper is not executable: $executable" >&2
 		exit 1
@@ -129,6 +131,19 @@ if ! grep -Fq 'docker/setup-buildx-action@37fe631027851001ddb9b187196cc803df7f5f
 	printf '%s\n' 'release workflow must configure an attestation-capable pinned Buildx builder' >&2
 	exit 1
 fi
+if ! grep -Fq 'candidate_tag=$(./scripts/release-candidate-tag.sh "$GITHUB_SHA" "$GITHUB_RUN_ID" "$GITHUB_RUN_ATTEMPT")' .github/workflows/release.yml; then
+	printf '%s\n' 'release workflow must publish under a validated run-scoped candidate image tag' >&2
+	exit 1
+fi
+if ! grep -Fq 'cygpath -w "$repo_dir"' "$release_artifact_builder"; then
+	printf '%s\n' 'release artifact builder must normalize its plugin root for native Windows tools' >&2
+	exit 1
+fi
+if ! grep -Fq 'Build release artifacts on Windows' .github/workflows/quality.yml; then
+	printf '%s\n' 'quality workflow must exercise the release artifact builder on Windows' >&2
+	exit 1
+fi
 "$release_assemble_test"
 "$release_publish_test"
 "$macos_sign_test"
+"$release_candidate_tag_test"

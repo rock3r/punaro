@@ -61,11 +61,16 @@ retention policy advance it. Only after that
 read-only preflight passes does it publish the Linux/amd64 gateway image to GHCR
 with OCI SBOM and provenance attestations, capture its registry digest, and bind
 that exact `ghcr.io/rock3r/punaro@sha256:...` identity into the release manifest
-and native build provenance. Invalid or reused release requests therefore
-cannot create or move an official image tag. The image carries the release name
-as `org.opencontainers.image.version`; its pre-digest operator binary is bound
-to the release-tagged GHCR repository identity known at build time and requires
-a digest-pinned installation from that repository. It then builds:
+and native build provenance. The pushed image uses a validated run-scoped
+candidate tag containing only the source commit, workflow run, and attempt, so
+its length is independent of the release name and remains within Docker's tag
+limit. A failed or retried candidate therefore cannot move a release-named image
+tag. The candidate tag is not an update authority. The image carries the release
+name as
+`org.opencontainers.image.version`; its pre-digest operator binary is bound to
+the release-named GHCR repository identity known at build time so doctor can
+compare the final digest-pinned installation from that repository. The
+release-named identity is embedded metadata, not a pushed tag. It then builds:
 
 - `punaro-adapter`, `punaro-trusted-attachment`, `punaro-memory`,
   `punaro-enroll`, and `punaro-bootstrap` for `darwin/arm64`, `linux/amd64`,

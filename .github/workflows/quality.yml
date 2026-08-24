@@ -101,6 +101,16 @@ jobs:
       - run: go test ./cmd/punaro-memory -run '^TestWindows'
 
       - run: go test ./internal/memoryclient -run '^TestWindows'
+      - name: Build release artifacts on Windows
+        shell: bash
+        run: |
+          version=$(sed -n 's/.*"version": *"\([^"]*\)".*/\1/p' plugin.json)
+          ./scripts/build-release-artifacts.sh \
+            --output-dir "$RUNNER_TEMP/release-smoke" \
+            --release "v$version" \
+            --sequence 1 \
+            --catalog-sequence 1 \
+            --image "ghcr.io/rock3r/punaro@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
       - run: go vet ./...
       - run: go build ./...
       - shell: pwsh
