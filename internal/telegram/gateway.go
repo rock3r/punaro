@@ -116,7 +116,7 @@ func (g Gateway) Handle(ctx context.Context, update Update) error {
 	if err := g.Submit(ctx, Submission{UpdateID: update.ID, ConversationID: conversation, Text: update.Text, ChatID: update.ChatID, ThreadID: update.ThreadID, ReplyToID: update.ReplyToID}); err != nil {
 		if isPermanentRelayFailure(err) {
 			g.logEvent("telegram_update_dropped", "reason=relay_rejected")
-			if err := g.State.MarkProcessed(update.ID); err != nil {
+			if err := g.State.MarkProcessedTerminalInbound(update.ID, conversation); err != nil {
 				return fmt.Errorf("record dropped telegram update: %w", err)
 			}
 			if g.terminalDrop != nil {
@@ -126,11 +126,11 @@ func (g Gateway) Handle(ctx context.Context, update Update) error {
 		}
 		return fmt.Errorf("submit telegram message: %w", err)
 	}
+	if err := g.State.MarkProcessedInboundRecovery(update.ID, conversation); err != nil {
+		return fmt.Errorf("record telegram update: %w", err)
+	}
 	if g.inboundRecovery != nil {
 		g.inboundRecovery(conversation)
-	}
-	if err := g.State.MarkProcessed(update.ID); err != nil {
-		return fmt.Errorf("record telegram update: %w", err)
 	}
 	g.logEvent("telegram_update_submitted", "conversation_id="+conversation)
 	return nil

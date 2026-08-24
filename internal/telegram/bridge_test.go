@@ -192,6 +192,72 @@ func TestBridgeDropsPermanentTelegramRejectionThenContinues(t *testing.T) {
 	}
 }
 
+func TestBridgeStagesPermanentDropBeforeRelayAcknowledgement(t *testing.T) {
+	t.Parallel()
+	database := filepath.Join(t.TempDir(), "telegram.db")
+	state, err := Open(database)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = state.Close() })
+	if err := state.SetRoute(55, 7, "conversation-1"); err != nil {
+		t.Fatal(err)
+	}
+	relayClient := &fakeBridgeRelay{deliveries: []relay.Delivery{{ID: "delivery-1", Message: relay.Message{ConversationID: "conversation-1", FromEndpoint: "agent/a", Body: "reply"}}}}
+	bridge := Bridge{
+		Relay: relayClient, Endpoint: relay.TelegramGatewayEndpoint, State: state,
+		Poller: fakePoller{}, Gateway: Gateway{AllowedUserID: 55, State: state, Submit: func(context.Context, Submission) error { return nil }},
+		Sender: &scriptedRichSender{errs: []error{BotAPIStatusError{Method: "sendRichMessage", Status: 403}}},
+	}
+	_, err = bridge.SyncOnce(t.Context(), 1)
+	var cycleErr *GatewayCycleError
+	if !errors.As(err, &cycleErr) || !cycleErr.NonFatal || fmt.Sprint(relayClient.acked) != "[delivery-1]" {
+		t.Fatalf("err=%#v acked=%v", cycleErr, relayClient.acked)
+	}
+	snapshot, err := InspectGatewayState(t.Context(), database, testCallbackNow)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if snapshot.TerminalOutbound != 1 {
+		t.Fatalf("terminal outbound drop was not durable before the cycle record: %#v", snapshot)
+	}
+}
+
+func TestBridgePersistsOutboundRecoveryBeforeRelayAcknowledgement(t *testing.T) {
+	t.Parallel()
+	database := filepath.Join(t.TempDir(), "telegram.db")
+	state, err := Open(database)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = state.Close() })
+	if err := state.SetRoute(55, 7, "conversation-1"); err != nil {
+		t.Fatal(err)
+	}
+	if err := state.StageTerminalOutbound("old-delivery", "conversation-1", GatewayFailureDeletedTopic); err != nil {
+		t.Fatal(err)
+	}
+	relayClient := &fakeBridgeRelay{deliveries: []relay.Delivery{{ID: "recovery-delivery", Message: relay.Message{ConversationID: "conversation-1", FromEndpoint: "agent/a", Body: "reply"}}}}
+	bridge := Bridge{
+		Relay: relayClient, Endpoint: relay.TelegramGatewayEndpoint, State: state,
+		Poller: fakePoller{}, Gateway: Gateway{AllowedUserID: 55, State: state, Submit: func(context.Context, Submission) error { return nil }},
+		Sender: &scriptedRichSender{},
+	}
+	if _, err := bridge.SyncOnce(t.Context(), 1); err == nil {
+		t.Fatal("recovery evidence was not returned")
+	}
+	if fmt.Sprint(relayClient.acked) != "[recovery-delivery]" {
+		t.Fatalf("acked=%v", relayClient.acked)
+	}
+	snapshot, err := InspectGatewayState(t.Context(), database, testCallbackNow)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if snapshot.TerminalOutbound != 0 || snapshot.DeletedTopicTargets != 0 {
+		t.Fatalf("outbound recovery was not durable before acknowledgement: %#v", snapshot)
+	}
+}
+
 func TestBridgeReportsPermanentInboundDropAfterContinuingPage(t *testing.T) {
 	t.Parallel()
 	state, err := Open(filepath.Join(t.TempDir(), "telegram.db"))

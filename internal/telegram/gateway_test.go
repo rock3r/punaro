@@ -101,7 +101,8 @@ func (permanentRelayTestError) PermanentRelayFailure() bool { return true }
 
 func TestGatewayDropsPermanentRelayRejectionAndContinuesPage(t *testing.T) {
 	t.Parallel()
-	state, err := Open(filepath.Join(t.TempDir(), "telegram.db"))
+	database := filepath.Join(t.TempDir(), "telegram.db")
+	state, err := Open(database)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -109,12 +110,15 @@ func TestGatewayDropsPermanentRelayRejectionAndContinuesPage(t *testing.T) {
 	if err := state.SetRoute(100, 7, "conversation-1"); err != nil {
 		t.Fatal(err)
 	}
+	if err := state.SetRoute(100, 8, "conversation-2"); err != nil {
+		t.Fatal(err)
+	}
 	var submitted []string
 	var logs []string
 	runner := Runner{
 		Poller: fakePoller{updates: []Update{
 			{ID: 10, UserID: 55, ChatID: 100, ThreadID: 7, Text: "poison"},
-			{ID: 11, UserID: 55, ChatID: 100, ThreadID: 7, Text: "later"},
+			{ID: 11, UserID: 55, ChatID: 100, ThreadID: 8, Text: "later"},
 		}},
 		Gateway: Gateway{
 			AllowedUserID: 55,
@@ -145,6 +149,40 @@ func TestGatewayDropsPermanentRelayRejectionAndContinuesPage(t *testing.T) {
 	joined := strings.Join(logs, "\n")
 	if !strings.Contains(joined, "telegram_update_dropped") || strings.Contains(joined, "private relay response") {
 		t.Fatalf("logs=%#v", logs)
+	}
+	snapshot, err := InspectGatewayState(t.Context(), database, testCallbackNow)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if snapshot.TerminalInbound != 1 {
+		t.Fatalf("terminal inbound drop was not durable before the cycle record: %#v", snapshot)
+	}
+}
+
+func TestGatewayPersistsInboundRecoveryWithProcessedUpdate(t *testing.T) {
+	t.Parallel()
+	database := filepath.Join(t.TempDir(), "telegram.db")
+	state, err := Open(database)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = state.Close() })
+	if err := state.SetRoute(100, 7, "conversation-1"); err != nil {
+		t.Fatal(err)
+	}
+	if err := state.MarkProcessedTerminalInbound(1, "conversation-1"); err != nil {
+		t.Fatal(err)
+	}
+	gateway := Gateway{AllowedUserID: 55, State: state, Submit: func(context.Context, Submission) error { return nil }}
+	if err := gateway.Handle(t.Context(), Update{ID: 2, UserID: 55, ChatID: 100, ThreadID: 7, Text: "recovered"}); err != nil {
+		t.Fatal(err)
+	}
+	snapshot, err := InspectGatewayState(t.Context(), database, testCallbackNow)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if snapshot.TerminalInbound != 0 {
+		t.Fatalf("inbound recovery was not durable with processing: %#v", snapshot)
 	}
 }
 

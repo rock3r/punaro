@@ -328,6 +328,14 @@ content. Telegram has no send-idempotency key, therefore this external boundary
 is explicitly at-least-once: a crash after Telegram accepts a reply but before
 relay acknowledgement can repeat that reply on recovery.
 
+Terminal inbound rejection evidence is committed in the same SQLite
+transaction that consumes the Telegram update. Terminal outbound evidence is
+staged idempotently by relay delivery ID before acknowledgement; a repaired
+target is cleared locally before its successful delivery is acknowledged.
+Doctor reads these target ledgers directly, so a process crash between an
+external acknowledgement and the later aggregate cycle record cannot hide a
+dropped item or strand a completed recovery.
+
 Telegram Bot API rich messages support structured HTML and Markdown variants,
 and `sendRichMessage` accepts a `message_thread_id` for a forum topic. Punaro
 uses only a minimal escaped-HTML subset, disables automatic entity detection,

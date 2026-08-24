@@ -360,7 +360,10 @@ healthy. Empty poll/lease cycles preserve that terminal state; it clears per
 conversation only after a real inbound submission or outbound send to that
 same failed target demonstrates recovery. Historical aggregate counters are
 expanded into conservative per-route recovery markers on the first writable
-gateway open after upgrade. Endpoint-specific relay attachment probes
+gateway open after upgrade. Terminal evidence is staged before the corresponding
+update or relay delivery is consumed, and doctor reads that durable target
+ledger directly rather than depending on a later cycle summary.
+Endpoint-specific relay attachment probes
 bind the exact asserted endpoint into the machine signature; changing that
 header invalidates the probe rather than exposing an endpoint-enumeration oracle.
 

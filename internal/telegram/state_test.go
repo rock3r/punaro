@@ -558,6 +558,33 @@ func TestGatewayHealthRetainsDeletedClassWhenGenericTargetRecovers(t *testing.T)
 	}
 }
 
+func TestStageTerminalOutboundIsIdempotentByDelivery(t *testing.T) {
+	t.Parallel()
+	database := filepath.Join(t.TempDir(), "telegram.db")
+	state, err := Open(database)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for range 2 {
+		if err := state.StageTerminalOutbound("delivery-1", "conversation-1", GatewayFailureDeletedTopic); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := state.StageTerminalOutbound("delivery-1", "conversation-2", GatewayFailureDeletedTopic); err == nil {
+		t.Fatal("delivery identity was rebound to another conversation")
+	}
+	if err := state.Close(); err != nil {
+		t.Fatal(err)
+	}
+	snapshot, err := InspectGatewayState(t.Context(), database, testCallbackNow)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if snapshot.TerminalOutbound != 1 || snapshot.DeletedTopicTargets != 1 {
+		t.Fatalf("duplicate staging changed terminal health: %#v", snapshot)
+	}
+}
+
 func TestInspectGatewayStateRejectsFutureHealthTimestamps(t *testing.T) {
 	t.Parallel()
 	database := filepath.Join(t.TempDir(), "telegram.db")
