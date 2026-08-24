@@ -48,6 +48,23 @@ func TestTelegramServiceBindingRejectsStaleDefinitions(t *testing.T) {
 	}
 }
 
+func TestTelegramSystemdExecStartRequiresExactEffectiveExecutable(t *testing.T) {
+	valid := "{ path=/usr/local/bin/punaro-telegram ; argv[]=/usr/local/bin/punaro-telegram ; ignore_errors=no ; start_time=[n/a] ; stop_time=[n/a] ; pid=0 ; code=(null) ; status=0/0 }\n"
+	if !telegramSystemdExecStartBound(valid, "/usr/local/bin/punaro-telegram") {
+		t.Fatal("valid effective ExecStart rejected")
+	}
+	for _, stale := range []string{
+		strings.Replace(valid, "/usr/local/bin/punaro-telegram", "/tmp/punaro-telegram", 1),
+		strings.Replace(valid, "argv[]=/usr/local/bin/punaro-telegram", "argv[]=/usr/local/bin/punaro-telegram doctor", 1),
+		valid + valid,
+		"",
+	} {
+		if telegramSystemdExecStartBound(stale, "/usr/local/bin/punaro-telegram") {
+			t.Fatalf("stale effective ExecStart accepted: %q", stale)
+		}
+	}
+}
+
 func TestTelegramWindowsTaskRequiresExactInstalledExecutable(t *testing.T) {
 	executable := filepath.Join(t.TempDir(), "Punaro", "bin", "punaro-telegram.exe")
 	valid := `<Task><Actions><Exec><Command>` + executable + `</Command></Exec></Actions></Task>` + "\r\n"

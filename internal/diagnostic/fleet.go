@@ -84,6 +84,8 @@ func AggregateFleet(reports []Report, policy FleetPolicy) (Report, error) {
 			if minimum > 0 && (report.Identity.Protocol < minimum || report.Identity.Protocol > maximum) {
 				protocolCompatible = false
 			}
+		} else {
+			protocolCompatible = false
 		}
 		if report.Identity.StorageSchema > 0 {
 			schemas[report.Identity.StorageSchema] = struct{}{}

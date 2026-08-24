@@ -197,7 +197,7 @@ func inspectServerRelay(parent context.Context, installation operator.Installati
 		}
 		return passed, passed, passed, passed, passed
 	}
-	profile, err := loadServerDoctorProfile(relayProfile)
+	profile, err := loadServerDoctorProfile(parent, relayProfile)
 	if err != nil {
 		return knownDoctorBool{}, knownDoctorBool{}, knownDoctorBool{}, knownDoctorBool{}, knownDoctorBool{}
 	}
@@ -280,15 +280,15 @@ type serverDoctorProfile struct {
 	AccessToken adapter.AccessServiceToken
 }
 
-func loadServerDoctorProfile(path string) (serverDoctorProfile, error) {
-	body, err := readProtectedServerDoctorFile(path, 8<<10)
+func loadServerDoctorProfile(ctx context.Context, path string) (serverDoctorProfile, error) {
+	body, err := readProtectedServerDoctorFile(ctx, path, 8<<10)
 	if err != nil {
 		return serverDoctorProfile{}, errors.New("server doctor profile unavailable")
 	}
-	return parseServerDoctorProfile(body)
+	return parseServerDoctorProfile(ctx, body)
 }
 
-func parseServerDoctorProfile(body []byte) (serverDoctorProfile, error) {
+func parseServerDoctorProfile(ctx context.Context, body []byte) (serverDoctorProfile, error) {
 	values := map[string]string{}
 	allowed := map[string]bool{"PUNARO_SERVER_DOCTOR_RELAY_URL": true, "PUNARO_SERVER_DOCTOR_MACHINE_ID": true, "PUNARO_SERVER_DOCTOR_PRIVATE_KEY_FILE": true, "PUNARO_SERVER_DOCTOR_ACCESS_TOKEN_FILE": true}
 	for _, line := range strings.Split(strings.TrimSpace(string(body)), "\n") {
@@ -301,7 +301,7 @@ func parseServerDoctorProfile(body []byte) (serverDoctorProfile, error) {
 	if len(values) != len(allowed) {
 		return serverDoctorProfile{}, errors.New("server doctor profile invalid")
 	}
-	keyBody, err := readProtectedServerDoctorFile(values["PUNARO_SERVER_DOCTOR_PRIVATE_KEY_FILE"], 4<<10)
+	keyBody, err := readProtectedServerDoctorFile(ctx, values["PUNARO_SERVER_DOCTOR_PRIVATE_KEY_FILE"], 4<<10)
 	if err != nil {
 		return serverDoctorProfile{}, errors.New("server doctor credential unavailable")
 	}
@@ -309,7 +309,7 @@ func parseServerDoctorProfile(body []byte) (serverDoctorProfile, error) {
 	if err != nil || len(key) != ed25519.PrivateKeySize {
 		return serverDoctorProfile{}, errors.New("server doctor credential invalid")
 	}
-	accessBody, err := readProtectedServerDoctorFile(values["PUNARO_SERVER_DOCTOR_ACCESS_TOKEN_FILE"], 4<<10)
+	accessBody, err := readProtectedServerDoctorFile(ctx, values["PUNARO_SERVER_DOCTOR_ACCESS_TOKEN_FILE"], 4<<10)
 	if err != nil {
 		return serverDoctorProfile{}, errors.New("server doctor Access credential unavailable")
 	}
@@ -349,7 +349,9 @@ func writeServerDoctorProfile(path, relayURL, machineID, privateKeyFile, accessT
 			"PUNARO_SERVER_DOCTOR_PRIVATE_KEY_FILE=" + privateKeyFile + "\n" +
 			"PUNARO_SERVER_DOCTOR_ACCESS_TOKEN_FILE=" + accessTokenFile + "\n",
 	)
-	if _, err := parseServerDoctorProfile(body); err != nil {
+	ctx, cancel := context.WithTimeout(context.Background(), serverDoctorCommandTimeout)
+	defer cancel()
+	if _, err := parseServerDoctorProfile(ctx, body); err != nil {
 		return err
 	}
 	file, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600) // #nosec G304,G703 -- explicit operator-owned output; O_EXCL refuses replacement and symlinks.
@@ -376,12 +378,12 @@ func writeServerDoctorProfile(path, relayURL, machineID, privateKeyFile, accessT
 	return nil
 }
 
-func readProtectedServerDoctorFile(path string, maximum int64) ([]byte, error) {
-	if path == "" || !filepath.IsAbs(path) || filepath.Clean(path) != path {
+func readProtectedServerDoctorFile(ctx context.Context, path string, maximum int64) ([]byte, error) {
+	if ctx == nil || ctx.Err() != nil || path == "" || !filepath.IsAbs(path) || filepath.Clean(path) != path {
 		return nil, errors.New("protected doctor file invalid")
 	}
-	info, err := os.Lstat(path) // #nosec G703 -- explicit local protected diagnostic file.
-	if err != nil || !info.Mode().IsRegular() || info.Mode()&os.ModeSymlink != 0 || info.Size() < 1 || info.Size() > maximum || runtime.GOOS != "windows" && info.Mode().Perm()&0o077 != 0 {
+	expected, err := os.Lstat(path) // #nosec G703 -- explicit local protected diagnostic file.
+	if err != nil || !expected.Mode().IsRegular() || expected.Mode()&os.ModeSymlink != 0 || expected.Size() < 1 || expected.Size() > maximum || runtime.GOOS != "windows" && expected.Mode().Perm()&0o077 != 0 {
 		return nil, errors.New("protected doctor file invalid")
 	}
 	file, err := os.Open(path) // #nosec G304,G703 -- validated explicit protected file.
@@ -389,8 +391,12 @@ func readProtectedServerDoctorFile(path string, maximum int64) ([]byte, error) {
 		return nil, errors.New("protected doctor file invalid")
 	}
 	defer func() { _ = file.Close() }()
-	body, err := io.ReadAll(io.LimitReader(file, maximum+1))
-	if err != nil || len(body) == 0 || int64(len(body)) > maximum {
+	opened, err := file.Stat()
+	if err != nil || !opened.Mode().IsRegular() || !os.SameFile(expected, opened) || opened.Size() < 1 || opened.Size() > maximum || runtime.GOOS != "windows" && opened.Mode().Perm()&0o077 != 0 {
+		return nil, errors.New("protected doctor file invalid")
+	}
+	body, err := io.ReadAll(io.LimitReader(serverDoctorContextReader{ctx: ctx, reader: file}, maximum+1))
+	if ctx.Err() != nil || err != nil || len(body) == 0 || int64(len(body)) != opened.Size() || int64(len(body)) > maximum {
 		return nil, errors.New("protected doctor file invalid")
 	}
 	return body, nil

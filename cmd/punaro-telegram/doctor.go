@@ -278,6 +278,8 @@ func inspectTelegramService(ctx context.Context) telegramServiceDoctorResult {
 		result.RestartState = loaded
 	case "linux":
 		result.Installed, result.Executable = inspectTelegramServiceDefinition(ctx, "/etc/systemd/system/punaro-telegram.service", executable, "linux")
+		effectiveExecStart, effectiveKnown := telegramServiceCommand(ctx, "systemctl", "show", "--property=ExecStart", "--value", "punaro-telegram.service")
+		result.Executable = result.Executable && effectiveKnown && telegramSystemdExecStartBound(effectiveExecStart, executable)
 		_, result.Enabled = telegramServiceCommand(ctx, "systemctl", "is-enabled", "--quiet", "punaro-telegram.service")
 		_, result.Running = telegramServiceCommand(ctx, "systemctl", "is-active", "--quiet", "punaro-telegram.service")
 		exit, exitOK := telegramServiceCommand(ctx, "systemctl", "show", "--property=ExecMainStatus", "--value", "punaro-telegram.service")
@@ -400,6 +402,27 @@ func telegramServiceFileBound(goos, body string) bool {
 	default:
 		return false
 	}
+}
+
+func telegramSystemdExecStartBound(body, executable string) bool {
+	if executable == "" || len(body) > 64<<10 {
+		return false
+	}
+	canonical := strings.TrimSpace(body)
+	if len(canonical) < 2 || canonical[0] != '{' || canonical[len(canonical)-1] != '}' || strings.Count(canonical, "{") != 1 || strings.Count(canonical, "}") != 1 || strings.ContainsAny(canonical, "\r\n\x00") {
+		return false
+	}
+	fields := map[string]string{}
+	seen := map[string]bool{}
+	for _, field := range strings.Split(canonical[1:len(canonical)-1], ";") {
+		name, value, found := strings.Cut(strings.TrimSpace(field), "=")
+		if !found || name == "" || seen[name] {
+			return false
+		}
+		seen[name] = true
+		fields[name] = strings.TrimSpace(value)
+	}
+	return fields["path"] == executable && fields["argv[]"] == executable
 }
 
 func telegramExecutableVersion(ctx context.Context, executable string) (string, bool) {

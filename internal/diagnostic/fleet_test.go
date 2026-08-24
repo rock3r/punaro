@@ -69,6 +69,23 @@ func TestFleetUsesComponentSpecificProtocolRanges(t *testing.T) {
 	}
 }
 
+func TestFleetRejectsMissingProtocolIdentity(t *testing.T) {
+	report := mustFleetInput(t, ComponentAdapter, Identity{MachineID: "mac-studio", Release: "v0.1.0-alpha.2", ReleaseSequence: 2, Platform: "darwin-arm64", PluginVersion: "v0.1.0-alpha.2", SkillSetDigest: "sha256:" + digestA})
+	fleet, err := AggregateFleet([]Report{report}, FleetPolicy{
+		Expected:          []FleetTarget{{MachineID: "mac-studio", Component: ComponentAdapter}},
+		CatalogSequence:   2,
+		Catalog:           map[string]int64{"v0.1.0-alpha.2": 2},
+		ClientProtocolMin: 1,
+		ClientProtocolMax: 1,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if fleetStatus(fleet, "protocol_compatibility") != StatusFail || fleet.Healthy {
+		t.Fatalf("missing protocol identity accepted: %#v", fleet)
+	}
+}
+
 const (
 	digestA = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
 	digestB = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"

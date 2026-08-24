@@ -89,7 +89,8 @@ PUNARO_CF_ACCESS_CLIENT_SECRET=VALUE
 ```
 
 All three files must be absolute, regular, non-symlinked, non-empty, bounded,
-and owner-only on Unix. The generated profile contains only the fixed HTTPS
+owner-only on Unix, and read through the single doctor deadline with descriptor
+identity revalidation. The generated profile contains only the fixed HTTPS
 origin, machine ID, and those two absolute credential-file paths; credential
 contents never enter argv, the profile, the report, or logs. A trusted-LAN
 installation with no public URL passes the edge checks from its declared local
@@ -258,6 +259,9 @@ Configuration, service, and upstreams: `telegram_configuration`,
 `relay_transport`, `relay_origin`, `relay_access`, `relay_enrollment`,
 `relay_protocol`, `notification_transport`, `notification_origin`,
 `notification_access`, `notification_enrollment`, `notification_protocol`.
+On Linux, `gateway_service_executable` verifies both the installed unit and
+systemd's effective `ExecStart`, so a drop-in cannot redirect the running
+service while leaving the base unit apparently valid.
 
 Durable state and liveness: `state_integrity`, `conversation_route_integrity`,
 `cycle_liveness`, `successful_cycle_liveness`, `polling_liveness`,
@@ -272,6 +276,9 @@ Durable state and liveness: `state_integrity`, `conversation_route_integrity`,
 `machine_identity_uniqueness`, `release_catalog_membership`, `release_skew`,
 `protocol_skew`, `protocol_compatibility`, `schema_skew`, `upgrade_edges`,
 `plugin_skew`, `skill_set_skew`.
+Every component report must carry a non-zero protocol identity; an omitted
+identity fails `protocol_compatibility` instead of being excluded from the
+comparison.
 
 ## Stable remediation registry
 

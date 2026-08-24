@@ -1190,7 +1190,7 @@ func TestServerDoctorProfileLoadsOnlyProtectedLeastPrivilegeInputs(t *testing.T)
 	keyPath := write("doctor.key", base64.RawURLEncoding.EncodeToString(privateKey), 0o600)
 	accessPath := write("access.env", "PUNARO_CF_ACCESS_CLIENT_ID=doctor-id\nPUNARO_CF_ACCESS_CLIENT_SECRET=doctor-secret\n", 0o600)
 	profilePath := write("doctor.env", "PUNARO_SERVER_DOCTOR_RELAY_URL=https://punaro.example\nPUNARO_SERVER_DOCTOR_MACHINE_ID=server-doctor\nPUNARO_SERVER_DOCTOR_PRIVATE_KEY_FILE="+keyPath+"\nPUNARO_SERVER_DOCTOR_ACCESS_TOKEN_FILE="+accessPath+"\n", 0o600)
-	profile, err := loadServerDoctorProfile(profilePath)
+	profile, err := loadServerDoctorProfile(t.Context(), profilePath)
 	if err != nil || profile.RelayURL != "https://punaro.example" || profile.MachineID != "server-doctor" || len(profile.PrivateKey) != ed25519.PrivateKeySize || profile.AccessToken.ClientID != "doctor-id" || profile.AccessToken.ClientSecret != "doctor-secret" {
 		t.Fatalf("protected server doctor profile did not load: %v", err)
 	}
@@ -1199,7 +1199,7 @@ func TestServerDoctorProfileLoadsOnlyProtectedLeastPrivilegeInputs(t *testing.T)
 		if err := os.Chmod(accessPath, 0o644); err != nil { // #nosec G302 -- deliberate insecure-permission diagnostic fixture.
 			t.Fatal(err)
 		}
-		if _, err := loadServerDoctorProfile(profilePath); err == nil || strings.Contains(err.Error(), "doctor-secret") || strings.Contains(err.Error(), accessPath) {
+		if _, err := loadServerDoctorProfile(t.Context(), profilePath); err == nil || strings.Contains(err.Error(), "doctor-secret") || strings.Contains(err.Error(), accessPath) {
 			t.Fatalf("unsafe profile error=%q", err)
 		}
 	}
@@ -1234,12 +1234,24 @@ func TestServerDoctorProfileWriterCreatesProtectedReusableProfile(t *testing.T) 
 	if err != nil || runtime.GOOS != "windows" && info.Mode().Perm() != 0o600 {
 		t.Fatalf("profile mode=%v err=%v", info.Mode(), err)
 	}
-	profile, err := loadServerDoctorProfile(profilePath)
+	profile, err := loadServerDoctorProfile(t.Context(), profilePath)
 	if err != nil || profile.RelayURL != "https://punaro.example" || profile.MachineID != "server-doctor" {
 		t.Fatalf("written profile=%#v err=%v", profile, err)
 	}
 	if code := run(args, io.Discard, io.Discard); code != 1 {
 		t.Fatalf("existing profile overwrite code=%d", code)
+	}
+}
+
+func TestServerDoctorProfileReadHonorsCanceledContext(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "doctor.env")
+	if err := os.WriteFile(path, []byte("ignored"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(t.Context())
+	cancel()
+	if _, err := loadServerDoctorProfile(ctx, path); err == nil {
+		t.Fatal("canceled server doctor profile read continued")
 	}
 }
 
