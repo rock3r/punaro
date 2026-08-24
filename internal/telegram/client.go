@@ -18,8 +18,8 @@ import (
 const maxBotResponseBytes = 1 << 20
 const maxRichMessageBytes = 32 << 10
 
-// BotAPIStatusError is a completed Telegram HTTP response. 4xx means the
-// requested object was not created and may be retried.
+// BotAPIStatusError is a completed Telegram HTTP response. Only bounded status
+// classes that unambiguously reject the payload or target are terminal.
 type BotAPIStatusError struct {
 	Method string
 	Status int
@@ -41,14 +41,15 @@ const (
 )
 
 // PermanentBotAPIFailure recognizes terminal request outcomes while keeping
-// 401 retryable because Access/proxy/token recovery may restore it.
+// 401 and 404 retryable because Access/proxy/token or base-URL recovery may
+// restore them.
 func PermanentBotAPIFailure(err error) bool {
 	var status BotAPIStatusError
 	if !errors.As(err, &status) {
 		return false
 	}
 	switch status.Status {
-	case http.StatusBadRequest, http.StatusForbidden, http.StatusNotFound, http.StatusMethodNotAllowed, http.StatusGone, http.StatusUnprocessableEntity:
+	case http.StatusBadRequest, http.StatusForbidden, http.StatusMethodNotAllowed, http.StatusGone, http.StatusUnprocessableEntity:
 		return true
 	default:
 		return false
@@ -59,6 +60,13 @@ func PermanentBotAPIFailure(err error) bool {
 func DeletedTopicFailure(err error) bool {
 	var status BotAPIStatusError
 	return errors.As(err, &status) && status.Kind == BotAPIErrorDeletedTopic
+}
+
+// PermanentTelegramFailure reports a completed request that must not poison
+// the durable outbound queue. It delegates to the bounded status classifier so
+// authorization failures that may recover remain retryable.
+func (e BotAPIStatusError) PermanentTelegramFailure() bool {
+	return PermanentBotAPIFailure(e)
 }
 
 // Client is a narrow Telegram Bot API long-poll client. Its token is retained

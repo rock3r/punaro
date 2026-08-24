@@ -75,8 +75,12 @@ func TestSendDeliveryRejectsUnroutedConversation(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = state.Close() })
-	if err := SendDelivery(context.Background(), state, &recordedRichSender{}, relay.Delivery{Message: relay.Message{ConversationID: "unrouted", FromEndpoint: "agent/a", Body: "reply"}}, 100); err == nil {
+	err = SendDelivery(context.Background(), state, &recordedRichSender{}, relay.Delivery{Message: relay.Message{ConversationID: "unrouted", FromEndpoint: "agent/a", Body: "reply"}}, 100)
+	if err == nil {
 		t.Fatal("unrouted delivery was sent to Telegram")
+	}
+	if isPermanentTelegramFailure(err) {
+		t.Fatalf("unrouted delivery was classified as permanent: %v", err)
 	}
 }
 
@@ -94,5 +98,8 @@ func TestSendDeliveryRejectsRouteForDifferentTelegramChat(t *testing.T) {
 	err = SendDelivery(context.Background(), state, sender, relay.Delivery{Message: relay.Message{ConversationID: "conversation-1", FromEndpoint: "agent/a", Body: "reply"}}, 55)
 	if err == nil || sender.chat != 0 {
 		t.Fatalf("foreign-chat delivery was sent: err=%v chat=%d", err, sender.chat)
+	}
+	if isPermanentTelegramFailure(err) {
+		t.Fatalf("foreign-chat delivery was classified as permanent: %v", err)
 	}
 }

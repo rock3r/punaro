@@ -177,7 +177,7 @@ func runTelegramDoctor(args []string, stdout, stderr io.Writer) int {
 			telegramBoolCheck(snapshot.TerminalOutbound == 0, "terminal_outbound_rejection", "repair_outbound_telegram_target"),
 			telegramBoolCheck(!snapshot.StuckHead, "stuck_head_delivery", "repair_stuck_gateway_delivery"),
 			telegramBoolCheck(snapshot.LastFailure != telegram.GatewayFailureMessageLessPoll || snapshot.ConsecutiveFailures < 3, "message_less_update_stall", "repair_message_less_polling"),
-			telegramBoolCheck(snapshot.LastFailure != telegram.GatewayFailureDeletedTopic, "deleted_topic_target", "repair_deleted_topic_route"),
+			telegramBoolCheck(snapshot.DeletedTopicTargets == 0, "deleted_topic_target", "repair_deleted_topic_route"),
 			telegramBoolCheck(snapshot.LastFailure != telegram.GatewayFailureTransient || snapshot.ConsecutiveFailures < 3, "transient_retry_stall", "repair_transient_gateway_dependency"),
 		)
 		if snapshot.IncompleteClaims > 0 {

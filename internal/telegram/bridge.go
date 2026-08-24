@@ -52,10 +52,17 @@ const (
 // GatewayCycleError preserves only the local phase while retaining the
 // wrapped typed error for content-free terminal/transient classification.
 type GatewayCycleError struct {
-	Phase            GatewayCyclePhase
-	OutboundBlocked  bool
-	OutboundProgress bool
-	Err              error
+	Phase                GatewayCyclePhase
+	NonFatal             bool
+	TerminalInbound      int
+	TerminalOutbound     int
+	InboundRecovery      bool
+	OutboundRecovery     bool
+	InboundTargetEvents  []GatewayInboundTargetEvent
+	OutboundTargetEvents []GatewayOutboundTargetEvent
+	OutboundBlocked      bool
+	OutboundProgress     bool
+	Err                  error
 }
 
 func (e *GatewayCycleError) Error() string { return "telegram gateway cycle failed" }
@@ -75,7 +82,16 @@ func ClassifyGatewayCycleFailure(err error) GatewayFailureClass {
 		return GatewayFailureOutboundTelegramPermanent
 	}
 	var cycle *GatewayCycleError
-	if !errors.As(err, &cycle) || cycle.Phase != GatewayPhaseInbound {
+	if !errors.As(err, &cycle) {
+		return GatewayFailureTransient
+	}
+	if cycle.NonFatal && cycle.Err == nil {
+		return GatewayFailureNone
+	}
+	if cycle.Phase == GatewayPhaseSend && isPermanentTelegramFailure(err) {
+		return GatewayFailureOutboundTelegramPermanent
+	}
+	if cycle.Phase != GatewayPhaseInbound {
 		return GatewayFailureTransient
 	}
 	var permanentRelay interface{ PermanentRelayFailure() bool }
@@ -105,32 +121,111 @@ func (b Bridge) SyncOnce(ctx context.Context, offset int64) (int64, error) {
 			return offset, &GatewayCycleError{Phase: GatewayPhaseClaim, Err: err}
 		}
 	}
-	next, err := (Runner{Poller: b.Poller, Gateway: b.Gateway}).RunOnce(ctx, offset)
+	terminalInbound := 0
+	inboundRecovery := false
+	var inboundTargetEvents []GatewayInboundTargetEvent
+	var terminalInboundErr error
+	gateway := b.Gateway
+	previousTerminalDrop := gateway.terminalDrop
+	previousInboundRecovery := gateway.inboundRecovery
+	gateway.terminalDrop = func(conversationID string, err error) {
+		terminalInbound++
+		inboundTargetEvents = append(inboundTargetEvents, GatewayInboundTargetEvent{ConversationID: conversationID, Terminal: true, Staged: true, Failure: GatewayFailureInboundRelayPermanent})
+		if terminalInboundErr == nil {
+			terminalInboundErr = err
+		}
+		if previousTerminalDrop != nil {
+			previousTerminalDrop(conversationID, err)
+		}
+	}
+	gateway.inboundRecovery = func(conversationID string) {
+		inboundRecovery = true
+		inboundTargetEvents = append(inboundTargetEvents, GatewayInboundTargetEvent{ConversationID: conversationID})
+		if previousInboundRecovery != nil {
+			previousInboundRecovery(conversationID)
+		}
+	}
+	next, err := (Runner{Poller: b.Poller, Gateway: gateway}).RunOnce(ctx, offset)
 	if err != nil {
 		phase := GatewayPhaseInbound
 		var status BotAPIStatusError
 		if errors.As(err, &status) && status.Method == "getUpdates" {
 			phase = GatewayPhasePoll
 		}
-		return offset, &GatewayCycleError{Phase: phase, Err: err}
+		return offset, &GatewayCycleError{Phase: phase, TerminalInbound: terminalInbound, InboundRecovery: inboundRecovery, InboundTargetEvents: inboundTargetEvents, Err: err}
 	}
 	deliveries, err := b.Relay.Lease(ctx, b.Endpoint)
 	if err != nil {
-		return next, &GatewayCycleError{Phase: GatewayPhaseLease, Err: err}
+		return next, &GatewayCycleError{Phase: GatewayPhaseLease, TerminalInbound: terminalInbound, InboundRecovery: inboundRecovery, InboundTargetEvents: inboundTargetEvents, Err: err}
 	}
 	outboundProgress := false
+	outboundRecovery := false
+	terminalOutbound := 0
+	var outboundTargetEvents []GatewayOutboundTargetEvent
+	var terminalOutboundErr error
 	for _, delivery := range deliveries {
 		if err := SendDelivery(ctx, b.State, b.Sender, delivery, b.Gateway.AllowedUserID); err != nil {
+			if isPermanentTelegramFailure(err) {
+				b.logEvent("telegram_send_dropped", "delivery_id="+delivery.ID, "reason=permanent_rejection")
+				failureClass := GatewayFailureOutboundTelegramPermanent
+				if DeletedTopicFailure(err) {
+					failureClass = GatewayFailureDeletedTopic
+				}
+				if err := b.State.StageTerminalOutbound(delivery.ID, delivery.Message.ConversationID, failureClass); err != nil {
+					return next, &GatewayCycleError{Phase: GatewayPhaseSend, TerminalInbound: terminalInbound, TerminalOutbound: terminalOutbound, InboundRecovery: inboundRecovery, OutboundRecovery: outboundRecovery, InboundTargetEvents: inboundTargetEvents, OutboundTargetEvents: outboundTargetEvents, OutboundBlocked: true, OutboundProgress: outboundProgress, Err: fmt.Errorf("stage terminal telegram delivery: %w", err)}
+				}
+				terminalOutbound++
+				outboundTargetEvents = append(outboundTargetEvents, GatewayOutboundTargetEvent{ConversationID: delivery.Message.ConversationID, Terminal: true, Staged: true, Failure: failureClass})
+				if terminalOutboundErr == nil || DeletedTopicFailure(err) {
+					terminalOutboundErr = err
+				}
+				if err := b.Relay.Ack(ctx, delivery); err != nil {
+					return next, &GatewayCycleError{Phase: GatewayPhaseAck, TerminalInbound: terminalInbound, TerminalOutbound: terminalOutbound, InboundRecovery: inboundRecovery, OutboundRecovery: outboundRecovery, InboundTargetEvents: inboundTargetEvents, OutboundTargetEvents: outboundTargetEvents, OutboundBlocked: true, OutboundProgress: outboundProgress, Err: err}
+				}
+				outboundProgress = true
+				if err := b.State.FinalizeTerminalOutbound(delivery.ID); err != nil {
+					return next, &GatewayCycleError{Phase: GatewayPhaseAck, TerminalInbound: terminalInbound, TerminalOutbound: terminalOutbound, InboundRecovery: inboundRecovery, OutboundRecovery: outboundRecovery, InboundTargetEvents: inboundTargetEvents, OutboundTargetEvents: outboundTargetEvents, OutboundBlocked: true, OutboundProgress: outboundProgress, Err: fmt.Errorf("finalize acknowledged terminal telegram delivery: %w", err)}
+				}
+				continue
+			}
 			b.logEvent("telegram_send_err", "delivery_id="+delivery.ID)
-			return next, &GatewayCycleError{Phase: GatewayPhaseSend, OutboundBlocked: true, OutboundProgress: outboundProgress, Err: err}
+			return next, &GatewayCycleError{Phase: GatewayPhaseSend, TerminalInbound: terminalInbound, TerminalOutbound: terminalOutbound, InboundRecovery: inboundRecovery, OutboundRecovery: outboundRecovery, InboundTargetEvents: inboundTargetEvents, OutboundTargetEvents: outboundTargetEvents, OutboundBlocked: true, OutboundProgress: outboundProgress, Err: err}
 		}
+		if err := b.State.RecoverTerminalOutbound(delivery.Message.ConversationID); err != nil {
+			return next, &GatewayCycleError{Phase: GatewayPhaseSend, TerminalInbound: terminalInbound, TerminalOutbound: terminalOutbound, InboundRecovery: inboundRecovery, OutboundRecovery: outboundRecovery, InboundTargetEvents: inboundTargetEvents, OutboundTargetEvents: outboundTargetEvents, OutboundBlocked: true, OutboundProgress: outboundProgress, Err: fmt.Errorf("record terminal telegram recovery: %w", err)}
+		}
+		outboundRecovery = true
+		outboundTargetEvents = append(outboundTargetEvents, GatewayOutboundTargetEvent{ConversationID: delivery.Message.ConversationID})
 		b.logEvent("telegram_send_ok", "delivery_id="+delivery.ID)
 		if err := b.Relay.Ack(ctx, delivery); err != nil {
-			return next, &GatewayCycleError{Phase: GatewayPhaseAck, OutboundBlocked: true, OutboundProgress: outboundProgress, Err: err}
+			return next, &GatewayCycleError{Phase: GatewayPhaseAck, TerminalInbound: terminalInbound, TerminalOutbound: terminalOutbound, InboundRecovery: inboundRecovery, OutboundRecovery: outboundRecovery, InboundTargetEvents: inboundTargetEvents, OutboundTargetEvents: outboundTargetEvents, OutboundBlocked: true, OutboundProgress: outboundProgress, Err: err}
 		}
 		outboundProgress = true
 	}
+	if terminalInbound > 0 || terminalOutbound > 0 || inboundRecovery || outboundRecovery {
+		phase, terminalErr := GatewayPhaseInbound, terminalInboundErr
+		if terminalOutbound > 0 || terminalInbound == 0 && outboundRecovery {
+			phase, terminalErr = GatewayPhaseSend, terminalOutboundErr
+		}
+		return next, &GatewayCycleError{
+			Phase: phase, NonFatal: true,
+			TerminalInbound: terminalInbound, TerminalOutbound: terminalOutbound,
+			InboundRecovery: inboundRecovery, OutboundRecovery: outboundRecovery,
+			InboundTargetEvents:  inboundTargetEvents,
+			OutboundTargetEvents: outboundTargetEvents,
+			Err:                  terminalErr,
+		}
+	}
 	return next, nil
+}
+
+type permanentTelegramFailure interface {
+	PermanentTelegramFailure() bool
+}
+
+func isPermanentTelegramFailure(err error) bool {
+	var terminal permanentTelegramFailure
+	return errors.As(err, &terminal) && terminal.PermanentTelegramFailure()
 }
 
 func (b Bridge) logEvent(class string, fields ...string) {

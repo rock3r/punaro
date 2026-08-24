@@ -475,8 +475,9 @@ func TestHTTPRelayClientClassifiesOnlyPreAppendRejectionsAsTerminalOfferFailures
 			}
 			_, err = client.Send(context.Background(), "conversation-1", "agent/a", "offer", "offer-1")
 			var terminal terminalOfferNoticeFailure
-			if err == nil || !errors.As(err, &terminal) || terminal.PermanentOfferNoticeFailure() != test.terminal {
-				t.Fatalf("status=%d err=%v terminal=%v", test.status, err, terminal)
+			var relayFailure interface{ PermanentRelayFailure() bool }
+			if err == nil || !errors.As(err, &terminal) || terminal.PermanentOfferNoticeFailure() != test.terminal || !errors.As(err, &relayFailure) || relayFailure.PermanentRelayFailure() != test.terminal {
+				t.Fatalf("status=%d err=%v offer_terminal=%v relay_terminal=%v", test.status, err, terminal, relayFailure)
 			}
 		})
 	}

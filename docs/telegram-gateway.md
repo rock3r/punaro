@@ -287,26 +287,54 @@ to multiple topics. There is no main-chat fallback.
 ## Inbound and outbound routing
 
 Incoming questions use the Telegram update ID as the durable relay idempotency
-key and are submitted on `telegram-inbound` as `user-telegram`. A failed
-submission is retried; a crash after submission is safely deduplicated by the
-relay. Unauthorized, non-text, or unbound-topic updates are durably skipped so
-they cannot stall the polling offset after a restart. They are never routed by
+key and are submitted on `telegram-inbound` as `user-telegram`. Network, 5xx,
+and other retryable submission failures leave the update pending; a crash after
+submission is safely deduplicated by the relay. A relay 403 or 404 that echoes
+the signed request nonce is a terminal pre-append rejection, so the gateway
+records the update as processed, emits only a content-free
+`telegram_update_dropped` event, continues the page, and carries the terminal
+inbound outcome into the durable gateway-health record. An intermediary 403 or
+404 without that relay proof stays pending for retry. Unauthorized, unsupported
+or non-text, and unbound-topic updates are also
+durably skipped, including message-less update IDs returned by Telegram, so
+none can stall the polling offset after a restart. They are never routed by
 inference. Replies resolve `reply_to_message` through a local 10,000-row
 `telegram_outbound` map of Telegram `message_id` to Punaro identities; a miss
 delivers the text without `in_reply_to_*`.
 
 Outgoing agent replies are sent using Telegram's `sendRichMessage` to that
-exact `message_thread_id` from `topic_routes`. `SendDelivery` stays
-route-based through adopt soak. A missing route fails closed with
-`telegram conversation route is missing` and leaves the delivery unacked. A
-deleted Telegram thread fails closed at `sendRichMessage`; do not recreate it
-and do not require a completed claim on this path until after soak. The
-returned `message_id` is stored in the outbound map. The bridge renders opaque
-agent content as escaped HTML, disables automatic entity detection, and asks
-Telegram to protect content. Telegram has no send-idempotency key, therefore
-this external boundary is explicitly at-least-once: a crash after Telegram
-accepts a reply but before relay acknowledgement can repeat that reply on
-recovery.
+exact `message_thread_id` from `topic_routes`. `SendDelivery` stays route-based
+through adopt soak. A missing route or a route for another chat fails closed
+and leaves the delivery unacknowledged so restoring or repairing local route
+state can recover it. A malformed delivery or completed Telegram 4xx response
+other than 401 and 429 is terminal: the bridge emits only a content-free
+`telegram_send_dropped` event, acknowledges that poison delivery, and continues
+later deliveries. A successful dropped acknowledgement advances the outbound
+liveness clock and carries the terminal outbound outcome into the durable
+gateway-health record; an acknowledgement failure remains an explicit blocked
+ack-phase cycle. A deleted Telegram thread therefore fails closed and is
+dropped; repair the explicit route rather than recreating a thread
+automatically. Empty cycles do not clear either terminal health outcome; a
+successful inbound submission or outbound send clears only failures recorded
+for that same conversation target. On first open after upgrading an older
+aggregate ledger, Punaro conservatively creates one recovery marker per known
+route; each route must demonstrate a successful operation before the historical
+terminal state clears. Telegram
+401, 429, 5xx, and network failures leave the delivery
+unacknowledged for retry. The returned `message_id` is stored in the outbound
+map. The bridge renders opaque agent content as escaped
+HTML, disables automatic entity detection, and asks Telegram to protect
+content. Telegram has no send-idempotency key, therefore this external boundary
+is explicitly at-least-once: a crash after Telegram accepts a reply but before
+relay acknowledgement can repeat that reply on recovery.
+
+Terminal inbound rejection evidence is committed in the same SQLite
+transaction that consumes the Telegram update. Terminal outbound evidence is
+staged idempotently by relay delivery ID before acknowledgement; a repaired
+target is cleared locally before its successful delivery is acknowledged.
+Doctor reads these target ledgers directly, so a process crash between an
+external acknowledgement and the later aggregate cycle record cannot hide a
+dropped item or strand a completed recovery.
 
 Telegram Bot API rich messages support structured HTML and Markdown variants,
 and `sendRichMessage` accepts a `message_thread_id` for a forum topic. Punaro

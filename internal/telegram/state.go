@@ -38,6 +38,8 @@ const (
 
 var telegramOutboundLimit = 10000
 
+const gatewayLegacyTarget = "__legacy_unattributed__"
+
 // ClaimExecution is one gateway-local claim phase. It stores no mail bodies.
 type ClaimExecution struct {
 	ConversationID string
@@ -95,6 +97,20 @@ func Open(database string) (*State, error) {
 			terminal_inbound INTEGER NOT NULL,
 			terminal_outbound INTEGER NOT NULL
 		)`,
+		`CREATE TABLE IF NOT EXISTS gateway_terminal_outbound_targets (
+			conversation_id TEXT PRIMARY KEY,
+			failures INTEGER NOT NULL CHECK (failures > 0),
+			failure_class TEXT NOT NULL
+		)`,
+		`CREATE TABLE IF NOT EXISTS gateway_terminal_inbound_targets (
+			conversation_id TEXT PRIMARY KEY,
+			failures INTEGER NOT NULL CHECK (failures > 0)
+		)`,
+		`CREATE TABLE IF NOT EXISTS gateway_terminal_outbound_events (
+			delivery_id TEXT PRIMARY KEY,
+			conversation_id TEXT NOT NULL,
+			failure_class TEXT NOT NULL
+		)`,
 	} {
 		if _, err := db.ExecContext(context.Background(), statement); err != nil {
 			_ = db.Close()
@@ -106,6 +122,10 @@ func Open(database string) (*State, error) {
 		return nil, fmt.Errorf("initialize telegram state: %w", err)
 	}
 	if err := ensureGatewayHealthOutboundProgress(db); err != nil {
+		_ = db.Close()
+		return nil, fmt.Errorf("initialize telegram state: %w", err)
+	}
+	if err := ensureGatewayTerminalTargetLedgers(db); err != nil {
 		_ = db.Close()
 		return nil, fmt.Errorf("initialize telegram state: %w", err)
 	}
@@ -126,16 +146,35 @@ const (
 	GatewayFailureDeletedTopic              GatewayFailureClass = "deleted_topic"
 )
 
-// GatewayCycleRecord contains only aggregate cycle health.
+// GatewayTargetEvent records content-free evidence that a conversation target
+// either rejected an operation terminally or later accepted one.
+type GatewayTargetEvent struct {
+	ConversationID string
+	Terminal       bool
+	Staged         bool
+	Failure        GatewayFailureClass
+}
+
+// GatewayInboundTargetEvent is conversation-scoped inbound health evidence.
+type GatewayInboundTargetEvent = GatewayTargetEvent
+
+// GatewayOutboundTargetEvent is conversation-scoped outbound health evidence.
+type GatewayOutboundTargetEvent = GatewayTargetEvent
+
+// GatewayCycleRecord contains only content-free cycle health evidence.
 type GatewayCycleRecord struct {
-	At               time.Time
-	Offset           int64
-	PollOK           bool
-	RelayOK          bool
-	TelegramOK       bool
-	OutboundBlocked  bool
-	OutboundProgress bool
-	Failure          GatewayFailureClass
+	At                   time.Time
+	Offset               int64
+	PollOK               bool
+	RelayOK              bool
+	TelegramOK           bool
+	OutboundBlocked      bool
+	OutboundProgress     bool
+	TerminalInbound      int
+	TerminalOutbound     int
+	InboundTargetEvents  []GatewayInboundTargetEvent
+	OutboundTargetEvents []GatewayOutboundTargetEvent
+	Failure              GatewayFailureClass
 }
 
 // GatewayStateSnapshot is the bounded, content-free state used by doctor.
@@ -158,6 +197,7 @@ type GatewayStateSnapshot struct {
 	LastFailure         GatewayFailureClass
 	TerminalInbound     int
 	TerminalOutbound    int
+	DeletedTopicTargets int
 	StuckHead           bool
 }
 
@@ -173,14 +213,50 @@ func validGatewayFailure(class GatewayFailureClass) bool {
 // RecordGatewayCycle updates the content-free liveness ledger during normal
 // gateway operation. Doctor itself never calls this method.
 func (s *State) RecordGatewayCycle(record GatewayCycleRecord) error {
-	if record.At.IsZero() || record.Offset < 0 || record.OutboundProgress && !record.OutboundBlocked || !validGatewayFailure(record.Failure) {
+	if record.At.IsZero() || record.Offset < 0 || record.OutboundProgress && !record.OutboundBlocked || record.TerminalInbound < 0 || record.TerminalOutbound < 0 || record.Failure == GatewayFailureNone && (record.TerminalInbound > 0 || record.TerminalOutbound > 0) || !validGatewayFailure(record.Failure) {
 		return fmt.Errorf("invalid gateway cycle record")
 	}
+	inboundTerminalEvents, outboundTerminalEvents := 0, 0
+	for _, event := range record.InboundTargetEvents {
+		if strings.TrimSpace(event.ConversationID) == "" {
+			return fmt.Errorf("invalid gateway cycle record")
+		}
+		if event.Staged && !event.Terminal {
+			return fmt.Errorf("invalid gateway cycle record")
+		}
+		if event.Terminal {
+			inboundTerminalEvents++
+			if event.Failure != GatewayFailureNone && event.Failure != GatewayFailureInboundRelayPermanent {
+				return fmt.Errorf("invalid gateway cycle record")
+			}
+		}
+	}
+	for _, event := range record.OutboundTargetEvents {
+		if strings.TrimSpace(event.ConversationID) == "" {
+			return fmt.Errorf("invalid gateway cycle record")
+		}
+		if event.Terminal {
+			outboundTerminalEvents++
+			if event.Failure != GatewayFailureNone && event.Failure != GatewayFailureOutboundTelegramPermanent && event.Failure != GatewayFailureDeletedTopic {
+				return fmt.Errorf("invalid gateway cycle record")
+			}
+		}
+		if event.Staged && !event.Terminal {
+			return fmt.Errorf("invalid gateway cycle record")
+		}
+	}
 	now := record.At.UTC().UnixMilli()
+	tx, err := s.db.BeginTx(context.Background(), nil)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = tx.Rollback() }()
 	var previousOffset, previousProgress int64
+	var previousConsecutive, previousTerminalInbound, previousTerminalOutbound int
+	var previousFailure string
 	var previousOutboundProgress sql.NullInt64
 	var previousOutboundBlocked bool
-	err := s.db.QueryRowContext(context.Background(), `SELECT offset,last_progress_at,last_outbound_progress_at,outbound_blocked FROM gateway_health WHERE id = 1`).Scan(&previousOffset, &previousProgress, &previousOutboundProgress, &previousOutboundBlocked)
+	err = tx.QueryRowContext(context.Background(), `SELECT offset,last_progress_at,last_outbound_progress_at,outbound_blocked,consecutive_failures,last_failure,terminal_inbound,terminal_outbound FROM gateway_health WHERE id = 1`).Scan(&previousOffset, &previousProgress, &previousOutboundProgress, &previousOutboundBlocked, &previousConsecutive, &previousFailure, &previousTerminalInbound, &previousTerminalOutbound)
 	first := errors.Is(err, sql.ErrNoRows)
 	if err != nil && !first {
 		return err
@@ -205,10 +281,8 @@ func (s *State) RecordGatewayCycle(record GatewayCycleRecord) error {
 		}
 	}
 	successAt, pollAt, relayAt, telegramAt := any(nil), any(nil), any(nil), any(nil)
-	consecutiveDelta := 1
 	if record.Failure == GatewayFailureNone {
 		successAt = now
-		consecutiveDelta = 0
 	}
 	if record.PollOK {
 		pollAt = now
@@ -219,14 +293,96 @@ func (s *State) RecordGatewayCycle(record GatewayCycleRecord) error {
 	if record.TelegramOK {
 		telegramAt = now
 	}
-	inboundDelta, outboundDelta := 0, 0
-	if record.Failure == GatewayFailureInboundRelayPermanent {
+	inboundDelta, outboundDelta := record.TerminalInbound, record.TerminalOutbound
+	if inboundDelta == 0 && record.Failure == GatewayFailureInboundRelayPermanent {
 		inboundDelta = 1
 	}
-	if record.Failure == GatewayFailureOutboundTelegramPermanent || record.Failure == GatewayFailureDeletedTopic {
+	if outboundDelta == 0 && (record.Failure == GatewayFailureOutboundTelegramPermanent || record.Failure == GatewayFailureDeletedTopic) {
 		outboundDelta = 1
 	}
-	_, err = s.db.ExecContext(context.Background(), `INSERT INTO gateway_health(
+	if inboundTerminalEvents > inboundDelta || outboundTerminalEvents > outboundDelta {
+		return fmt.Errorf("invalid gateway cycle record")
+	}
+	if unmatched := inboundDelta - inboundTerminalEvents; unmatched > 0 {
+		if _, err := tx.ExecContext(context.Background(), `INSERT INTO gateway_terminal_inbound_targets(conversation_id,failures) VALUES(?,?) ON CONFLICT(conversation_id) DO UPDATE SET failures=failures+excluded.failures`, gatewayLegacyTarget, unmatched); err != nil {
+			return err
+		}
+	}
+	for _, event := range record.InboundTargetEvents {
+		if event.Terminal {
+			if event.Staged {
+				continue
+			}
+			if _, err := tx.ExecContext(context.Background(), `INSERT INTO gateway_terminal_inbound_targets(conversation_id,failures) VALUES(?,1) ON CONFLICT(conversation_id) DO UPDATE SET failures=failures+1`, event.ConversationID); err != nil {
+				return err
+			}
+			continue
+		}
+		if _, err := tx.ExecContext(context.Background(), `DELETE FROM gateway_terminal_inbound_targets WHERE conversation_id IN (?,?)`, event.ConversationID, gatewayLegacyTarget); err != nil {
+			return err
+		}
+	}
+	if unmatched := outboundDelta - outboundTerminalEvents; unmatched > 0 {
+		class := record.Failure
+		if class != GatewayFailureDeletedTopic {
+			class = GatewayFailureOutboundTelegramPermanent
+		}
+		if _, err := tx.ExecContext(context.Background(), `INSERT INTO gateway_terminal_outbound_targets(conversation_id,failures,failure_class) VALUES(?,?,?) ON CONFLICT(conversation_id) DO UPDATE SET failures=failures+excluded.failures,failure_class=CASE WHEN failure_class='deleted_topic' OR excluded.failure_class='deleted_topic' THEN 'deleted_topic' ELSE 'outbound_telegram_permanent' END`, gatewayLegacyTarget, unmatched, string(class)); err != nil {
+			return err
+		}
+	}
+	for _, event := range record.OutboundTargetEvents {
+		if event.Terminal {
+			if event.Staged {
+				continue
+			}
+			class := event.Failure
+			if class == GatewayFailureNone {
+				class = record.Failure
+			}
+			if class != GatewayFailureDeletedTopic {
+				class = GatewayFailureOutboundTelegramPermanent
+			}
+			if _, err := tx.ExecContext(context.Background(), `INSERT INTO gateway_terminal_outbound_targets(conversation_id,failures,failure_class) VALUES(?,1,?) ON CONFLICT(conversation_id) DO UPDATE SET failures=failures+1,failure_class=CASE WHEN failure_class='deleted_topic' OR excluded.failure_class='deleted_topic' THEN 'deleted_topic' ELSE 'outbound_telegram_permanent' END`, event.ConversationID, string(class)); err != nil {
+				return err
+			}
+			continue
+		}
+		if _, err := tx.ExecContext(context.Background(), `DELETE FROM gateway_terminal_outbound_targets WHERE conversation_id IN (?,?)`, event.ConversationID, gatewayLegacyTarget); err != nil {
+			return err
+		}
+		if _, err := tx.ExecContext(context.Background(), `DELETE FROM gateway_terminal_outbound_events WHERE conversation_id=?`, event.ConversationID); err != nil {
+			return err
+		}
+	}
+	var terminalInbound, terminalOutbound, deletedTopicTargets int
+	if err := tx.QueryRowContext(context.Background(), `SELECT COALESCE(SUM(failures), 0) FROM gateway_terminal_inbound_targets`).Scan(&terminalInbound); err != nil {
+		return err
+	}
+	if err := tx.QueryRowContext(context.Background(), `SELECT COALESCE(SUM(failures), 0) FROM gateway_terminal_outbound_targets`).Scan(&terminalOutbound); err != nil {
+		return err
+	}
+	if err := tx.QueryRowContext(context.Background(), `SELECT COUNT(*) FROM gateway_terminal_outbound_targets WHERE failure_class=?`, string(GatewayFailureDeletedTopic)).Scan(&deletedTopicTargets); err != nil {
+		return err
+	}
+	effectiveFailure := record.Failure
+	if effectiveFailure == GatewayFailureNone && (terminalInbound > 0 || terminalOutbound > 0) {
+		switch {
+		case deletedTopicTargets > 0:
+			effectiveFailure = GatewayFailureDeletedTopic
+		case terminalOutbound > 0:
+			effectiveFailure = GatewayFailureOutboundTelegramPermanent
+		default:
+			effectiveFailure = GatewayFailureInboundRelayPermanent
+		}
+	}
+	consecutiveFailures := 0
+	if record.Failure != GatewayFailureNone {
+		consecutiveFailures = previousConsecutive + 1
+	} else if effectiveFailure != GatewayFailureNone {
+		consecutiveFailures = previousConsecutive
+	}
+	_, err = tx.ExecContext(context.Background(), `INSERT INTO gateway_health(
 		id,last_cycle_at,last_success_at,last_poll_at,last_relay_at,last_telegram_at,last_progress_at,last_outbound_progress_at,offset,outbound_blocked,consecutive_failures,last_failure,terminal_inbound,terminal_outbound
 	) VALUES (1,?,?,?,?,?,?,?,?,?,?,?,?,?)
 	ON CONFLICT(id) DO UPDATE SET
@@ -239,12 +395,15 @@ func (s *State) RecordGatewayCycle(record GatewayCycleRecord) error {
 		last_outbound_progress_at=excluded.last_outbound_progress_at,
 		offset=excluded.offset,
 		outbound_blocked=excluded.outbound_blocked,
-		consecutive_failures=CASE WHEN excluded.last_failure='' THEN 0 ELSE gateway_health.consecutive_failures+1 END,
+		consecutive_failures=excluded.consecutive_failures,
 		last_failure=excluded.last_failure,
-		terminal_inbound=CASE WHEN excluded.last_failure='' THEN 0 ELSE gateway_health.terminal_inbound+excluded.terminal_inbound END,
-		terminal_outbound=CASE WHEN excluded.last_failure='' THEN 0 ELSE gateway_health.terminal_outbound+excluded.terminal_outbound END`,
-		now, successAt, pollAt, relayAt, telegramAt, progressAt, outboundProgressAt, record.Offset, outboundBlocked, consecutiveDelta, string(record.Failure), inboundDelta, outboundDelta)
-	return err
+		terminal_inbound=excluded.terminal_inbound,
+		terminal_outbound=excluded.terminal_outbound`,
+		now, successAt, pollAt, relayAt, telegramAt, progressAt, outboundProgressAt, record.Offset, outboundBlocked, consecutiveFailures, string(effectiveFailure), terminalInbound, terminalOutbound)
+	if err != nil {
+		return err
+	}
+	return tx.Commit()
 }
 
 // InspectGatewayState opens the database read-only and returns bounded
@@ -288,9 +447,15 @@ func InspectGatewayState(parent context.Context, database string, now time.Time)
 	err = db.QueryRowContext(ctx, `SELECT last_cycle_at,last_success_at,last_poll_at,last_relay_at,last_telegram_at,last_progress_at,last_outbound_progress_at,outbound_blocked,consecutive_failures,last_failure,terminal_inbound,terminal_outbound FROM gateway_health WHERE id=1`).Scan(
 		&cycle, &success, &poll, &relayAt, &telegramAt, &progress, &outboundProgress, &outboundBlocked, &snapshot.ConsecutiveFailures, &lastFailure, &snapshot.TerminalInbound, &snapshot.TerminalOutbound)
 	if errors.Is(err, sql.ErrNoRows) {
+		if err := inspectGatewayTerminalLedgers(ctx, db, &snapshot, GatewayFailureNone); err != nil {
+			return GatewayStateSnapshot{}, fmt.Errorf("gateway state unavailable")
+		}
 		return snapshot, nil
 	}
 	if err != nil || !validGatewayFailure(GatewayFailureClass(lastFailure)) {
+		return GatewayStateSnapshot{}, fmt.Errorf("gateway state unavailable")
+	}
+	if err := inspectGatewayTerminalLedgers(ctx, db, &snapshot, GatewayFailureClass(lastFailure)); err != nil {
 		return GatewayStateSnapshot{}, fmt.Errorf("gateway state unavailable")
 	}
 	snapshot.HasHealth = true
@@ -322,6 +487,185 @@ func InspectGatewayState(parent context.Context, database string, now time.Time)
 	}
 	snapshot.StuckHead = snapshot.ConsecutiveFailures >= 3 && stuckProgress.Valid && age(stuckProgress) >= 5*time.Minute
 	return snapshot, nil
+}
+
+func inspectGatewayTerminalLedgers(ctx context.Context, db *sql.DB, snapshot *GatewayStateSnapshot, lastFailure GatewayFailureClass) error {
+	var inboundTables int
+	if err := db.QueryRowContext(ctx, `SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='gateway_terminal_inbound_targets'`).Scan(&inboundTables); err != nil {
+		return err
+	}
+	if inboundTables > 0 {
+		if err := db.QueryRowContext(ctx, `SELECT COALESCE(SUM(failures),0) FROM gateway_terminal_inbound_targets`).Scan(&snapshot.TerminalInbound); err != nil {
+			return err
+		}
+	}
+	var outboundTables int
+	if err := db.QueryRowContext(ctx, `SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='gateway_terminal_outbound_targets'`).Scan(&outboundTables); err != nil {
+		return err
+	}
+	if outboundTables == 0 {
+		if lastFailure == GatewayFailureDeletedTopic && snapshot.TerminalOutbound > 0 {
+			snapshot.DeletedTopicTargets = 1
+		}
+		return nil
+	}
+	if err := db.QueryRowContext(ctx, `SELECT COALESCE(SUM(failures),0) FROM gateway_terminal_outbound_targets`).Scan(&snapshot.TerminalOutbound); err != nil {
+		return err
+	}
+	var classColumns int
+	if err := db.QueryRowContext(ctx, `SELECT COUNT(*) FROM pragma_table_info('gateway_terminal_outbound_targets') WHERE name='failure_class'`).Scan(&classColumns); err != nil {
+		return err
+	}
+	if classColumns == 0 {
+		if lastFailure == GatewayFailureDeletedTopic && snapshot.TerminalOutbound > 0 {
+			snapshot.DeletedTopicTargets = 1
+		}
+		return nil
+	}
+	if err := db.QueryRowContext(ctx, `SELECT COUNT(*) FROM gateway_terminal_outbound_targets WHERE failure_class=?`, string(GatewayFailureDeletedTopic)).Scan(&snapshot.DeletedTopicTargets); err != nil {
+		return err
+	}
+	var invalidTargetClasses int
+	if err := db.QueryRowContext(ctx, `SELECT COUNT(*) FROM gateway_terminal_outbound_targets WHERE failure_class NOT IN (?,?)`, string(GatewayFailureOutboundTelegramPermanent), string(GatewayFailureDeletedTopic)).Scan(&invalidTargetClasses); err != nil || invalidTargetClasses != 0 {
+		return fmt.Errorf("invalid terminal outbound target class")
+	}
+	return nil
+}
+
+func ensureGatewayTerminalTargetLedgers(db *sql.DB) error {
+	var classColumns int
+	if err := db.QueryRowContext(context.Background(), `SELECT COUNT(*) FROM pragma_table_info('gateway_terminal_outbound_targets') WHERE name='failure_class'`).Scan(&classColumns); err != nil {
+		return err
+	}
+	if classColumns == 0 {
+		if _, err := db.ExecContext(context.Background(), `ALTER TABLE gateway_terminal_outbound_targets ADD COLUMN failure_class TEXT NOT NULL DEFAULT 'outbound_telegram_permanent'`); err != nil {
+			return err
+		}
+	}
+	tx, err := db.BeginTx(context.Background(), nil)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = tx.Rollback() }()
+	var terminalInbound, terminalOutbound int
+	var lastFailure string
+	err = tx.QueryRowContext(context.Background(), `SELECT terminal_inbound,terminal_outbound,last_failure FROM gateway_health WHERE id=1`).Scan(&terminalInbound, &terminalOutbound, &lastFailure)
+	if errors.Is(err, sql.ErrNoRows) {
+		return tx.Commit()
+	}
+	if err != nil {
+		return err
+	}
+	if classColumns == 0 && GatewayFailureClass(lastFailure) == GatewayFailureDeletedTopic {
+		if _, err := tx.ExecContext(context.Background(), `UPDATE gateway_terminal_outbound_targets SET failure_class=?`, string(GatewayFailureDeletedTopic)); err != nil {
+			return err
+		}
+	}
+	var routes []string
+	rows, err := tx.QueryContext(context.Background(), `SELECT conversation_id FROM topic_routes ORDER BY conversation_id`)
+	if err != nil {
+		return err
+	}
+	for rows.Next() {
+		var conversationID string
+		if err := rows.Scan(&conversationID); err != nil {
+			_ = rows.Close()
+			return err
+		}
+		routes = append(routes, conversationID)
+	}
+	if err := rows.Close(); err != nil {
+		return err
+	}
+	if err := rows.Err(); err != nil {
+		return err
+	}
+	var trackedInbound, trackedOutbound int
+	if err := tx.QueryRowContext(context.Background(), `SELECT COALESCE(SUM(failures),0) FROM gateway_terminal_inbound_targets`).Scan(&trackedInbound); err != nil {
+		return err
+	}
+	if err := tx.QueryRowContext(context.Background(), `SELECT COALESCE(SUM(failures),0) FROM gateway_terminal_outbound_targets`).Scan(&trackedOutbound); err != nil {
+		return err
+	}
+	if len(routes) > 0 {
+		var legacyInbound int
+		if err := tx.QueryRowContext(context.Background(), `SELECT COALESCE(SUM(failures),0) FROM gateway_terminal_inbound_targets WHERE conversation_id=?`, gatewayLegacyTarget).Scan(&legacyInbound); err != nil {
+			return err
+		}
+		if legacyInbound > 0 {
+			if _, err := tx.ExecContext(context.Background(), `DELETE FROM gateway_terminal_inbound_targets WHERE conversation_id=?`, gatewayLegacyTarget); err != nil {
+				return err
+			}
+			for _, conversationID := range routes {
+				if _, err := tx.ExecContext(context.Background(), `INSERT INTO gateway_terminal_inbound_targets(conversation_id,failures) VALUES(?,1) ON CONFLICT(conversation_id) DO NOTHING`, conversationID); err != nil {
+					return err
+				}
+			}
+			if err := tx.QueryRowContext(context.Background(), `SELECT COALESCE(SUM(failures),0) FROM gateway_terminal_inbound_targets`).Scan(&trackedInbound); err != nil {
+				return err
+			}
+		}
+		var legacyOutbound int
+		var legacyOutboundClass string
+		err := tx.QueryRowContext(context.Background(), `SELECT failures,failure_class FROM gateway_terminal_outbound_targets WHERE conversation_id=?`, gatewayLegacyTarget).Scan(&legacyOutbound, &legacyOutboundClass)
+		if err != nil && !errors.Is(err, sql.ErrNoRows) {
+			return err
+		}
+		if legacyOutbound > 0 {
+			if _, err := tx.ExecContext(context.Background(), `DELETE FROM gateway_terminal_outbound_targets WHERE conversation_id=?`, gatewayLegacyTarget); err != nil {
+				return err
+			}
+			if !validGatewayFailure(GatewayFailureClass(legacyOutboundClass)) || GatewayFailureClass(legacyOutboundClass) != GatewayFailureDeletedTopic {
+				legacyOutboundClass = string(GatewayFailureOutboundTelegramPermanent)
+			}
+			for _, conversationID := range routes {
+				if _, err := tx.ExecContext(context.Background(), `INSERT INTO gateway_terminal_outbound_targets(conversation_id,failures,failure_class) VALUES(?,1,?) ON CONFLICT(conversation_id) DO NOTHING`, conversationID, legacyOutboundClass); err != nil {
+					return err
+				}
+			}
+			if err := tx.QueryRowContext(context.Background(), `SELECT COALESCE(SUM(failures),0) FROM gateway_terminal_outbound_targets`).Scan(&trackedOutbound); err != nil {
+				return err
+			}
+		}
+	}
+	if terminalInbound > 0 && trackedInbound == 0 {
+		if len(routes) == 0 {
+			if _, err := tx.ExecContext(context.Background(), `INSERT INTO gateway_terminal_inbound_targets(conversation_id,failures) VALUES(?,?)`, gatewayLegacyTarget, terminalInbound); err != nil {
+				return err
+			}
+			trackedInbound = terminalInbound
+		} else {
+			for _, conversationID := range routes {
+				if _, err := tx.ExecContext(context.Background(), `INSERT INTO gateway_terminal_inbound_targets(conversation_id,failures) VALUES(?,1)`, conversationID); err != nil {
+					return err
+				}
+			}
+			trackedInbound = len(routes)
+		}
+	}
+	if terminalOutbound > 0 && trackedOutbound == 0 {
+		class := GatewayFailureOutboundTelegramPermanent
+		if GatewayFailureClass(lastFailure) == GatewayFailureDeletedTopic {
+			class = GatewayFailureDeletedTopic
+		}
+		if len(routes) == 0 {
+			if _, err := tx.ExecContext(context.Background(), `INSERT INTO gateway_terminal_outbound_targets(conversation_id,failures,failure_class) VALUES(?,?,?)`, gatewayLegacyTarget, terminalOutbound, string(class)); err != nil {
+				return err
+			}
+			trackedOutbound = terminalOutbound
+		} else {
+			for _, conversationID := range routes {
+				if _, err := tx.ExecContext(context.Background(), `INSERT INTO gateway_terminal_outbound_targets(conversation_id,failures,failure_class) VALUES(?,1,?)`, conversationID, string(class)); err != nil {
+					return err
+				}
+			}
+			trackedOutbound = len(routes)
+		}
+	}
+	if _, err := tx.ExecContext(context.Background(), `UPDATE gateway_health SET terminal_inbound=?,terminal_outbound=? WHERE id=1`, trackedInbound, trackedOutbound); err != nil {
+		return err
+	}
+	return tx.Commit()
 }
 
 func ensureGatewayHealthOutboundProgress(db *sql.DB) error {
@@ -381,6 +725,143 @@ func (s *State) Processed(updateID int64) (bool, error) {
 func (s *State) MarkProcessed(updateID int64) error {
 	_, err := s.db.ExecContext(context.Background(), "INSERT INTO processed_updates(update_id) VALUES (?) ON CONFLICT(update_id) DO NOTHING", updateID)
 	return err
+}
+
+// MarkProcessedTerminalInbound atomically consumes a terminally rejected
+// update and stages its conversation-scoped doctor evidence.
+func (s *State) MarkProcessedTerminalInbound(updateID int64, conversationID string) error {
+	if updateID < 0 || strings.TrimSpace(conversationID) == "" {
+		return fmt.Errorf("invalid terminal inbound update")
+	}
+	tx, err := s.db.BeginTx(context.Background(), nil)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = tx.Rollback() }()
+	result, err := tx.ExecContext(context.Background(), `INSERT INTO processed_updates(update_id) VALUES (?) ON CONFLICT(update_id) DO NOTHING`, updateID)
+	if err != nil {
+		return err
+	}
+	inserted, err := result.RowsAffected()
+	if err != nil {
+		return err
+	}
+	if inserted > 0 {
+		if _, err := tx.ExecContext(context.Background(), `INSERT INTO gateway_terminal_inbound_targets(conversation_id,failures) VALUES(?,1) ON CONFLICT(conversation_id) DO UPDATE SET failures=failures+1`, conversationID); err != nil {
+			return err
+		}
+	}
+	return tx.Commit()
+}
+
+// MarkProcessedInboundRecovery atomically records a successful submission and
+// clears only terminal inbound evidence for that conversation.
+func (s *State) MarkProcessedInboundRecovery(updateID int64, conversationID string) error {
+	if updateID < 0 || strings.TrimSpace(conversationID) == "" {
+		return fmt.Errorf("invalid inbound recovery update")
+	}
+	tx, err := s.db.BeginTx(context.Background(), nil)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = tx.Rollback() }()
+	result, err := tx.ExecContext(context.Background(), `INSERT INTO processed_updates(update_id) VALUES (?) ON CONFLICT(update_id) DO NOTHING`, updateID)
+	if err != nil {
+		return err
+	}
+	inserted, err := result.RowsAffected()
+	if err != nil {
+		return err
+	}
+	if inserted > 0 {
+		if _, err := tx.ExecContext(context.Background(), `DELETE FROM gateway_terminal_inbound_targets WHERE conversation_id IN (?,?)`, conversationID, gatewayLegacyTarget); err != nil {
+			return err
+		}
+	}
+	return tx.Commit()
+}
+
+// StageTerminalOutbound durably and idempotently records a rejected delivery
+// before the relay acknowledgement makes that delivery unrecoverable.
+func (s *State) StageTerminalOutbound(deliveryID, conversationID string, class GatewayFailureClass) error {
+	if strings.TrimSpace(deliveryID) == "" || strings.TrimSpace(conversationID) == "" || class != GatewayFailureOutboundTelegramPermanent && class != GatewayFailureDeletedTopic {
+		return fmt.Errorf("invalid terminal outbound delivery")
+	}
+	tx, err := s.db.BeginTx(context.Background(), nil)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = tx.Rollback() }()
+	result, err := tx.ExecContext(context.Background(), `INSERT INTO gateway_terminal_outbound_events(delivery_id,conversation_id,failure_class) VALUES(?,?,?) ON CONFLICT(delivery_id) DO NOTHING`, deliveryID, conversationID, string(class))
+	if err != nil {
+		return err
+	}
+	inserted, err := result.RowsAffected()
+	if err != nil {
+		return err
+	}
+	if inserted > 0 {
+		if _, err := tx.ExecContext(context.Background(), `INSERT INTO gateway_terminal_outbound_targets(conversation_id,failures,failure_class) VALUES(?,1,?) ON CONFLICT(conversation_id) DO UPDATE SET failures=failures+1,failure_class=CASE WHEN failure_class='deleted_topic' OR excluded.failure_class='deleted_topic' THEN 'deleted_topic' ELSE 'outbound_telegram_permanent' END`, conversationID, string(class)); err != nil {
+			return err
+		}
+	} else {
+		var existingConversation, existingClass string
+		if err := tx.QueryRowContext(context.Background(), `SELECT conversation_id,failure_class FROM gateway_terminal_outbound_events WHERE delivery_id=?`, deliveryID).Scan(&existingConversation, &existingClass); err != nil || existingConversation != conversationID {
+			return fmt.Errorf("terminal outbound delivery identity conflict")
+		}
+		if GatewayFailureClass(existingClass) != class {
+			if _, err := tx.ExecContext(context.Background(), `UPDATE gateway_terminal_outbound_events SET failure_class=? WHERE delivery_id=?`, string(class), deliveryID); err != nil {
+				return err
+			}
+			var failures, stagedEvents, deletedEvents int
+			var targetClass string
+			if err := tx.QueryRowContext(context.Background(), `SELECT failures,failure_class FROM gateway_terminal_outbound_targets WHERE conversation_id=?`, conversationID).Scan(&failures, &targetClass); err != nil {
+				return err
+			}
+			if err := tx.QueryRowContext(context.Background(), `SELECT COUNT(*),COALESCE(SUM(CASE WHEN failure_class=? THEN 1 ELSE 0 END),0) FROM gateway_terminal_outbound_events WHERE conversation_id=?`, string(GatewayFailureDeletedTopic), conversationID).Scan(&stagedEvents, &deletedEvents); err != nil {
+				return err
+			}
+			reconciledClass := GatewayFailureOutboundTelegramPermanent
+			if deletedEvents > 0 || (failures > stagedEvents && GatewayFailureClass(targetClass) == GatewayFailureDeletedTopic) {
+				reconciledClass = GatewayFailureDeletedTopic
+			}
+			if _, err := tx.ExecContext(context.Background(), `UPDATE gateway_terminal_outbound_targets SET failure_class=? WHERE conversation_id=?`, string(reconciledClass), conversationID); err != nil {
+				return err
+			}
+		}
+	}
+	return tx.Commit()
+}
+
+// FinalizeTerminalOutbound removes retry-deduplication evidence only after the
+// relay has durably acknowledged the terminal delivery. Conversation-scoped
+// doctor evidence remains until that target later recovers.
+func (s *State) FinalizeTerminalOutbound(deliveryID string) error {
+	if strings.TrimSpace(deliveryID) == "" {
+		return fmt.Errorf("invalid terminal outbound delivery")
+	}
+	_, err := s.db.ExecContext(context.Background(), `DELETE FROM gateway_terminal_outbound_events WHERE delivery_id=?`, deliveryID)
+	return err
+}
+
+// RecoverTerminalOutbound clears a repaired conversation before its successful
+// delivery acknowledgement crosses the external relay boundary.
+func (s *State) RecoverTerminalOutbound(conversationID string) error {
+	if strings.TrimSpace(conversationID) == "" {
+		return fmt.Errorf("invalid terminal outbound recovery")
+	}
+	tx, err := s.db.BeginTx(context.Background(), nil)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = tx.Rollback() }()
+	if _, err := tx.ExecContext(context.Background(), `DELETE FROM gateway_terminal_outbound_targets WHERE conversation_id IN (?,?)`, conversationID, gatewayLegacyTarget); err != nil {
+		return err
+	}
+	if _, err := tx.ExecContext(context.Background(), `DELETE FROM gateway_terminal_outbound_events WHERE conversation_id=?`, conversationID); err != nil {
+		return err
+	}
+	return tx.Commit()
 }
 
 // SetRoute binds one exact Telegram topic to one relay conversation. There is

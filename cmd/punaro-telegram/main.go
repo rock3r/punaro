@@ -216,6 +216,9 @@ func run() error {
 			record := failedGatewayCycleRecord(time.Now().UTC(), next, err)
 			if recordErr := state.RecordGatewayCycle(record); recordErr != nil {
 				log.Print("telegram event class=gateway_health err=state_unavailable")
+			} else if isNonFatalGatewayCycle(err) {
+				offset = next
+				continue
 			}
 		}
 		if errors.Is(err, context.Canceled) || ctx.Err() != nil {
@@ -238,8 +241,17 @@ func failedGatewayCycleRecord(at time.Time, offset int64, err error) telegram.Ga
 	record := telegram.GatewayCycleRecord{At: at, Offset: offset, Failure: telegram.ClassifyGatewayCycleFailure(err)}
 	var cycleErr *telegram.GatewayCycleError
 	if errors.As(err, &cycleErr) {
+		record.TerminalInbound = cycleErr.TerminalInbound
+		record.TerminalOutbound = cycleErr.TerminalOutbound
+		record.InboundTargetEvents = cycleErr.InboundTargetEvents
+		record.OutboundTargetEvents = cycleErr.OutboundTargetEvents
 		record.OutboundBlocked = cycleErr.OutboundBlocked
 		record.OutboundProgress = cycleErr.OutboundProgress
+		if cycleErr.NonFatal {
+			record.PollOK, record.RelayOK = true, true
+			record.TelegramOK = cycleErr.TerminalOutbound == 0
+			return record
+		}
 		switch cycleErr.Phase {
 		case telegram.GatewayPhaseInbound, telegram.GatewayPhaseLease:
 			record.PollOK = true
@@ -250,6 +262,11 @@ func failedGatewayCycleRecord(at time.Time, offset int64, err error) telegram.Ga
 		}
 	}
 	return record
+}
+
+func isNonFatalGatewayCycle(err error) bool {
+	var cycleErr *telegram.GatewayCycleError
+	return errors.As(err, &cycleErr) && cycleErr.NonFatal
 }
 
 func loadConfig() (config, error) {

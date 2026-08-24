@@ -94,6 +94,98 @@ func TestGatewayRetriesUnrecordedUpdateAfterRelayFailure(t *testing.T) {
 	}
 }
 
+type permanentRelayTestError struct{}
+
+func (permanentRelayTestError) Error() string               { return "private relay response" }
+func (permanentRelayTestError) PermanentRelayFailure() bool { return true }
+
+func TestGatewayDropsPermanentRelayRejectionAndContinuesPage(t *testing.T) {
+	t.Parallel()
+	database := filepath.Join(t.TempDir(), "telegram.db")
+	state, err := Open(database)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = state.Close() })
+	if err := state.SetRoute(100, 7, "conversation-1"); err != nil {
+		t.Fatal(err)
+	}
+	if err := state.SetRoute(100, 8, "conversation-2"); err != nil {
+		t.Fatal(err)
+	}
+	var submitted []string
+	var logs []string
+	runner := Runner{
+		Poller: fakePoller{updates: []Update{
+			{ID: 10, UserID: 55, ChatID: 100, ThreadID: 7, Text: "poison"},
+			{ID: 11, UserID: 55, ChatID: 100, ThreadID: 8, Text: "later"},
+		}},
+		Gateway: Gateway{
+			AllowedUserID: 55,
+			State:         state,
+			Submit: func(_ context.Context, submission Submission) error {
+				submitted = append(submitted, submission.Text)
+				if submission.Text == "poison" {
+					return permanentRelayTestError{}
+				}
+				return nil
+			},
+			Log: func(format string, args ...any) { logs = append(logs, fmt.Sprintf(format, args...)) },
+		},
+	}
+	next, err := runner.RunOnce(context.Background(), 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if next != 12 || len(submitted) != 2 || submitted[1] != "later" {
+		t.Fatalf("next=%d submitted=%#v", next, submitted)
+	}
+	for _, updateID := range []int64{10, 11} {
+		processed, err := state.Processed(updateID)
+		if err != nil || !processed {
+			t.Fatalf("update %d processed=%v err=%v", updateID, processed, err)
+		}
+	}
+	joined := strings.Join(logs, "\n")
+	if !strings.Contains(joined, "telegram_update_dropped") || strings.Contains(joined, "private relay response") {
+		t.Fatalf("logs=%#v", logs)
+	}
+	snapshot, err := InspectGatewayState(t.Context(), database, testCallbackNow)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if snapshot.TerminalInbound != 1 {
+		t.Fatalf("terminal inbound drop was not durable before the cycle record: %#v", snapshot)
+	}
+}
+
+func TestGatewayPersistsInboundRecoveryWithProcessedUpdate(t *testing.T) {
+	t.Parallel()
+	database := filepath.Join(t.TempDir(), "telegram.db")
+	state, err := Open(database)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = state.Close() })
+	if err := state.SetRoute(100, 7, "conversation-1"); err != nil {
+		t.Fatal(err)
+	}
+	if err := state.MarkProcessedTerminalInbound(1, "conversation-1"); err != nil {
+		t.Fatal(err)
+	}
+	gateway := Gateway{AllowedUserID: 55, State: state, Submit: func(context.Context, Submission) error { return nil }}
+	if err := gateway.Handle(t.Context(), Update{ID: 2, UserID: 55, ChatID: 100, ThreadID: 7, Text: "recovered"}); err != nil {
+		t.Fatal(err)
+	}
+	snapshot, err := InspectGatewayState(t.Context(), database, testCallbackNow)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if snapshot.TerminalInbound != 0 {
+		t.Fatalf("inbound recovery was not durable with processing: %#v", snapshot)
+	}
+}
+
 func TestGatewayStartAndListAreOperatorCommands(t *testing.T) {
 	t.Parallel()
 	state, err := Open(filepath.Join(t.TempDir(), "telegram.db"))

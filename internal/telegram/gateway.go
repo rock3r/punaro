@@ -2,6 +2,7 @@ package telegram
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log"
 	"strings"
@@ -56,14 +57,16 @@ type OperatorNotify interface {
 // Gateway applies authorization, replay, and exact-topic routing policy to
 // Telegram updates before submitting opaque text to the relay.
 type Gateway struct {
-	AllowedUserID int64
-	State         *State
-	Submit        func(context.Context, Submission) error
-	ListUnclaimed func(context.Context) ([]relay.UnclaimedTopic, error)
-	Notify        OperatorNotify
-	Claims        *ClaimExecutor
-	Now           func() time.Time
-	Log           func(string, ...any)
+	AllowedUserID   int64
+	State           *State
+	Submit          func(context.Context, Submission) error
+	ListUnclaimed   func(context.Context) ([]relay.UnclaimedTopic, error)
+	Notify          OperatorNotify
+	Claims          *ClaimExecutor
+	Now             func() time.Time
+	Log             func(string, ...any)
+	terminalDrop    func(string, error)
+	inboundRecovery func(string)
 }
 
 // Handle never turns Telegram text into control input. Commands are accepted
@@ -111,13 +114,35 @@ func (g Gateway) Handle(ctx context.Context, update Update) error {
 		return g.markInert(update.ID)
 	}
 	if err := g.Submit(ctx, Submission{UpdateID: update.ID, ConversationID: conversation, Text: update.Text, ChatID: update.ChatID, ThreadID: update.ThreadID, ReplyToID: update.ReplyToID}); err != nil {
+		if isPermanentRelayFailure(err) {
+			g.logEvent("telegram_update_dropped", "reason=relay_rejected")
+			if err := g.State.MarkProcessedTerminalInbound(update.ID, conversation); err != nil {
+				return fmt.Errorf("record dropped telegram update: %w", err)
+			}
+			if g.terminalDrop != nil {
+				g.terminalDrop(conversation, err)
+			}
+			return nil
+		}
 		return fmt.Errorf("submit telegram message: %w", err)
 	}
-	if err := g.State.MarkProcessed(update.ID); err != nil {
+	if err := g.State.MarkProcessedInboundRecovery(update.ID, conversation); err != nil {
 		return fmt.Errorf("record telegram update: %w", err)
+	}
+	if g.inboundRecovery != nil {
+		g.inboundRecovery(conversation)
 	}
 	g.logEvent("telegram_update_submitted", "conversation_id="+conversation)
 	return nil
+}
+
+type permanentRelayFailure interface {
+	PermanentRelayFailure() bool
+}
+
+func isPermanentRelayFailure(err error) bool {
+	var terminal permanentRelayFailure
+	return errors.As(err, &terminal) && terminal.PermanentRelayFailure()
 }
 
 func (g Gateway) handleCallback(ctx context.Context, update Update) error {
