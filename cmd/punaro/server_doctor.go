@@ -67,6 +67,16 @@ type serverDoctorFileDigestState struct {
 	Digest string `json:"digest,omitempty"`
 }
 
+type serverDoctorGatewayState struct {
+	Installed    knownDoctorBool `json:"installed"`
+	Enabled      knownDoctorBool `json:"enabled"`
+	Running      knownDoctorBool `json:"running"`
+	Executable   knownDoctorBool `json:"executable"`
+	ExitStatus   knownDoctorBool `json:"exit_status"`
+	RestartState knownDoctorBool `json:"restart_state"`
+	Release      knownDoctorBool `json:"release"`
+}
+
 type serverDoctorProfilePayload struct {
 	RelayURL       string `json:"relay_url"`
 	MachineID      string `json:"machine_id"`
@@ -928,9 +938,53 @@ func readProtectedServerDoctorFile(ctx context.Context, path string, maximum int
 }
 
 func inspectGatewayService(parent context.Context, expectedRelease string) (knownDoctorBool, knownDoctorBool, knownDoctorBool, knownDoctorBool, knownDoctorBool, knownDoctorBool, knownDoctorBool) {
+	state := serverDoctorGatewayServiceCheck(parent, expectedRelease)
+	return state.Installed, state.Enabled, state.Running, state.Executable, state.ExitStatus, state.RestartState, state.Release
+}
+
+var (
+	serverDoctorGatewayServiceCheck = isolatedServerDoctorGatewayService
+	serverDoctorGatewayExecutable   = os.Executable
+)
+
+func isolatedServerDoctorGatewayService(ctx context.Context, expectedRelease string) serverDoctorGatewayState {
+	if ctx == nil || ctx.Err() != nil || len(expectedRelease) > 128 || strings.ContainsAny(expectedRelease, "\x00\r\n") {
+		return serverDoctorGatewayState{}
+	}
+	executable, err := serverDoctorGatewayExecutable()
+	if err != nil {
+		return serverDoctorGatewayState{}
+	}
+	output, ok := boundedCommandLimit(ctx, serverDoctorOutputLimit, executable, "doctor-gateway-service-inspect", "--expected-release", expectedRelease)
+	if !ok || ctx.Err() != nil {
+		return serverDoctorGatewayState{}
+	}
+	decoder := json.NewDecoder(strings.NewReader(output))
+	decoder.DisallowUnknownFields()
+	var state serverDoctorGatewayState
+	if decoder.Decode(&state) != nil || decoder.Decode(&struct{}{}) != io.EOF {
+		return serverDoctorGatewayState{}
+	}
+	return state
+}
+
+func runDoctorGatewayServiceInspect(args []string, stdout io.Writer) int {
+	flags := flag.NewFlagSet("punaro doctor-gateway-service-inspect", flag.ContinueOnError)
+	flags.SetOutput(io.Discard)
+	expectedRelease := flags.String("expected-release", "", "expected embedded gateway release")
+	if flags.Parse(args) != nil || flags.NArg() != 0 || len(*expectedRelease) > 128 || strings.ContainsAny(*expectedRelease, "\x00\r\n") {
+		return 2
+	}
+	if json.NewEncoder(stdout).Encode(directServerDoctorGatewayService(context.Background(), *expectedRelease)) != nil {
+		return 1
+	}
+	return 0
+}
+
+func directServerDoctorGatewayService(parent context.Context, expectedRelease string) serverDoctorGatewayState {
 	loadState, loaded := boundedCommand(parent, "systemctl", "show", "--property=LoadState", "--value", "punaro-telegram.service")
 	if !loaded {
-		return knownDoctorBool{}, knownDoctorBool{}, knownDoctorBool{}, knownDoctorBool{}, knownDoctorBool{}, knownDoctorBool{}, knownDoctorBool{}
+		return serverDoctorGatewayState{}
 	}
 	installed := strings.TrimSpace(loadState) == "loaded"
 	_, enabled := boundedCommand(parent, "systemctl", "is-enabled", "--quiet", "punaro-telegram.service")
@@ -941,9 +995,15 @@ func inspectGatewayService(parent context.Context, expectedRelease string) (know
 	effectiveExecStart, effectiveKnown := boundedCommand(parent, "systemctl", "show", "--property=ExecStart", "--value", "punaro-telegram.service")
 	executable := known(effectiveKnown, serverGatewayServiceFileBound(parent, "/etc/systemd/system/punaro-telegram.service") && serverGatewaySystemdExecStartBound(effectiveExecStart))
 	release, releaseKnown := boundedCommand(parent, "/usr/local/bin/punaro-telegram", "version")
-	return known(true, installed), known(true, enabled), known(activeKnown, running), executable,
-		known(exitKnown, strings.TrimSpace(exitStatus) == "0"), known(resultKnown, strings.TrimSpace(serviceResult) == "success"),
-		known(releaseKnown && expectedRelease != "", strings.TrimSpace(release) == expectedRelease)
+	return serverDoctorGatewayState{
+		Installed:    known(true, installed),
+		Enabled:      known(true, enabled),
+		Running:      known(activeKnown, running),
+		Executable:   executable,
+		ExitStatus:   known(exitKnown, strings.TrimSpace(exitStatus) == "0"),
+		RestartState: known(resultKnown, strings.TrimSpace(serviceResult) == "success"),
+		Release:      known(releaseKnown && expectedRelease != "", strings.TrimSpace(release) == expectedRelease),
+	}
 }
 
 func serverGatewayServiceFileBound(ctx context.Context, path string) bool {

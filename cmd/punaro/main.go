@@ -417,6 +417,8 @@ func run(args []string, stdout, stderr io.Writer) int {
 		return runDoctorStorageCheck(args[1:], stdout)
 	case "doctor-backup-check":
 		return runDoctorBackupCheck(args[1:], stdout)
+	case "doctor-gateway-service-inspect":
+		return runDoctorGatewayServiceInspect(args[1:], stdout)
 	case "doctor-update-stage-check":
 		return runDoctorUpdateStageCheck(args[1:], stdout)
 	case "doctor-relay-profile-check":

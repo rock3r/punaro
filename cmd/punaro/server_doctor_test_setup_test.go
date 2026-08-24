@@ -11,6 +11,7 @@ func init() {
 	serverDoctorStorageCheck = directServerDoctorStorage
 	serverDoctorBackupCheck = directServerDoctorBackups
 	serverDoctorFileDigest = directServerDoctorFileDigest
+	serverDoctorGatewayServiceCheck = directServerDoctorGatewayService
 	serverDoctorProfileLoad = loadServerDoctorProfile
 	serverDoctorRecoveryReceiptCheck = func(_ context.Context, request serverDoctorRecoveryReceiptRequest) knownDoctorBool {
 		return inspectServerDoctorRecoveryReceipt(request)

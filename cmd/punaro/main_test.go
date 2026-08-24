@@ -1434,6 +1434,43 @@ func TestServerGatewayServiceDefinitionReadIsBoundedAndContextAware(t *testing.T
 	}
 }
 
+func TestServerGatewayServiceInspectionDelegatesToIsolatedHelper(t *testing.T) {
+	previous := serverDoctorGatewayServiceCheck
+	called := false
+	serverDoctorGatewayServiceCheck = func(_ context.Context, expectedRelease string) serverDoctorGatewayState {
+		called = true
+		if expectedRelease != "v0.1.0-alpha.1" {
+			t.Fatalf("expected release=%q", expectedRelease)
+		}
+		return serverDoctorGatewayState{Installed: known(true, true)}
+	}
+	t.Cleanup(func() { serverDoctorGatewayServiceCheck = previous })
+	installed, enabled, running, executable, exitStatus, restartState, release := inspectGatewayService(t.Context(), "v0.1.0-alpha.1")
+	if !called || !installed.Known || !installed.OK || enabled.Known || running.Known || executable.Known || exitStatus.Known || restartState.Known || release.Known {
+		t.Fatalf("delegated=%t states=%#v %#v %#v %#v %#v %#v %#v", called, installed, enabled, running, executable, exitStatus, restartState, release)
+	}
+}
+
+func TestServerGatewayServiceInspectionHonorsDeadline(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("POSIX blocking executable fixture")
+	}
+	blocker := filepath.Join(t.TempDir(), "blocked-server-gateway-doctor")
+	if err := os.WriteFile(blocker, []byte("#!/bin/sh\nexec sleep 10\n"), 0o700); err != nil { // #nosec G306 -- private executable deadline fixture.
+		t.Fatal(err)
+	}
+	previous := serverDoctorGatewayExecutable
+	serverDoctorGatewayExecutable = func() (string, error) { return blocker, nil }
+	t.Cleanup(func() { serverDoctorGatewayExecutable = previous })
+	ctx, cancel := context.WithTimeout(t.Context(), 20*time.Millisecond)
+	defer cancel()
+	started := time.Now()
+	state := isolatedServerDoctorGatewayService(ctx, "v0.1.0-alpha.1")
+	if state != (serverDoctorGatewayState{}) || time.Since(started) > time.Second {
+		t.Fatalf("isolated gateway state=%#v elapsed=%s", state, time.Since(started))
+	}
+}
+
 func TestServerGatewaySystemdExecStartRequiresExactEffectiveExecutable(t *testing.T) {
 	valid := "{ path=/usr/local/bin/punaro-telegram ; argv[]=/usr/local/bin/punaro-telegram ; ignore_errors=no ; start_time=[n/a] ; stop_time=[n/a] ; pid=0 ; code=(null) ; status=0/0 }\n"
 	if !serverGatewaySystemdExecStartBound(valid) {

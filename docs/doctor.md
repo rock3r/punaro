@@ -226,6 +226,9 @@ server doctor's total timeout.
 For a co-located gateway, `gateway_service_executable` verifies both the base
 unit and systemd's effective `ExecStart`, including drop-ins, before the fixed
 installed binary's release identity is considered sufficient.
+The complete co-located gateway unit, service-manager, and executable-release
+inspection runs in a deadline-killed child, so stalled service-definition
+storage makes those checks unavailable without extending the total timeout.
 
 ### Adapter
 
