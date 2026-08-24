@@ -419,6 +419,10 @@ func run(args []string, stdout, stderr io.Writer) int {
 		return runDoctorBackupCheck(args[1:], stdout)
 	case "doctor-update-stage-check":
 		return runDoctorUpdateStageCheck(args[1:], stdout)
+	case "doctor-relay-profile-check":
+		return runDoctorRelayProfileCheck(args[1:], stdout)
+	case "doctor-recovery-receipt-check":
+		return runDoctorRecoveryReceiptCheck(args[1:], stdout)
 	case "client":
 		if len(args) > 1 && (args[1] == "invite" || args[1] == "add") {
 			return runClientAdd(args[2:], stdout, stderr)

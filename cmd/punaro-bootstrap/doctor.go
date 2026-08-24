@@ -46,16 +46,7 @@ func runBootstrapDoctor(args []string, stdout, stderr io.Writer) int {
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), *timeout)
 	defer cancel()
-	var keys map[string]ed25519.PublicKey
-	if *keysFile != "" {
-		loaded, err := loadDoctorKeys(ctx, *keysFile)
-		if err != nil {
-			_, _ = fmt.Fprintln(stderr, "punaro-bootstrap doctor failed: release keys are unavailable")
-			return 2
-		}
-		keys = loaded
-	}
-	report, err := bootstrapDoctorProbe(ctx, bootstrap.DoctorRequest{Directory: *directory, MachineID: strings.TrimSpace(*machineID), Origin: strings.TrimSpace(*origin), Keys: keys, BootstrapRelease: bootstrapBuildRelease})
+	report, err := bootstrapDoctorProbe(ctx, bootstrap.DoctorRequest{Directory: *directory, MachineID: strings.TrimSpace(*machineID), Origin: strings.TrimSpace(*origin), KeysFile: *keysFile, BootstrapRelease: bootstrapBuildRelease})
 	if err != nil {
 		_, _ = fmt.Fprintln(stderr, "punaro-bootstrap doctor failed: diagnostic report unavailable")
 		return 2

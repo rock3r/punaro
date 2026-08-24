@@ -63,16 +63,152 @@ type serverDoctorBackupState struct {
 	Fresh     knownDoctorBool `json:"fresh"`
 }
 
+type serverDoctorProfilePayload struct {
+	RelayURL       string `json:"relay_url"`
+	MachineID      string `json:"machine_id"`
+	SigningKey     string `json:"signing_key"`
+	AccessID       string `json:"access_id"`
+	AccessMaterial string `json:"access_material"`
+}
+
+type serverDoctorRecoveryReceiptRequest struct {
+	Directory      string `json:"directory"`
+	ExpectAbsent   bool   `json:"expect_absent"`
+	UpdateID       string `json:"update_id,omitempty"`
+	BackupID       string `json:"backup_id,omitempty"`
+	TargetRelease  string `json:"target_release,omitempty"`
+	ManifestSHA256 string `json:"manifest_sha256,omitempty"`
+}
+
 var (
-	serverDoctorPathCheck             = isolatedServerDoctorPaths
-	serverDoctorPathExecutable        = os.Executable
-	serverDoctorStorageCheck          = isolatedServerDoctorStorage
-	serverDoctorStorageExecutable     = os.Executable
-	serverDoctorBackupCheck           = isolatedServerDoctorBackups
-	serverDoctorBackupExecutable      = os.Executable
-	serverDoctorUpdateStageCheck      = isolatedServerDoctorUpdateStage
-	serverDoctorUpdateStageExecutable = os.Executable
+	serverDoctorPathCheck                 = isolatedServerDoctorPaths
+	serverDoctorPathExecutable            = os.Executable
+	serverDoctorStorageCheck              = isolatedServerDoctorStorage
+	serverDoctorStorageExecutable         = os.Executable
+	serverDoctorBackupCheck               = isolatedServerDoctorBackups
+	serverDoctorBackupExecutable          = os.Executable
+	serverDoctorUpdateStageCheck          = isolatedServerDoctorUpdateStage
+	serverDoctorUpdateStageExecutable     = os.Executable
+	serverDoctorProfileLoad               = isolatedServerDoctorProfile
+	serverDoctorProfileExecutable         = os.Executable
+	serverDoctorRecoveryReceiptCheck      = isolatedServerDoctorRecoveryReceipt
+	serverDoctorRecoveryReceiptExecutable = os.Executable
 )
+
+func isolatedServerDoctorProfile(ctx context.Context, path string) (serverDoctorProfile, error) {
+	if path == "" || !filepath.IsAbs(path) || filepath.Clean(path) != path {
+		return serverDoctorProfile{}, errors.New("server doctor profile unavailable")
+	}
+	executable, err := serverDoctorProfileExecutable()
+	if err != nil {
+		return serverDoctorProfile{}, errors.New("server doctor profile unavailable")
+	}
+	output, ok := boundedCommandLimit(ctx, 16<<10, executable, "doctor-relay-profile-check", "--path", path)
+	if !ok {
+		return serverDoctorProfile{}, errors.New("server doctor profile unavailable")
+	}
+	decoder := json.NewDecoder(strings.NewReader(output))
+	decoder.DisallowUnknownFields()
+	var payload serverDoctorProfilePayload
+	if decoder.Decode(&payload) != nil || decoder.Decode(&struct{}{}) != io.EOF {
+		return serverDoctorProfile{}, errors.New("server doctor profile unavailable")
+	}
+	key, err := base64.RawURLEncoding.DecodeString(payload.SigningKey)
+	if err != nil || len(key) != ed25519.PrivateKeySize || payload.RelayURL == "" || payload.MachineID == "" || payload.AccessID == "" || payload.AccessMaterial == "" {
+		return serverDoctorProfile{}, errors.New("server doctor profile unavailable")
+	}
+	return serverDoctorProfile{RelayURL: payload.RelayURL, MachineID: payload.MachineID, PrivateKey: ed25519.PrivateKey(key), AccessToken: adapter.AccessServiceToken{ClientID: payload.AccessID, ClientSecret: payload.AccessMaterial}}, nil
+}
+
+func runDoctorRelayProfileCheck(args []string, stdout io.Writer) int {
+	flags := flag.NewFlagSet("punaro doctor-relay-profile-check", flag.ContinueOnError)
+	flags.SetOutput(io.Discard)
+	path := flags.String("path", "", "protected relay doctor profile")
+	if flags.Parse(args) != nil || flags.NArg() != 0 || *path == "" || !filepath.IsAbs(*path) || filepath.Clean(*path) != *path {
+		return 2
+	}
+	profile, err := loadServerDoctorProfile(context.Background(), *path)
+	if err != nil {
+		return 1
+	}
+	payload := serverDoctorProfilePayload{RelayURL: profile.RelayURL, MachineID: profile.MachineID, SigningKey: base64.RawURLEncoding.EncodeToString(profile.PrivateKey), AccessID: profile.AccessToken.ClientID, AccessMaterial: profile.AccessToken.ClientSecret}
+	if json.NewEncoder(stdout).Encode(payload) != nil {
+		return 1
+	}
+	return 0
+}
+
+func encodeServerDoctorRecoveryReceiptRequest(request serverDoctorRecoveryReceiptRequest) (string, bool) {
+	body, err := json.Marshal(request)
+	if err != nil || len(body) == 0 || len(body) > 8<<10 {
+		return "", false
+	}
+	return base64.RawURLEncoding.EncodeToString(body), true
+}
+
+func isolatedServerDoctorRecoveryReceipt(ctx context.Context, request serverDoctorRecoveryReceiptRequest) knownDoctorBool {
+	encoded, ok := encodeServerDoctorRecoveryReceiptRequest(request)
+	if !ok {
+		return knownDoctorBool{}
+	}
+	executable, err := serverDoctorRecoveryReceiptExecutable()
+	if err != nil {
+		return knownDoctorBool{}
+	}
+	output, ok := boundedCommandLimit(ctx, 256, executable, "doctor-recovery-receipt-check", "--request", encoded)
+	if !ok {
+		return knownDoctorBool{}
+	}
+	decoder := json.NewDecoder(strings.NewReader(output))
+	decoder.DisallowUnknownFields()
+	var state knownDoctorBool
+	if decoder.Decode(&state) != nil || decoder.Decode(&struct{}{}) != io.EOF || !state.Known {
+		return knownDoctorBool{}
+	}
+	return state
+}
+
+func runDoctorRecoveryReceiptCheck(args []string, stdout io.Writer) int {
+	flags := flag.NewFlagSet("punaro doctor-recovery-receipt-check", flag.ContinueOnError)
+	flags.SetOutput(io.Discard)
+	raw := flags.String("request", "", "bounded recovery receipt request")
+	if flags.Parse(args) != nil || flags.NArg() != 0 || *raw == "" || len(*raw) > base64.RawURLEncoding.EncodedLen(8<<10) {
+		return 2
+	}
+	body, err := base64.RawURLEncoding.DecodeString(*raw)
+	if err != nil || base64.RawURLEncoding.EncodeToString(body) != *raw || len(body) == 0 || len(body) > 8<<10 {
+		return 2
+	}
+	decoder := json.NewDecoder(strings.NewReader(string(body)))
+	decoder.DisallowUnknownFields()
+	var request serverDoctorRecoveryReceiptRequest
+	if decoder.Decode(&request) != nil || decoder.Decode(&struct{}{}) != io.EOF || request.Directory == "" || !filepath.IsAbs(request.Directory) || filepath.Clean(request.Directory) != request.Directory {
+		return 2
+	}
+	state := inspectServerDoctorRecoveryReceipt(request)
+	if !state.Known || json.NewEncoder(stdout).Encode(state) != nil {
+		return 1
+	}
+	return 0
+}
+
+func inspectServerDoctorRecoveryReceipt(request serverDoctorRecoveryReceiptRequest) knownDoctorBool {
+	path := operator.UpdateRecoveryReceiptFile(request.Directory)
+	if request.ExpectAbsent {
+		_, err := os.Lstat(path) // #nosec G703 -- fixed installation receipt path inside deadline-killed helper.
+		switch {
+		case err == nil:
+			return known(true, false)
+		case errors.Is(err, os.ErrNotExist):
+			return known(true, true)
+		default:
+			return knownDoctorBool{}
+		}
+	}
+	receipt, _, err := operator.LoadUpdateRecoveryReceipt(path)
+	ok := err == nil && receipt.UpdateID == request.UpdateID && receipt.BackupID == request.BackupID && receipt.TargetRelease == request.TargetRelease && receipt.ManifestSHA256 == request.ManifestSHA256
+	return known(true, ok)
+}
 
 func isolatedServerDoctorUpdateStage(ctx context.Context, directory string) knownDoctorBool {
 	executable, err := serverDoctorUpdateStageExecutable()
@@ -567,7 +703,7 @@ func inspectServerRelay(parent context.Context, installation operator.Installati
 		}
 		return passed, passed, passed, passed, passed
 	}
-	profile, err := loadServerDoctorProfile(parent, relayProfile)
+	profile, err := serverDoctorProfileLoad(parent, relayProfile)
 	if err != nil {
 		return knownDoctorBool{}, knownDoctorBool{}, knownDoctorBool{}, knownDoctorBool{}, knownDoctorBool{}
 	}
@@ -835,7 +971,7 @@ func inspectUpdateState(parent context.Context, installation operator.Installati
 	defer func() { _ = admin.Close() }()
 	transaction, err := admin.LatestUpdate(parent)
 	if errors.Is(err, punaropostgres.ErrNotFound) {
-		return known(true, true), inspectRecoveryReceiptAbsent(installation), known(true, true)
+		return known(true, true), serverDoctorRecoveryReceiptCheck(parent, serverDoctorRecoveryReceiptRequest{Directory: installation.Directory, ExpectAbsent: true}), known(true, true)
 	}
 	if err != nil {
 		return knownDoctorBool{}, knownDoctorBool{}, knownDoctorBool{}
@@ -845,19 +981,13 @@ func inspectUpdateState(parent context.Context, installation operator.Installati
 		terminal = transaction.TargetRelease == serverBuildRelease && transaction.TargetImage == installation.Image && transaction.ComposeSHA256 == serverBuildComposeSHA256 && transaction.MigrationManifestSHA256 == serverBuildMigrationSHA256
 	}
 	if terminal {
-		return known(true, true), inspectRecoveryReceiptAbsent(installation), known(true, true)
+		return known(true, true), serverDoctorRecoveryReceiptCheck(parent, serverDoctorRecoveryReceiptRequest{Directory: installation.Directory, ExpectAbsent: true}), known(true, true)
 	}
 	if !updatePhaseRequiresRecoveryReceipt(transaction.Phase) {
-		return known(true, false), inspectRecoveryReceiptAbsent(installation), known(true, false)
+		return known(true, false), serverDoctorRecoveryReceiptCheck(parent, serverDoctorRecoveryReceiptRequest{Directory: installation.Directory, ExpectAbsent: true}), known(true, false)
 	}
-	receipt, _, receiptErr := operator.LoadUpdateRecoveryReceipt(operator.UpdateRecoveryReceiptFile(installation.Directory))
-	receiptOK := receiptErr == nil && receipt.UpdateID == transaction.UpdateID && receipt.BackupID == transaction.BackupID && receipt.TargetRelease == transaction.TargetRelease && receipt.ManifestSHA256 == transaction.BackupManifestSHA256
-	return known(true, false), known(true, receiptOK), known(true, false)
-}
-
-func inspectRecoveryReceiptAbsent(installation operator.Installation) knownDoctorBool {
-	_, err := os.Lstat(operator.UpdateRecoveryReceiptFile(installation.Directory)) // #nosec G703 -- fixed update-stage child.
-	return known(true, errors.Is(err, os.ErrNotExist))
+	receipt := serverDoctorRecoveryReceiptRequest{Directory: installation.Directory, UpdateID: transaction.UpdateID, BackupID: transaction.BackupID, TargetRelease: transaction.TargetRelease, ManifestSHA256: transaction.BackupManifestSHA256}
+	return known(true, false), serverDoctorRecoveryReceiptCheck(parent, receipt), known(true, false)
 }
 
 func updatePhaseRequiresRecoveryReceipt(phase punaropostgres.UpdatePhase) bool {

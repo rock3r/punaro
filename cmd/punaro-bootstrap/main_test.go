@@ -6,6 +6,8 @@ import (
 	"crypto/ed25519"
 	"crypto/rand"
 	"encoding/json"
+	"errors"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -15,6 +17,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/rock3r/punaro/internal/bootstrap"
 	punarodiagnostic "github.com/rock3r/punaro/internal/diagnostic"
 	punarorelease "github.com/rock3r/punaro/internal/release"
 )
@@ -270,6 +273,23 @@ func TestBootstrapDoctorKeyReadIsBoundedAndContextAware(t *testing.T) {
 	cancel()
 	if _, err := loadDoctorKeys(ctx, path); err == nil {
 		t.Fatal("canceled doctor key read continued")
+	}
+}
+
+func TestBootstrapDoctorDefersExplicitKeyReadToIsolatedProbe(t *testing.T) {
+	previous := bootstrapDoctorProbe
+	t.Cleanup(func() { bootstrapDoctorProbe = previous })
+	keysPath := filepath.Join(t.TempDir(), "stalled-keys.json")
+	called := false
+	bootstrapDoctorProbe = func(_ context.Context, request bootstrap.DoctorRequest) (punarodiagnostic.Report, error) {
+		called = true
+		if request.KeysFile != keysPath || len(request.Keys) != 0 {
+			t.Fatalf("doctor key request=%#v", request)
+		}
+		return punarodiagnostic.Report{}, errors.New("fixture stop")
+	}
+	if code := runBootstrapDoctor([]string{"--directory", t.TempDir(), "--keys-file", keysPath}, io.Discard, io.Discard); code != 2 || !called {
+		t.Fatalf("doctor code=%d isolated_probe_called=%t", code, called)
 	}
 }
 

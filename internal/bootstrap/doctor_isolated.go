@@ -10,6 +10,7 @@ import (
 	"io"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"strings"
 	"time"
 
@@ -26,6 +27,7 @@ type doctorHelperRequest struct {
 	MachineID        string                       `json:"machine_id,omitempty"`
 	Origin           string                       `json:"origin,omitempty"`
 	Keys             map[string]ed25519.PublicKey `json:"keys,omitempty"`
+	KeysFile         string                       `json:"keys_file,omitempty"`
 	GOOS             string                       `json:"goos,omitempty"`
 	GOARCH           string                       `json:"goarch,omitempty"`
 	Now              time.Time                    `json:"now,omitempty"`
@@ -60,7 +62,7 @@ func encodeDoctorHelperRequest(request DoctorRequest) (string, bool) {
 		return "", false
 	}
 	payload := doctorHelperRequest{
-		Directory: request.Directory, MachineID: request.MachineID, Origin: request.Origin, Keys: request.Keys,
+		Directory: request.Directory, MachineID: request.MachineID, Origin: request.Origin, Keys: request.Keys, KeysFile: request.KeysFile,
 		GOOS: request.GOOS, GOARCH: request.GOARCH, Now: request.Now, BootstrapRelease: request.BootstrapRelease,
 	}
 	body, err := json.Marshal(payload)
@@ -115,7 +117,7 @@ func RunDoctorHelper(args []string, stdout io.Writer) int {
 	decoder := json.NewDecoder(strings.NewReader(string(body)))
 	decoder.DisallowUnknownFields()
 	var payload doctorHelperRequest
-	if decoder.Decode(&payload) != nil || decoder.Decode(&struct{}{}) != io.EOF || payload.Directory == "" || len(payload.Keys) > 32 {
+	if decoder.Decode(&payload) != nil || decoder.Decode(&struct{}{}) != io.EOF || payload.Directory == "" || len(payload.Keys) > 32 || payload.KeysFile != "" && (!filepath.IsAbs(payload.KeysFile) || filepath.Clean(payload.KeysFile) != payload.KeysFile) {
 		return 2
 	}
 	for keyID, key := range payload.Keys {
@@ -124,7 +126,7 @@ func RunDoctorHelper(args []string, stdout io.Writer) int {
 		}
 	}
 	report, err := Doctor(context.Background(), DoctorRequest{
-		Directory: payload.Directory, MachineID: payload.MachineID, Origin: payload.Origin, Keys: payload.Keys,
+		Directory: payload.Directory, MachineID: payload.MachineID, Origin: payload.Origin, Keys: payload.Keys, KeysFile: payload.KeysFile,
 		GOOS: payload.GOOS, GOARCH: payload.GOARCH, Now: payload.Now, BootstrapRelease: payload.BootstrapRelease,
 	})
 	if err != nil || json.NewEncoder(stdout).Encode(report) != nil {

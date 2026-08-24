@@ -679,6 +679,85 @@ func TestDoctorUpdateStageIsolationStaysInsideDeadline(t *testing.T) {
 	}
 }
 
+func TestDoctorRelayProfileCommandAndIsolationStayInsideDeadline(t *testing.T) {
+	root := t.TempDir()
+	if runtime.GOOS != "windows" {
+		if err := os.Chmod(root, 0o700); err != nil { // #nosec G302 -- private diagnostic fixture root.
+			t.Fatal(err)
+		}
+	}
+	privateKey := ed25519.NewKeyFromSeed(make([]byte, ed25519.SeedSize))
+	keyPath := filepath.Join(root, "doctor.key")
+	accessPath := filepath.Join(root, "access.env")
+	profilePath := filepath.Join(root, "doctor.env")
+	if err := os.WriteFile(keyPath, []byte(base64.RawURLEncoding.EncodeToString(privateKey)), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(accessPath, []byte("PUNARO_CF_ACCESS_CLIENT_ID=doctor-id\nPUNARO_CF_ACCESS_CLIENT_SECRET=doctor-secret\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(profilePath, []byte("PUNARO_SERVER_DOCTOR_RELAY_URL=https://punaro.example\nPUNARO_SERVER_DOCTOR_MACHINE_ID=server-doctor\nPUNARO_SERVER_DOCTOR_PRIVATE_KEY_FILE="+keyPath+"\nPUNARO_SERVER_DOCTOR_ACCESS_TOKEN_FILE="+accessPath+"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	var stdout bytes.Buffer
+	if code := runDoctorRelayProfileCheck([]string{"--path", profilePath}, &stdout); code != 0 {
+		t.Fatalf("relay-profile helper code=%d output=%q", code, stdout.String())
+	}
+	var payload serverDoctorProfilePayload
+	if json.Unmarshal(stdout.Bytes(), &payload) != nil || payload.RelayURL != "https://punaro.example" || payload.MachineID != "server-doctor" {
+		t.Fatalf("relay-profile helper payload=%#v", payload)
+	}
+	if runtime.GOOS == "windows" {
+		return
+	}
+	blocker := filepath.Join(t.TempDir(), "blocked-relay-profile-check")
+	if err := os.WriteFile(blocker, []byte("#!/bin/sh\nexec sleep 10\n"), 0o700); err != nil { // #nosec G306 -- private executable deadline fixture.
+		t.Fatal(err)
+	}
+	previous := serverDoctorProfileExecutable
+	serverDoctorProfileExecutable = func() (string, error) { return blocker, nil }
+	t.Cleanup(func() { serverDoctorProfileExecutable = previous })
+	ctx, cancel := context.WithTimeout(t.Context(), 20*time.Millisecond)
+	defer cancel()
+	started := time.Now()
+	if _, err := isolatedServerDoctorProfile(ctx, profilePath); err == nil || time.Since(started) > time.Second {
+		t.Fatalf("isolated relay profile error=%v elapsed=%s", err, time.Since(started))
+	}
+}
+
+func TestDoctorRecoveryReceiptCommandAndIsolationStayInsideDeadline(t *testing.T) {
+	directory := t.TempDir()
+	request := serverDoctorRecoveryReceiptRequest{Directory: directory, ExpectAbsent: true}
+	encoded, ok := encodeServerDoctorRecoveryReceiptRequest(request)
+	if !ok {
+		t.Fatal("recovery-receipt request encoding failed")
+	}
+	var stdout bytes.Buffer
+	if code := runDoctorRecoveryReceiptCheck([]string{"--request", encoded}, &stdout); code != 0 {
+		t.Fatalf("recovery-receipt helper code=%d output=%q", code, stdout.String())
+	}
+	var state knownDoctorBool
+	if json.Unmarshal(stdout.Bytes(), &state) != nil || !state.Known || !state.OK {
+		t.Fatalf("recovery-receipt helper state=%#v", state)
+	}
+	if runtime.GOOS == "windows" {
+		return
+	}
+	blocker := filepath.Join(t.TempDir(), "blocked-recovery-receipt-check")
+	if err := os.WriteFile(blocker, []byte("#!/bin/sh\nexec sleep 10\n"), 0o700); err != nil { // #nosec G306 -- private executable deadline fixture.
+		t.Fatal(err)
+	}
+	previous := serverDoctorRecoveryReceiptExecutable
+	serverDoctorRecoveryReceiptExecutable = func() (string, error) { return blocker, nil }
+	t.Cleanup(func() { serverDoctorRecoveryReceiptExecutable = previous })
+	ctx, cancel := context.WithTimeout(t.Context(), 20*time.Millisecond)
+	defer cancel()
+	started := time.Now()
+	if state := isolatedServerDoctorRecoveryReceipt(ctx, request); state.Known || time.Since(started) > time.Second {
+		t.Fatalf("isolated recovery receipt=%#v elapsed=%s", state, time.Since(started))
+	}
+}
+
 func TestUpRefusesActiveUpdateBeforeStartingWriters(t *testing.T) {
 	preserveDependencies(t)
 	directory := testInstallation(t)

@@ -36,6 +36,7 @@ type DoctorRequest struct {
 	MachineID        string
 	Origin           string
 	Keys             map[string]ed25519.PublicKey
+	KeysFile         string
 	GOOS             string
 	GOARCH           string
 	Now              time.Time
@@ -48,7 +49,7 @@ type DoctorRequest struct {
 // handoff without locking, repairing, downloading artifacts, or changing any
 // bootstrap record.
 func Doctor(ctx context.Context, request DoctorRequest) (punarodiagnostic.Report, error) {
-	if request.Directory == "" || !filepath.IsAbs(request.Directory) || filepath.Clean(request.Directory) != request.Directory {
+	if request.Directory == "" || !filepath.IsAbs(request.Directory) || filepath.Clean(request.Directory) != request.Directory || request.KeysFile != "" && (!filepath.IsAbs(request.KeysFile) || filepath.Clean(request.KeysFile) != request.KeysFile) {
 		return punarodiagnostic.Report{}, errors.New("bootstrap doctor request is invalid")
 	}
 	if ctx == nil {
@@ -84,7 +85,20 @@ func Doctor(ctx context.Context, request DoctorRequest) (punarodiagnostic.Report
 	checks = append(checks, boolBootstrapCheck(diskErr == nil && available >= minimumDoctorFreeBytes, "disk_space", "free_bootstrap_disk_space"))
 
 	keys := request.Keys
-	if len(keys) == 0 {
+	switch {
+	case len(keys) != 0:
+		checks = append(checks, punarodiagnostic.Pass("release_keys"))
+	case request.KeysFile != "":
+		body, err := incrementalfs.ReadFile(ctx, request.KeysFile, punarorelease.MaximumEnvelopeBytes)
+		if err == nil {
+			keys, err = punarorelease.ParsePublicKeys(body)
+		}
+		if err != nil || len(keys) == 0 {
+			checks = append(checks, punarodiagnostic.Fail("release_keys", "install_release_keys"))
+		} else {
+			checks = append(checks, punarodiagnostic.Pass("release_keys"))
+		}
+	default:
 		var err error
 		keys, err = doctorLoadDirectoryKeys(ctx, request.Directory)
 		if err != nil || len(keys) == 0 {
@@ -92,8 +106,6 @@ func Doctor(ctx context.Context, request DoctorRequest) (punarodiagnostic.Report
 		} else {
 			checks = append(checks, punarodiagnostic.Pass("release_keys"))
 		}
-	} else {
-		checks = append(checks, punarodiagnostic.Pass("release_keys"))
 	}
 
 	accepted, acceptedErr := doctorLoadAccepted(ctx, request.Directory)

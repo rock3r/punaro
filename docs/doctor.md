@@ -39,15 +39,17 @@ directory batches with total-entry ceilings and deadline checks between reads.
 Skill-set digests length-prefix every relative path and file body so arbitrary
 skill bytes cannot create an ambiguous tree encoding. Explicit bootstrap public
 keys and bootstrap health state are read as bounded regular non-symlink files
-through the same diagnostic deadline and descriptor-identity checks.
+inside the deadline-isolated bootstrap helper with descriptor-identity checks.
 Server installation-path validation, storage-capacity inspection, complete
-backup listing and verification, PostgreSQL credential files, adapter plugin
-trees, the complete adapter mailbox snapshot/MCP inspection, and the complete
+backup listing and verification, PostgreSQL credential files, relay-profile
+and Access credential files, update recovery receipts, adapter plugin trees,
+the complete adapter mailbox snapshot/MCP inspection, and the complete
 bootstrap diagnostic are inspected in deadline-isolated child helpers. A
 stalled mount during `Lstat`, `Statfs`, open, walk, or read
 therefore yields unavailable checks (or no bootstrap report) instead of
 extending the advertised total deadline; DSN values remain in a private
-parent/child pipe and are never printed in the report or logs.
+parent/child pipe, as do relay profile credentials, and neither is printed in
+the report or logs.
 
 ## Commands
 
@@ -200,6 +202,9 @@ newer generic PostgreSQL floor would hide restore or partial-upgrade drift.
 The complete host update-stage journal and tree validation runs in a
 deadline-isolated child, so stalled `.update` storage reports
 `host_update_stage` unavailable rather than hanging the server doctor.
+Recovery-receipt absence and exact receipt binding are inspected in a separate
+deadline-isolated child, so `recovery_receipt` becomes unavailable when its
+storage cannot be observed before the total deadline.
 `database_listener_private` and `administration_listener_private` query
 PostgreSQL's effective `listen_addresses` through the application and owner
 connections respectively; every configured TCP address must be localhost or a
@@ -214,6 +219,10 @@ Service and edge: `health_endpoint`, `readiness_endpoint`,
 `gateway_release`. These gateway checks are required only with the explicit
 server `--gateway-co-located` declaration; otherwise they are optional and the
 separate Telegram component report supplies gateway readiness.
+Relay profile, private-key, and Access-token files are loaded together in a
+deadline-isolated child before any public-edge request; stalled protected
+storage therefore makes the edge checks unavailable without extending the
+server doctor's total timeout.
 For a co-located gateway, `gateway_service_executable` verifies both the base
 unit and systemd's effective `ExecStart`, including drop-ins, before the fixed
 installed binary's release identity is considered sufficient.
