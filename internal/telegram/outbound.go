@@ -41,10 +41,10 @@ func SendDelivery(ctx context.Context, state *State, sender RichSender, delivery
 		return fmt.Errorf("read Telegram delivery route: %w", err)
 	}
 	if !found {
-		return permanentTelegramDeliveryError{reason: "telegram conversation route is missing"}
+		return fmt.Errorf("telegram conversation route is missing")
 	}
 	if allowedUserID == 0 || chatID != allowedUserID {
-		return permanentTelegramDeliveryError{reason: "telegram conversation route is not the configured chat"}
+		return fmt.Errorf("telegram conversation route is not the configured chat")
 	}
 	for _, rendered := range renderDelivery(from, delivery.Message.Body) {
 		messageID, err := sender.SendRichMessage(ctx, chatID, threadID, rendered)

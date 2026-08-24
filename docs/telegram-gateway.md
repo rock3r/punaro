@@ -303,16 +303,18 @@ delivers the text without `in_reply_to_*`.
 
 Outgoing agent replies are sent using Telegram's `sendRichMessage` to that
 exact `message_thread_id` from `topic_routes`. `SendDelivery` stays route-based
-through adopt soak. A malformed delivery, missing route, route for another
-chat, or completed Telegram 4xx response other than 401 and 429 is terminal: the
-bridge emits only a content-free `telegram_send_dropped` event, acknowledges
-that poison delivery, and continues later deliveries. A successful dropped
-acknowledgement advances the outbound liveness clock; an acknowledgement
-failure remains an explicit blocked ack-phase cycle. A deleted Telegram thread
-therefore fails closed and is dropped; repair the explicit route rather than
-recreating a thread automatically. Telegram 401, 429, 5xx, and network failures
-leave the delivery unacknowledged for retry. The returned `message_id` is stored
-in the outbound map. The bridge renders opaque agent content as escaped
+through adopt soak. A missing route or a route for another chat fails closed
+and leaves the delivery unacknowledged so restoring or repairing local route
+state can recover it. A malformed delivery or completed Telegram 4xx response
+other than 401 and 429 is terminal: the bridge emits only a content-free
+`telegram_send_dropped` event, acknowledges that poison delivery, and continues
+later deliveries. A successful dropped acknowledgement advances the outbound
+liveness clock; an acknowledgement failure remains an explicit blocked
+ack-phase cycle. A deleted Telegram thread therefore fails closed and is
+dropped; repair the explicit route rather than recreating a thread
+automatically. Telegram 401, 429, 5xx, and network failures leave the delivery
+unacknowledged for retry. The returned `message_id` is stored in the outbound
+map. The bridge renders opaque agent content as escaped
 HTML, disables automatic entity detection, and asks Telegram to protect
 content. Telegram has no send-idempotency key, therefore this external boundary
 is explicitly at-least-once: a crash after Telegram accepts a reply but before
