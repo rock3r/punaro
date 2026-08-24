@@ -77,6 +77,7 @@ if [ "$release_is_draft" = false ] && [ "$release_is_prerelease" = false ]; then
 fi
 
 download_dir=$(mktemp -d "${TMPDIR:-/tmp}/punaro-release-publish.XXXXXXXX")
+download_dir=$(CDPATH= cd -- "$download_dir" && pwd -P) || fail 'temporary publication directory is invalid'
 catalog_restore_required=false
 catalog_redraft_required=false
 previous_catalog=

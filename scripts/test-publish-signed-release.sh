@@ -5,6 +5,9 @@ repo_dir=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
 temporary=$(mktemp -d "${TMPDIR:-/tmp}/punaro-publish-test.XXXXXXXX")
 cleanup() { rm -rf -- "$temporary"; }
 trap cleanup EXIT HUP INT TERM
+publisher_tmp="$temporary/publisher-tmp"
+mkdir "$publisher_tmp"
+export TMPDIR="$publisher_tmp/"
 
 prepare_case() {
 	case_root=$1

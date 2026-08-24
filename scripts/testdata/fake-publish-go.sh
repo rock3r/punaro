@@ -13,6 +13,7 @@ case " $* " in
 				shift
 			fi
 		done
+		case "$directory" in *'//'*) exit 2 ;; esac
 		[ -n "$directory" ] && [ "$(cat "$directory/punaro-adapter-linux-amd64" 2>/dev/null)" = artifact ] || exit 2
 		;;
 	*' publication-check '*)
