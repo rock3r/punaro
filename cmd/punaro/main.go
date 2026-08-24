@@ -417,6 +417,8 @@ func run(args []string, stdout, stderr io.Writer) int {
 		return runDoctorStorageCheck(args[1:], stdout)
 	case "doctor-backup-check":
 		return runDoctorBackupCheck(args[1:], stdout)
+	case "doctor-update-stage-check":
+		return runDoctorUpdateStageCheck(args[1:], stdout)
 	case "client":
 		if len(args) > 1 && (args[1] == "invite" || args[1] == "add") {
 			return runClientAdd(args[2:], stdout, stderr)
@@ -823,12 +825,14 @@ func diagnoseServer(ctx context.Context, installation operator.Installation, mac
 		checks = append(checks, punarodiagnostic.Pass("maintenance_fence"))
 	}
 
-	if _, err := operator.ExistingUpdateStage(installation.Directory); err == nil {
-		checks = append(checks, punarodiagnostic.Fail("host_update_stage", "resume_or_recover_update"))
-	} else if errors.Is(err, operator.ErrUpdateStageNotFound) {
-		checks = append(checks, punarodiagnostic.Pass("host_update_stage"))
-	} else {
+	updateStage := serverDoctorUpdateStageCheck(ctx, installation.Directory)
+	switch {
+	case !updateStage.Known:
 		checks = append(checks, punarodiagnostic.Unavailable("host_update_stage", "inspect_update_recovery"))
+	case updateStage.OK:
+		checks = append(checks, punarodiagnostic.Pass("host_update_stage"))
+	default:
+		checks = append(checks, punarodiagnostic.Fail("host_update_stage", "resume_or_recover_update"))
 	}
 
 	base := strings.TrimRight(installation.HealthURL, "/")

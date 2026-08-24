@@ -302,7 +302,7 @@ func TestAdapterDoctorEmitsStrictHealthyReport(t *testing.T) {
 	adapterDoctorRelayProbe = func(context.Context, adapterConfig) (adapter.DoctorProbeResult, error) { return healthy, nil }
 	adapterDoctorNotificationProbe = func(context.Context, adapterConfig) (adapter.DoctorProbeResult, error) { return healthy, nil }
 	adapterDoctorMailboxProbe = func(context.Context, adapterConfig) (mailboxDoctorResult, error) {
-		return mailboxDoctorResult{Attached: []string{"agent/a", "agent/b"}, Configuration: true, Healthy: true}, nil
+		return mailboxDoctorResult{Attached: []string{"agent/a", "agent/b"}, Configuration: true, DataDirectory: true, DistinctPaths: true, Healthy: true}, nil
 	}
 	probedEndpoints := make([]string, 0, 2)
 	adapterDoctorEndpointProbe = func(_ context.Context, _ adapterConfig, endpoint string) (adapter.DoctorProbeResult, error) {
@@ -394,7 +394,7 @@ func TestAdapterDoctorReportsIndependentRelayFailures(t *testing.T) {
 		return adapter.DoctorProbeResult{Transport: true, Origin: true, Access: true, Enrolled: true, Protocol: true}, nil
 	}
 	adapterDoctorMailboxProbe = func(context.Context, adapterConfig) (mailboxDoctorResult, error) {
-		return mailboxDoctorResult{Attached: []string{"agent/a"}, Configuration: true, Healthy: true}, nil
+		return mailboxDoctorResult{Attached: []string{"agent/a"}, Configuration: true, DataDirectory: true, DistinctPaths: true, Healthy: true}, nil
 	}
 	adapterDoctorEndpointProbe = func(context.Context, adapterConfig, string) (adapter.DoctorProbeResult, error) {
 		return adapter.DoctorProbeResult{Transport: true, Origin: true, Access: true, Enrolled: true, Protocol: true, Attached: true}, nil
@@ -428,7 +428,7 @@ func TestAdapterDoctorRejectsStaleMachineAttachmentForCurrentEndpoint(t *testing
 	adapterDoctorRelayProbe = func(context.Context, adapterConfig) (adapter.DoctorProbeResult, error) { return healthy, nil }
 	adapterDoctorNotificationProbe = func(context.Context, adapterConfig) (adapter.DoctorProbeResult, error) { return healthy, nil }
 	adapterDoctorMailboxProbe = func(context.Context, adapterConfig) (mailboxDoctorResult, error) {
-		return mailboxDoctorResult{Attached: []string{"agent/current"}, Configuration: true, Healthy: true}, nil
+		return mailboxDoctorResult{Attached: []string{"agent/current"}, Configuration: true, DataDirectory: true, DistinctPaths: true, Healthy: true}, nil
 	}
 	adapterDoctorEndpointProbe = func(context.Context, adapterConfig, string) (adapter.DoctorProbeResult, error) {
 		return adapter.DoctorProbeResult{Transport: true, Origin: true, Access: true, Enrolled: true, Protocol: true}, nil
@@ -490,6 +490,40 @@ func TestMailboxDoctorIsolationHonorsDeadline(t *testing.T) {
 	_, err := inspectAdapterMailboxIsolated(ctx, adapterConfig{mailboxBinary: blocker, mailboxState: t.TempDir(), attachedGroup: "group/punaro"})
 	if err == nil || time.Since(started) > time.Second {
 		t.Fatalf("isolated mailbox error=%v elapsed=%s", err, time.Since(started))
+	}
+}
+
+func TestAdapterPathChecksAreReturnedByIsolatedHelper(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("POSIX private-directory fixture")
+	}
+	root := t.TempDir()
+	dataDir, mailboxState := filepath.Join(root, "data"), filepath.Join(root, "mailbox")
+	if err := os.Mkdir(dataDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Mkdir(mailboxState, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	write := func(name string) string {
+		path := filepath.Join(root, name)
+		if err := os.WriteFile(path, []byte("fixture"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		return path
+	}
+	request := mailboxDoctorRequest{Binary: "missing-agent-mailbox", State: mailboxState, Group: "group/punaro", DataDir: dataDir, ProfileFile: write("profile"), PrivateKeyFile: write("private-key"), IdentityFile: write("identity")}
+	body, err := json.Marshal(request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var stdout bytes.Buffer
+	if code := runAdapterMailboxInspect([]string{"--request", base64.RawURLEncoding.EncodeToString(body)}, &stdout); code != 0 {
+		t.Fatalf("helper exit=%d output=%q", code, stdout.String())
+	}
+	var result mailboxDoctorResult
+	if json.NewDecoder(&stdout).Decode(&result) != nil || !result.DataDirectory || !result.DistinctPaths || result.Configuration {
+		t.Fatalf("isolated path result=%#v", result)
 	}
 }
 

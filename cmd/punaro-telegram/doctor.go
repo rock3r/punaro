@@ -107,9 +107,10 @@ var (
 		}
 		return client.Doctor(ctx)
 	}
-	telegramDoctorServiceProbe    = inspectTelegramService
-	telegramDoctorStateProbe      = inspectTelegramStateIsolated
-	telegramDoctorStateExecutable = os.Executable
+	telegramDoctorServiceProbe      = inspectTelegramServiceIsolated
+	telegramDoctorServiceExecutable = os.Executable
+	telegramDoctorStateProbe        = inspectTelegramStateIsolated
+	telegramDoctorStateExecutable   = os.Executable
 )
 
 func runTelegramDoctor(args []string, stdout, stderr io.Writer) int {
@@ -387,6 +388,41 @@ func inspectTelegramService(ctx context.Context) telegramServiceDoctorResult {
 		}
 	}
 	return result
+}
+
+func inspectTelegramServiceIsolated(ctx context.Context) telegramServiceDoctorResult {
+	if ctx == nil || ctx.Err() != nil {
+		return telegramServiceDoctorResult{}
+	}
+	executable, err := telegramDoctorServiceExecutable()
+	if err != nil {
+		return telegramServiceDoctorResult{}
+	}
+	command := exec.CommandContext(ctx, executable, "doctor-service-inspect") // #nosec G204,G702 -- os.Executable self helper with no caller-controlled arguments.
+	command.Stdin = nil
+	command.Stderr = io.Discard
+	output := boundedTelegramOutput{maximum: maximumTelegramStateOutput}
+	command.Stdout = &output
+	if command.Run() != nil || ctx.Err() != nil || output.overflow {
+		return telegramServiceDoctorResult{}
+	}
+	decoder := json.NewDecoder(strings.NewReader(output.buffer.String()))
+	decoder.DisallowUnknownFields()
+	var result telegramServiceDoctorResult
+	if decoder.Decode(&result) != nil || decoder.Decode(&struct{}{}) != io.EOF {
+		return telegramServiceDoctorResult{}
+	}
+	return result
+}
+
+func runTelegramServiceInspect(args []string, stdout io.Writer) int {
+	if len(args) != 0 {
+		return 2
+	}
+	if json.NewEncoder(stdout).Encode(inspectTelegramService(context.Background())) != nil {
+		return 1
+	}
+	return 0
 }
 
 func telegramServiceExecutable(goos, localAppData string) string {

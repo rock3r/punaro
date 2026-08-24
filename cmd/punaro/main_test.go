@@ -444,6 +444,7 @@ func preserveDependencies(t *testing.T) {
 	originalStart, originalProbe, originalIssue, originalListClients, originalRevokeClient := startServices, probe, issueEnrollment, listClients, revokeClient
 	originalBackup, originalListBackups, originalVerifyBackup, originalRestore := createOperatorBackup, listOperatorBackups, verifyOperatorBackup, restoreOperatorBackup
 	originalServerDoctorInspect, originalServerDoctorLoad := serverDoctorInspect, serverDoctorLoad
+	originalUpdateStageCheck := serverDoctorUpdateStageCheck
 	t.Cleanup(func() {
 		inspectSchema, inspectOwner, migratePristinePair, maintenanceActive = originalInspect, originalOwner, originalMigrate, originalMaintenance
 		createOwner, recoverInstallationOwner = originalCreate, originalRecover
@@ -454,6 +455,7 @@ func preserveDependencies(t *testing.T) {
 		createOperatorBackup, listOperatorBackups, verifyOperatorBackup, restoreOperatorBackup = originalBackup, originalListBackups, originalVerifyBackup, originalRestore
 		serverDoctorInspect = originalServerDoctorInspect
 		serverDoctorLoad = originalServerDoctorLoad
+		serverDoctorUpdateStageCheck = originalUpdateStageCheck
 	})
 	inspectOwner = func(context.Context, string) (punaropostgres.Principal, error) {
 		return punaropostgres.Principal{ID: "11111111-1111-4111-8111-111111111111", DisplayName: "owner"}, nil
@@ -466,6 +468,7 @@ func preserveDependencies(t *testing.T) {
 	serverDoctorInspect = func(context.Context, operator.Installation, string, bool, string) serverDoctorState {
 		return healthyServerDoctorState()
 	}
+	serverDoctorUpdateStageCheck = directServerDoctorUpdateStage
 }
 
 func TestServerDoctorDeadlineIncludesInstallationLoad(t *testing.T) {
@@ -646,6 +649,33 @@ func TestDoctorStorageCommandAndIsolationStayInsideDeadline(t *testing.T) {
 	started := time.Now()
 	if state := isolatedServerDoctorStorage(ctx, t.TempDir(), 1); state.Known || time.Since(started) > time.Second {
 		t.Fatalf("isolated storage state=%#v elapsed=%s", state, time.Since(started))
+	}
+}
+
+func TestDoctorUpdateStageIsolationStaysInsideDeadline(t *testing.T) {
+	var stdout bytes.Buffer
+	if code := runDoctorUpdateStageCheck([]string{"--directory", t.TempDir()}, &stdout); code != 0 {
+		t.Fatalf("update-stage helper exit=%d output=%q", code, stdout.String())
+	}
+	var clean knownDoctorBool
+	if json.NewDecoder(&stdout).Decode(&clean) != nil || !clean.Known || !clean.OK {
+		t.Fatalf("update-stage helper state=%#v", clean)
+	}
+	if runtime.GOOS == "windows" {
+		t.Skip("POSIX blocking executable fixture")
+	}
+	blocker := filepath.Join(t.TempDir(), "blocked-update-stage-check")
+	if err := os.WriteFile(blocker, []byte("#!/bin/sh\nexec sleep 10\n"), 0o700); err != nil { // #nosec G306 -- private executable deadline fixture.
+		t.Fatal(err)
+	}
+	previous := serverDoctorUpdateStageExecutable
+	serverDoctorUpdateStageExecutable = func() (string, error) { return blocker, nil }
+	t.Cleanup(func() { serverDoctorUpdateStageExecutable = previous })
+	ctx, cancel := context.WithTimeout(t.Context(), 20*time.Millisecond)
+	defer cancel()
+	started := time.Now()
+	if state := isolatedServerDoctorUpdateStage(ctx, t.TempDir()); state.Known || time.Since(started) > time.Second {
+		t.Fatalf("isolated update-stage state=%#v elapsed=%s", state, time.Since(started))
 	}
 }
 

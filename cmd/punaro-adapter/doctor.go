@@ -60,13 +60,19 @@ type pluginDoctorResult struct {
 type mailboxDoctorResult struct {
 	Attached      []string `json:"attached"`
 	Configuration bool     `json:"configuration"`
+	DataDirectory bool     `json:"data_directory"`
+	DistinctPaths bool     `json:"distinct_paths"`
 	Healthy       bool     `json:"healthy"`
 }
 
 type mailboxDoctorRequest struct {
-	Binary string `json:"binary"`
-	State  string `json:"state"`
-	Group  string `json:"group"`
+	Binary         string `json:"binary"`
+	State          string `json:"state"`
+	Group          string `json:"group"`
+	DataDir        string `json:"data_dir"`
+	ProfileFile    string `json:"profile_file"`
+	PrivateKeyFile string `json:"private_key_file"`
+	IdentityFile   string `json:"identity_file"`
 }
 
 type boundedDoctorOutput struct {
@@ -182,13 +188,18 @@ func runAdapterDoctor(args []string, stdout, stderr io.Writer) int {
 		punarodiagnostic.Pass("machine_credential_file"),
 		boolDoctorCheck(config.profileFile != "", "adapter_profile_file", "install_adapter_profile"),
 		boolDoctorCheck(config.identityFile != "", "client_identity_file", "install_client_identity"),
-		boolDoctorCheck(distinctDoctorPaths(config), "installer_path_aliases", "repair_installer_paths"),
 	}
 	mailbox, mailboxErr := adapterDoctorMailboxProbe(ctx, config)
-	if privateDoctorDirectory(config.dataDir) {
-		checks = append(checks, punarodiagnostic.Pass("adapter_data_directory"))
+	if mailboxErr != nil {
+		checks = append(checks,
+			punarodiagnostic.Unavailable("adapter_data_directory", "repair_adapter_configuration"),
+			punarodiagnostic.Unavailable("installer_path_aliases", "repair_adapter_configuration"),
+		)
 	} else {
-		checks = append(checks, punarodiagnostic.Fail("adapter_data_directory", "repair_adapter_data_directory"))
+		checks = append(checks,
+			boolDoctorCheck(mailbox.DataDirectory, "adapter_data_directory", "repair_adapter_data_directory"),
+			boolDoctorCheck(mailbox.DistinctPaths, "installer_path_aliases", "repair_installer_paths"),
+		)
 	}
 
 	relayResult, _ := adapterDoctorRelayProbe(ctx, config)
@@ -429,7 +440,7 @@ func inspectAdapterMailboxIsolated(ctx context.Context, config adapterConfig) (m
 	if err != nil {
 		return mailboxDoctorResult{}, errors.New("mailbox diagnostic is unavailable")
 	}
-	body, err := json.Marshal(mailboxDoctorRequest{Binary: config.mailboxBinary, State: config.mailboxState, Group: config.attachedGroup})
+	body, err := json.Marshal(mailboxDoctorRequest{Binary: config.mailboxBinary, State: config.mailboxState, Group: config.attachedGroup, DataDir: config.dataDir, ProfileFile: config.profileFile, PrivateKeyFile: config.privateKeyFile, IdentityFile: config.identityFile})
 	if err != nil || len(body) == 0 || len(body) > maximumMailboxDoctorOutput {
 		return mailboxDoctorResult{}, errors.New("mailbox diagnostic is unavailable")
 	}
@@ -466,12 +477,14 @@ func runAdapterMailboxInspect(args []string, stdout io.Writer) int {
 	if decoder.Decode(&request) != nil || decoder.Decode(&struct{}{}) != io.EOF {
 		return 2
 	}
-	config := adapterConfig{mailboxBinary: request.Binary, mailboxState: request.State, attachedGroup: request.Group}
-	result := mailboxDoctorResult{}
+	config := adapterConfig{mailboxBinary: request.Binary, mailboxState: request.State, attachedGroup: request.Group, dataDir: request.DataDir, profileFile: request.ProfileFile, privateKeyFile: request.PrivateKeyFile, identityFile: request.IdentityFile}
+	result := mailboxDoctorResult{DataDirectory: privateDoctorDirectory(config.dataDir), DistinctPaths: distinctDoctorPaths(config)}
 	if _, err := validateMailboxDoctorConfiguration(config); err == nil {
 		result.Configuration = true
 		if inspected, inspectErr := probeAdapterMailbox(context.Background(), config); inspectErr == nil {
-			result = inspected
+			result.Attached = inspected.Attached
+			result.Configuration = inspected.Configuration
+			result.Healthy = inspected.Healthy
 		}
 	}
 	if json.NewEncoder(stdout).Encode(result) != nil {

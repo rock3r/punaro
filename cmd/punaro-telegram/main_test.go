@@ -464,6 +464,26 @@ func TestTelegramDoctorStateInspectionHonorsDeadline(t *testing.T) {
 	}
 }
 
+func TestTelegramDoctorServiceInspectionHonorsDeadline(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("POSIX blocking executable fixture")
+	}
+	blocker := filepath.Join(t.TempDir(), "blocked-telegram-service-doctor")
+	if err := os.WriteFile(blocker, []byte("#!/bin/sh\nexec sleep 10\n"), 0o700); err != nil { // #nosec G306 -- private executable deadline fixture.
+		t.Fatal(err)
+	}
+	previous := telegramDoctorServiceExecutable
+	telegramDoctorServiceExecutable = func() (string, error) { return blocker, nil }
+	t.Cleanup(func() { telegramDoctorServiceExecutable = previous })
+	ctx, cancel := context.WithTimeout(t.Context(), 20*time.Millisecond)
+	defer cancel()
+	started := time.Now()
+	result := inspectTelegramServiceIsolated(ctx)
+	if result != (telegramServiceDoctorResult{}) || time.Since(started) > time.Second {
+		t.Fatalf("isolated service result=%#v elapsed=%s", result, time.Since(started))
+	}
+}
+
 func TestTelegramDoctorStateHelperReturnsBoundedSnapshot(t *testing.T) {
 	database := filepath.Join(t.TempDir(), "telegram.db")
 	now := time.Date(2026, 8, 23, 12, 0, 0, 0, time.UTC)

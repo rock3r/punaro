@@ -197,6 +197,9 @@ Database, storage, and update recovery: `database_connection`,
 `postgres_major` passes only when the running server reports the exact major
 compiled into that release and used by its release manifest; accepting any
 newer generic PostgreSQL floor would hide restore or partial-upgrade drift.
+The complete host update-stage journal and tree validation runs in a
+deadline-isolated child, so stalled `.update` storage reports
+`host_update_stage` unavailable rather than hanging the server doctor.
 `database_listener_private` and `administration_listener_private` query
 PostgreSQL's effective `listen_addresses` through the application and owner
 connections respectively; every configured TCP address must be localhost or a
@@ -221,6 +224,11 @@ Local configuration: `adapter_configuration`, `adapter_profile_file`,
 `adapter_data_directory`, `machine_credential_file`, `client_identity_file`,
 `installer_path_aliases`, `mailbox_executable`, `mailbox_state_directory`,
 `mailbox_mcp`.
+
+Installer-path alias resolution, private data-directory validation, and the
+mailbox snapshot/MCP inspection run together in a deadline-isolated child.
+Stalled installer-selected storage therefore makes these checks unavailable
+without extending the adapter doctor's total timeout.
 
 Relay and attachment state: `relay_transport`, `relay_origin`, `relay_access`,
 `relay_enrollment`, `relay_protocol`, `notification_transport`,
@@ -305,6 +313,9 @@ service while leaving the base unit apparently valid. On macOS, it
 structurally decodes the installed LaunchAgent's exact `Label` and
 single-element `ProgramArguments`, then binds launchd's effective loaded
 program and arguments to the same fixed gateway executable.
+The complete installed service-definition and executable inspection runs in a
+deadline-isolated child; service-manager commands remain under the same parent
+deadline.
 
 Durable state opening, integrity queries, and liveness aggregation run in a
 deadline-isolated child helper; a stalled SQLite path becomes unavailable

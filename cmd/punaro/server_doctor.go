@@ -64,13 +64,59 @@ type serverDoctorBackupState struct {
 }
 
 var (
-	serverDoctorPathCheck         = isolatedServerDoctorPaths
-	serverDoctorPathExecutable    = os.Executable
-	serverDoctorStorageCheck      = isolatedServerDoctorStorage
-	serverDoctorStorageExecutable = os.Executable
-	serverDoctorBackupCheck       = isolatedServerDoctorBackups
-	serverDoctorBackupExecutable  = os.Executable
+	serverDoctorPathCheck             = isolatedServerDoctorPaths
+	serverDoctorPathExecutable        = os.Executable
+	serverDoctorStorageCheck          = isolatedServerDoctorStorage
+	serverDoctorStorageExecutable     = os.Executable
+	serverDoctorBackupCheck           = isolatedServerDoctorBackups
+	serverDoctorBackupExecutable      = os.Executable
+	serverDoctorUpdateStageCheck      = isolatedServerDoctorUpdateStage
+	serverDoctorUpdateStageExecutable = os.Executable
 )
+
+func isolatedServerDoctorUpdateStage(ctx context.Context, directory string) knownDoctorBool {
+	executable, err := serverDoctorUpdateStageExecutable()
+	if err != nil {
+		return knownDoctorBool{}
+	}
+	output, ok := boundedCommandLimit(ctx, 256, executable, "doctor-update-stage-check", "--directory", directory)
+	if !ok {
+		return knownDoctorBool{}
+	}
+	decoder := json.NewDecoder(strings.NewReader(output))
+	var state knownDoctorBool
+	if decoder.Decode(&state) != nil || decoder.Decode(&struct{}{}) != io.EOF || !state.Known {
+		return knownDoctorBool{}
+	}
+	return state
+}
+
+func directServerDoctorUpdateStage(_ context.Context, directory string) knownDoctorBool {
+	return inspectServerDoctorUpdateStage(directory)
+}
+
+func inspectServerDoctorUpdateStage(directory string) knownDoctorBool {
+	if _, err := operator.ExistingUpdateStage(directory); err == nil {
+		return knownDoctorBool{Known: true}
+	} else if errors.Is(err, operator.ErrUpdateStageNotFound) {
+		return knownDoctorBool{Known: true, OK: true}
+	}
+	return knownDoctorBool{}
+}
+
+func runDoctorUpdateStageCheck(args []string, stdout io.Writer) int {
+	flags := flag.NewFlagSet("punaro doctor-update-stage-check", flag.ContinueOnError)
+	flags.SetOutput(io.Discard)
+	directory := flags.String("directory", "", "installation directory")
+	if flags.Parse(args) != nil || flags.NArg() != 0 || *directory == "" || !filepath.IsAbs(*directory) || filepath.Clean(*directory) != *directory {
+		return 2
+	}
+	state := inspectServerDoctorUpdateStage(*directory)
+	if !state.Known || json.NewEncoder(stdout).Encode(state) != nil {
+		return 1
+	}
+	return 0
+}
 
 func isolatedServerDoctorBackups(ctx context.Context, root string, now time.Time) (knownDoctorBool, knownDoctorBool) {
 	executable, err := serverDoctorBackupExecutable()
