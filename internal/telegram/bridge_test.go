@@ -26,6 +26,7 @@ type fakeBridgeRelay struct {
 	advertised []string
 	deliveries []relay.Delivery
 	acked      []string
+	ackErr     error
 	recordingClaimRelay
 }
 
@@ -53,7 +54,7 @@ func (r *fakeBridgeRelay) Lease(context.Context, string) ([]relay.Delivery, erro
 
 func (r *fakeBridgeRelay) Ack(_ context.Context, delivery relay.Delivery) error {
 	r.acked = append(r.acked, delivery.ID)
-	return nil
+	return r.ackErr
 }
 
 func TestBridgeSyncsInboundAndOutboundThroughOneAttachedGatewayEndpoint(t *testing.T) {
@@ -147,6 +148,55 @@ func TestBridgeDropsPermanentTelegramRejectionThenContinues(t *testing.T) {
 	}
 	if got := fmt.Sprint(relayClient.acked); got != "[rejected good]" || sender.calls != 2 {
 		t.Fatalf("acked=%v sender calls=%d", relayClient.acked, sender.calls)
+	}
+}
+
+func TestBridgeReportsProgressAfterDroppedDeliveryBeforeLaterSendFailure(t *testing.T) {
+	t.Parallel()
+	state, err := Open(filepath.Join(t.TempDir(), "telegram.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = state.Close() })
+	if err := state.SetRoute(55, 7, "conversation-1"); err != nil {
+		t.Fatal(err)
+	}
+	relayClient := &fakeBridgeRelay{deliveries: []relay.Delivery{
+		{ID: "poison", Message: relay.Message{ConversationID: "conversation-1", FromEndpoint: "agent/a"}},
+		{ID: "retryable", Message: relay.Message{ConversationID: "conversation-1", FromEndpoint: "agent/a", Body: "retry"}},
+	}}
+	bridge := Bridge{
+		Relay: relayClient, Endpoint: relay.TelegramGatewayEndpoint, State: state,
+		Poller: fakePoller{}, Gateway: Gateway{AllowedUserID: 55, State: state, Submit: func(context.Context, Submission) error { return nil }},
+		Sender: &scriptedRichSender{errs: []error{errors.New("fixture send failure")}},
+	}
+	_, err = bridge.SyncOnce(t.Context(), 1)
+	var cycleErr *GatewayCycleError
+	if !errors.As(err, &cycleErr) || cycleErr.Phase != GatewayPhaseSend || !cycleErr.OutboundBlocked || !cycleErr.OutboundProgress || fmt.Sprint(relayClient.acked) != "[poison]" {
+		t.Fatalf("err=%#v acked=%v", cycleErr, relayClient.acked)
+	}
+}
+
+func TestBridgeWrapsDroppedDeliveryAckFailureWithCycleMetadata(t *testing.T) {
+	t.Parallel()
+	state, err := Open(filepath.Join(t.TempDir(), "telegram.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = state.Close() })
+	relayClient := &fakeBridgeRelay{
+		deliveries: []relay.Delivery{{ID: "poison", Message: relay.Message{ConversationID: "missing", FromEndpoint: "agent/a", Body: "drop"}}},
+		ackErr:     errors.New("fixture ack failure"),
+	}
+	bridge := Bridge{
+		Relay: relayClient, Endpoint: relay.TelegramGatewayEndpoint, State: state,
+		Poller: fakePoller{}, Gateway: Gateway{AllowedUserID: 55, State: state, Submit: func(context.Context, Submission) error { return nil }},
+		Sender: &scriptedRichSender{},
+	}
+	_, err = bridge.SyncOnce(t.Context(), 1)
+	var cycleErr *GatewayCycleError
+	if !errors.As(err, &cycleErr) || cycleErr.Phase != GatewayPhaseAck || !cycleErr.OutboundBlocked || cycleErr.OutboundProgress || fmt.Sprint(relayClient.acked) != "[poison]" {
+		t.Fatalf("err=%#v acked=%v", cycleErr, relayClient.acked)
 	}
 }
 

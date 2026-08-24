@@ -124,8 +124,9 @@ func (b Bridge) SyncOnce(ctx context.Context, offset int64) (int64, error) {
 			if isPermanentTelegramFailure(err) {
 				b.logEvent("telegram_send_dropped", "delivery_id="+delivery.ID, "reason=permanent_rejection")
 				if err := b.Relay.Ack(ctx, delivery); err != nil {
-					return next, fmt.Errorf("acknowledge dropped Telegram delivery %q: %w", delivery.ID, err)
+					return next, &GatewayCycleError{Phase: GatewayPhaseAck, OutboundBlocked: true, OutboundProgress: outboundProgress, Err: err}
 				}
+				outboundProgress = true
 				continue
 			}
 			b.logEvent("telegram_send_err", "delivery_id="+delivery.ID)
