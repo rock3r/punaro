@@ -431,6 +431,12 @@ $logonTrigger = New-ScheduledTaskTrigger -AtLogOn -User $user
 # if a previous install already registered the re-arm trigger, except when
 # that task is Disabled so an operator-stopped adapter stays stopped.
 $repeatTrigger = New-ScheduledTaskTrigger -Once -At ((Get-Date).AddMinutes(1)) -RepetitionInterval ([TimeSpan]::FromMinutes(1)) -RepetitionDuration ([TimeSpan]::FromDays(3650))
+# Windows PowerShell 5.1 can serialize the TimeSpan values above as
+# 00:01:00/3650.00:00:00, which Task Scheduler rejects as invalid XML.
+# Force the schema's ISO 8601 duration form after the repetition object exists.
+$repeatTrigger.Repetition.Interval = 'PT1M'
+$repeatTrigger.Repetition.Duration = 'P3650D'
+$repeatTrigger.Repetition.StopAtDurationEnd = $false
 $triggers = @($logonTrigger)
 if ($Enable -or $adapterTaskWasRunning -or $hadRepeatTrigger) { $triggers += $repeatTrigger }
 $principal = New-ScheduledTaskPrincipal -UserId $user -LogonType Interactive -RunLevel Limited
