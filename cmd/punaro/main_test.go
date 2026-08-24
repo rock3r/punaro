@@ -968,6 +968,39 @@ func TestServerDoctorDoesNotSynthesizeEnabledLANRelayHealth(t *testing.T) {
 	}
 }
 
+func TestServerDoctorBindsEnabledRelayProbeToInstalledPublicURL(t *testing.T) {
+	root := t.TempDir()
+	if runtime.GOOS != "windows" {
+		if err := os.Chmod(root, 0o700); err != nil { // #nosec G302 -- private diagnostic fixture root.
+			t.Fatal(err)
+		}
+	}
+	privateKey := ed25519.NewKeyFromSeed(make([]byte, ed25519.SeedSize))
+	keyPath := filepath.Join(root, "doctor.key")
+	accessPath := filepath.Join(root, "access.env")
+	profilePath := filepath.Join(root, "doctor.env")
+	if err := os.WriteFile(keyPath, []byte(base64.RawURLEncoding.EncodeToString(privateKey)), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(accessPath, []byte("PUNARO_CF_ACCESS_CLIENT_ID=doctor-id\nPUNARO_CF_ACCESS_CLIENT_SECRET=doctor-secret\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	profile := "PUNARO_SERVER_DOCTOR_RELAY_URL=https://stale.example\nPUNARO_SERVER_DOCTOR_MACHINE_ID=server-doctor\nPUNARO_SERVER_DOCTOR_PRIVATE_KEY_FILE=" + keyPath + "\nPUNARO_SERVER_DOCTOR_ACCESS_TOKEN_FILE=" + accessPath + "\n"
+	if err := os.WriteFile(profilePath, []byte(profile), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	installation := operator.Installation{Ingress: ingress.Policy{Mode: ingress.Internet, PublicURL: "https://installed.example"}, RelayEnabled: true}
+	route, origin, access, enrollment, protocol := inspectServerRelay(t.Context(), installation, profilePath)
+	for name, check := range map[string]knownDoctorBool{"route": route, "origin": origin, "access": access} {
+		if !check.Known || check.OK {
+			t.Fatalf("%s=%#v", name, check)
+		}
+	}
+	if enrollment.Known || protocol.Known {
+		t.Fatalf("enrollment=%#v protocol=%#v", enrollment, protocol)
+	}
+}
+
 func TestDoctorRequiresExplicitValidServerMachineIdentity(t *testing.T) {
 	directory := testInstallation(t)
 	for _, args := range [][]string{

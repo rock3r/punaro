@@ -201,6 +201,10 @@ func inspectServerRelay(parent context.Context, installation operator.Installati
 	if err != nil {
 		return knownDoctorBool{}, knownDoctorBool{}, knownDoctorBool{}, knownDoctorBool{}, knownDoctorBool{}
 	}
+	if strings.TrimSuffix(profile.RelayURL, "/") != strings.TrimSuffix(installation.Ingress.PublicURL, "/") {
+		failed := known(true, false)
+		return failed, failed, failed, knownDoctorBool{}, knownDoctorBool{}
+	}
 	if !installation.RelayEnabled {
 		route, origin, access := inspectServerPublicEdge(parent, installation.Ingress.PublicURL, profile, &http.Client{Timeout: 5 * time.Second})
 		return route, origin, access, knownDoctorBool{}, knownDoctorBool{}

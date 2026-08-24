@@ -120,6 +120,10 @@ Telegram gateway:
 punaro-telegram doctor --timeout 15s
 ```
 
+On Windows the gateway service checks bind the `Punaro Telegram` scheduled
+task to `%LOCALAPPDATA%\Punaro\bin\punaro-telegram.exe` and obtain release
+identity from that exact executable, not from a Unix compatibility path.
+
 Collect each JSON file on its own machine. Do not collect raw logs or message
 state. Then aggregate locally against the exact signed catalog and manifests:
 

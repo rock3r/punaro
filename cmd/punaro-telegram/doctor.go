@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"encoding/xml"
 	"errors"
 	"flag"
 	"fmt"
@@ -257,59 +258,117 @@ func writeTelegramDoctorReport(stdout, stderr io.Writer, report punarodiagnostic
 }
 
 func inspectTelegramService(ctx context.Context) telegramServiceDoctorResult {
-	home, err := os.UserHomeDir()
-	if err != nil {
-		return telegramServiceDoctorResult{}
-	}
 	result := telegramServiceDoctorResult{}
-	var installedPath string
-	var commands [][]string
-	switch runtime.GOOS {
-	case "darwin":
-		installedPath = filepath.Join(home, "Library", "LaunchAgents", "org.punaro.telegram.plist")
-		commands = [][]string{{"launchctl", "print", "gui/" + strconv.Itoa(os.Getuid()) + "/org.punaro.telegram"}}
-	case "linux":
-		installedPath = "/etc/systemd/system/punaro-telegram.service"
-		commands = [][]string{{"systemctl", "is-enabled", "--quiet", "punaro-telegram.service"}, {"systemctl", "is-active", "--quiet", "punaro-telegram.service"}}
-	case "windows":
-		commands = [][]string{{"schtasks.exe", "/Query", "/TN", "Punaro Telegram"}}
-	default:
+	executable := telegramServiceExecutable(runtime.GOOS, strings.TrimSpace(os.Getenv("LOCALAPPDATA")))
+	if executable == "" {
 		return result
 	}
-	if installedPath == "" {
-		result.Installed = true
-	} else if info, statErr := os.Lstat(installedPath); statErr == nil && info.Mode().IsRegular() && info.Mode()&os.ModeSymlink == 0 {
-		result.Installed = true
-		if body, readErr := incrementalfs.ReadFile(ctx, installedPath, 64<<10); readErr == nil {
-			result.Executable = telegramServiceFileBound(runtime.GOOS, string(body))
+	switch runtime.GOOS {
+	case "darwin":
+		home, err := os.UserHomeDir()
+		if err != nil {
+			return result
 		}
-	}
-	succeeded := make([]bool, len(commands))
-	for index, arguments := range commands {
-		command := exec.CommandContext(ctx, arguments[0], arguments[1:]...) // #nosec G204 -- fixed read-only service inspection.
-		command.Stdout, command.Stderr = io.Discard, io.Discard
-		succeeded[index] = command.Run() == nil
-	}
-	if runtime.GOOS == "linux" {
-		result.Enabled = len(succeeded) == 2 && succeeded[0]
-		result.Running = len(succeeded) == 2 && succeeded[1]
-	} else {
+		installedPath := filepath.Join(home, "Library", "LaunchAgents", "org.punaro.telegram.plist")
+		result.Installed, result.Executable = inspectTelegramServiceDefinition(ctx, installedPath, executable, "darwin")
+		_, loaded := telegramServiceCommand(ctx, "launchctl", "print", "gui/"+strconv.Itoa(os.Getuid())+"/org.punaro.telegram")
 		result.Enabled = result.Installed
-		result.Running = len(succeeded) == 1 && succeeded[0]
-	}
-	if runtime.GOOS == "linux" {
+		result.Running = loaded
+		result.ExitStatus = result.Running
+		result.RestartState = loaded
+	case "linux":
+		result.Installed, result.Executable = inspectTelegramServiceDefinition(ctx, "/etc/systemd/system/punaro-telegram.service", executable, "linux")
+		_, result.Enabled = telegramServiceCommand(ctx, "systemctl", "is-enabled", "--quiet", "punaro-telegram.service")
+		_, result.Running = telegramServiceCommand(ctx, "systemctl", "is-active", "--quiet", "punaro-telegram.service")
 		exit, exitOK := telegramServiceCommand(ctx, "systemctl", "show", "--property=ExecMainStatus", "--value", "punaro-telegram.service")
 		serviceResult, resultOK := telegramServiceCommand(ctx, "systemctl", "show", "--property=Result", "--value", "punaro-telegram.service")
 		result.ExitStatus = exitOK && strings.TrimSpace(exit) == "0"
 		result.RestartState = resultOK && strings.TrimSpace(serviceResult) == "success"
-	} else {
-		result.ExitStatus = result.Running
-		result.RestartState = result.Running
+	case "windows":
+		task, taskOK := telegramServiceCommand(ctx, "schtasks.exe", "/Query", "/TN", "Punaro Telegram", "/XML")
+		result.Installed = taskOK
+		result.Executable = taskOK && telegramServiceExecutableSafe(ctx, executable, "windows") && telegramWindowsTaskBound(task, executable)
+		state, stateOK := telegramServiceCommand(ctx, "powershell.exe", "-NoProfile", "-NonInteractive", "-Command", "(Get-ScheduledTask -TaskName 'Punaro Telegram').State")
+		last, lastOK := telegramServiceCommand(ctx, "powershell.exe", "-NoProfile", "-NonInteractive", "-Command", "(Get-ScheduledTaskInfo -TaskName 'Punaro Telegram').LastTaskResult")
+		restarts, restartOK := telegramServiceCommand(ctx, "powershell.exe", "-NoProfile", "-NonInteractive", "-Command", "(Get-ScheduledTask -TaskName 'Punaro Telegram').Settings.RestartCount")
+		canonicalState := strings.TrimSpace(state)
+		result.Enabled = stateOK && canonicalState != "Disabled"
+		result.Running = stateOK && canonicalState == "Running"
+		result.ExitStatus = result.Running || lastOK && strings.TrimSpace(last) == "0"
+		restartCount, restartErr := strconv.Atoi(strings.TrimSpace(restarts))
+		result.RestartState = restartOK && restartErr == nil && restartCount > 0
+	default:
+		return result
 	}
-	if release, ok := telegramServiceVersion(ctx); ok {
+	if result.Executable {
+		release, ok := telegramExecutableVersion(ctx, executable)
 		result.Release = result.Running && telegramBuildRelease != "" && release == telegramBuildRelease
+		if !ok {
+			result.Release = false
+		}
 	}
 	return result
+}
+
+func telegramServiceExecutable(goos, localAppData string) string {
+	switch goos {
+	case "darwin", "linux":
+		return "/usr/local/bin/punaro-telegram"
+	case "windows":
+		if localAppData == "" || !filepath.IsAbs(localAppData) || filepath.Clean(localAppData) != localAppData {
+			return ""
+		}
+		return filepath.Join(localAppData, "Punaro", "bin", "punaro-telegram.exe")
+	default:
+		return ""
+	}
+}
+
+func inspectTelegramServiceDefinition(ctx context.Context, definition, executable, goos string) (bool, bool) {
+	info, err := os.Lstat(definition) // #nosec G703 -- fixed platform service definition.
+	if err != nil || !info.Mode().IsRegular() || info.Mode()&os.ModeSymlink != 0 {
+		return false, false
+	}
+	body, err := incrementalfs.ReadFile(ctx, definition, 64<<10)
+	return true, err == nil && telegramServiceFileBound(goos, string(body)) && telegramServiceExecutableSafe(ctx, executable, goos)
+}
+
+func telegramServiceExecutableSafe(ctx context.Context, executable, goos string) bool {
+	if ctx.Err() != nil || executable == "" || !filepath.IsAbs(executable) || filepath.Clean(executable) != executable {
+		return false
+	}
+	info, err := os.Lstat(executable) // #nosec G703 -- fixed platform-installed gateway executable.
+	return err == nil && info.Mode().IsRegular() && info.Mode()&os.ModeSymlink == 0 && (goos == "windows" || info.Mode().Perm()&0o111 != 0)
+}
+
+func telegramWindowsTaskBound(body, executable string) bool {
+	if len(body) > 64<<10 || executable == "" {
+		return false
+	}
+	var task struct {
+		Actions struct {
+			Exec []struct {
+				Command   string `xml:"Command"`
+				Arguments string `xml:"Arguments"`
+			} `xml:"Exec"`
+		} `xml:"Actions"`
+	}
+	decoder := xml.NewDecoder(strings.NewReader(body))
+	if decoder.Decode(&task) != nil || len(task.Actions.Exec) != 1 {
+		return false
+	}
+	for {
+		token, err := decoder.Token()
+		if errors.Is(err, io.EOF) {
+			break
+		}
+		text, whitespace := token.(xml.CharData)
+		if err != nil || !whitespace || strings.TrimSpace(string(text)) != "" {
+			return false
+		}
+	}
+	action := task.Actions.Exec[0]
+	return strings.EqualFold(filepath.Clean(strings.TrimSpace(action.Command)), filepath.Clean(executable)) && strings.TrimSpace(action.Arguments) == ""
 }
 
 func telegramServiceCommand(ctx context.Context, executable string, arguments ...string) (string, bool) {
@@ -341,10 +400,6 @@ func telegramServiceFileBound(goos, body string) bool {
 	default:
 		return false
 	}
-}
-
-func telegramServiceVersion(ctx context.Context) (string, bool) {
-	return telegramExecutableVersion(ctx, "/usr/local/bin/punaro-telegram")
 }
 
 func telegramExecutableVersion(ctx context.Context, executable string) (string, bool) {

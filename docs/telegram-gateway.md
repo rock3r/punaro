@@ -66,6 +66,14 @@ and start `punaro-telegram`; inspect `systemctl status` and redact logs before
 sharing them. Run `systemd-analyze security punaro-telegram.service` on the
 target OS and include the result in deployment evidence.
 
+On Windows, install the gateway at
+`%LOCALAPPDATA%\Punaro\bin\punaro-telegram.exe` and provision the `Punaro
+Telegram` scheduled task with exactly that executable as its sole action and no
+arguments. Doctor reads the task XML, verifies the exact native executable,
+queries its enabled/running/last-result/restart state, and executes `version`
+through that same validated path. A task bound to any other binary fails the
+service binding and running-release checks.
+
 Before starting long polling, inspect the bot's webhook status with the Bot
 API `getWebhookInfo`. Telegram does not allow `getUpdates` while an outgoing
 webhook is configured. Punaro never removes or changes a webhook automatically:

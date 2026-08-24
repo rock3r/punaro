@@ -48,6 +48,37 @@ func TestTelegramServiceBindingRejectsStaleDefinitions(t *testing.T) {
 	}
 }
 
+func TestTelegramWindowsTaskRequiresExactInstalledExecutable(t *testing.T) {
+	executable := filepath.Join(t.TempDir(), "Punaro", "bin", "punaro-telegram.exe")
+	valid := `<Task><Actions><Exec><Command>` + executable + `</Command></Exec></Actions></Task>` + "\r\n"
+	if !telegramWindowsTaskBound(valid, executable) {
+		t.Fatal("valid Telegram scheduled task rejected")
+	}
+	for _, stale := range []string{
+		strings.Replace(valid, "punaro-telegram.exe", "stale.exe", 1),
+		strings.Replace(valid, "</Command>", `</Command><Arguments>doctor</Arguments>`, 1),
+		valid + valid,
+	} {
+		if telegramWindowsTaskBound(stale, executable) {
+			t.Fatalf("stale Telegram scheduled task accepted: %q", stale)
+		}
+	}
+}
+
+func TestTelegramServiceExecutableUsesNativeWindowsInstallRoot(t *testing.T) {
+	root := t.TempDir()
+	want := filepath.Join(root, "Punaro", "bin", "punaro-telegram.exe")
+	if got := telegramServiceExecutable("windows", root); got != want {
+		t.Fatalf("Windows executable=%q want %q", got, want)
+	}
+	if got := telegramServiceExecutable("windows", ""); got != "" {
+		t.Fatalf("empty Windows install root produced %q", got)
+	}
+	if got := telegramServiceExecutable("linux", root); got != "/usr/local/bin/punaro-telegram" {
+		t.Fatalf("Linux executable=%q", got)
+	}
+}
+
 func TestTelegramExecutableVersionStreamsIntoBoundedBuffer(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("shell fixture is Unix-only")
