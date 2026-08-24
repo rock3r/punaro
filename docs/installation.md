@@ -124,7 +124,7 @@ and keep the fixed bootstrap-owned service lifecycle:
 punaro-bootstrap update \
   --directory "$HOME/.local/state/punaro-bootstrap" \
   --keys-file /absolute/private/punaro-release.pub \
-  --release v0.1.0-alpha.1
+  --release v0.1.0-alpha.2
 punaro-bootstrap doctor \
   --directory "$HOME/.local/state/punaro-bootstrap" \
   --keys-file /absolute/private/punaro-release.pub \
