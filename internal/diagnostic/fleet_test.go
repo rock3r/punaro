@@ -2,6 +2,39 @@ package diagnostic
 
 import "testing"
 
+func TestFleetRejectsReportsMissingComponentSpecificChecks(t *testing.T) {
+	identities := map[Component]Identity{
+		ComponentServer:    {MachineID: "punaro-lxc", Release: "v0.1.0-alpha.1", ReleaseSequence: 1, CatalogSequence: 1, Protocol: 1, StorageSchema: 44, Platform: "linux-arm64"},
+		ComponentAdapter:   {MachineID: "mac-studio", Release: "v0.1.0-alpha.1", ReleaseSequence: 1, CatalogSequence: 1, Protocol: 1, Platform: "darwin-arm64", PluginVersion: "v0.1.0-alpha.1", SkillSetDigest: "sha256:" + digestA},
+		ComponentBootstrap: {MachineID: "mac-studio", Release: "v0.1.0-alpha.1", ReleaseSequence: 1, CatalogSequence: 1, Protocol: 1, Platform: "darwin-arm64"},
+		ComponentTelegram:  {MachineID: "telegram-gateway", Release: "v0.1.0-alpha.1", ReleaseSequence: 1, CatalogSequence: 1, Protocol: 1, Platform: "linux-arm64"},
+	}
+	for component, identity := range identities {
+		t.Run(string(component), func(t *testing.T) {
+			for name, checks := range map[string][]Check{"empty": nil, "partial": {Pass("ready")}} {
+				t.Run(name, func(t *testing.T) {
+					report, err := New(component, identity, checks)
+					if err != nil {
+						t.Fatal(err)
+					}
+					_, err = AggregateFleet([]Report{report}, FleetPolicy{
+						Expected:        []FleetTarget{{MachineID: identity.MachineID, Component: component}},
+						CatalogSequence: 1,
+						Catalog:         map[string]int64{"v0.1.0-alpha.1": 1},
+						ProtocolMin:     1,
+						ProtocolMax:     1,
+						SchemaMin:       44,
+						SchemaMax:       44,
+					})
+					if err == nil {
+						t.Fatalf("%s report without mandatory checks accepted", component)
+					}
+				})
+			}
+		})
+	}
+}
+
 func TestFleetDetectsMissingDuplicateCatalogAndCompatibilitySkew(t *testing.T) {
 	reports := []Report{
 		mustFleetInput(t, ComponentServer, Identity{MachineID: "punaro-lxc", Release: "v0.1.0-alpha.2", ReleaseSequence: 2, Protocol: 2, StorageSchema: 44, Platform: "linux-arm64"}),
@@ -112,7 +145,12 @@ const (
 
 func mustFleetInput(t *testing.T, component Component, identity Identity) Report {
 	t.Helper()
-	report, err := New(component, identity, []Check{Pass("ready")})
+	codes := RequiredComponentCheckCodes(component)
+	checks := make([]Check, 0, len(codes))
+	for _, code := range codes {
+		checks = append(checks, Pass(code))
+	}
+	report, err := New(component, identity, checks)
 	if err != nil {
 		t.Fatal(err)
 	}

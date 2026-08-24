@@ -72,7 +72,7 @@ func Doctor(ctx context.Context, request DoctorRequest) (punarodiagnostic.Report
 	if err := requireTrustedBootstrapDirectory(request.Directory); err != nil {
 		checks = append(checks, punarodiagnostic.Fail("bootstrap_directory", "repair_bootstrap_directory"))
 		checks = append(checks, unavailableBootstrapStateChecks()...)
-		return punarodiagnostic.New(punarodiagnostic.ComponentBootstrap, identity, checks)
+		return punarodiagnostic.NewComponentReport(punarodiagnostic.ComponentBootstrap, identity, checks)
 	}
 	checks = append(checks, punarodiagnostic.Pass("bootstrap_directory"))
 	checks = append(checks, doctorLockCheck(request.Directory, lockFile, "bootstrap_lock", true))
@@ -155,6 +155,16 @@ func Doctor(ctx context.Context, request DoctorRequest) (punarodiagnostic.Report
 		var slotChecks []punarodiagnostic.Check
 		currentAdapterDigest, slotChecks = doctorSlot(ctx, request, keys, catalog, catalogOK, "current", current, filepath.Join(request.Directory, currentSlot), true)
 		checks = append(checks, slotChecks...)
+	} else {
+		checks = append(checks,
+			punarodiagnostic.Unavailable("current_catalog_allowed", "reinstall_signed_release"),
+			punarodiagnostic.Unavailable("current_critical_block", "reinstall_signed_release"),
+			punarodiagnostic.Unavailable("current_manifest_signature", "reinstall_signed_release"),
+			punarodiagnostic.Unavailable("current_platform_compatibility", "reinstall_signed_release"),
+			punarodiagnostic.Unavailable("minimum_bootstrap_release", "reinstall_signed_release"),
+			punarodiagnostic.Unavailable("minimum_recovery_protocol", "reinstall_signed_release"),
+			punarodiagnostic.Unavailable("current_artifact_integrity", "reinstall_signed_release"),
+		)
 	}
 	if currentAdapterDigest != "" {
 		identity.ArtifactDigest = "sha256:" + currentAdapterDigest
@@ -178,7 +188,7 @@ func Doctor(ctx context.Context, request DoctorRequest) (punarodiagnostic.Report
 
 	runningChecks := doctorRunningState(ctx, request, current, currentAdapterDigest)
 	checks = append(checks, runningChecks...)
-	return punarodiagnostic.New(punarodiagnostic.ComponentBootstrap, identity, checks)
+	return punarodiagnostic.NewComponentReport(punarodiagnostic.ComponentBootstrap, identity, checks)
 }
 
 func doctorReadOptionalState(ctx context.Context, path string, maximum int64) ([]byte, bool, error) {

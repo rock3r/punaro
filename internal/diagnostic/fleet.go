@@ -31,6 +31,63 @@ type FleetPolicy struct {
 	SchemaMax          int64
 }
 
+var requiredComponentCheckCodes = map[Component][]string{
+	ComponentServer: {
+		"access_admission", "administration_listener_private", "application_credential_file", "attachment_blob_containment", "attachment_blob_directory",
+		"backup_directory", "backup_freshness", "blob_storage_private", "compose_manifest_binding", "compose_override", "daemon_environment", "data_directory",
+		"database_connection", "database_listener_private", "database_owner", "database_pair", "database_schema", "gateway_release", "gateway_service_enabled",
+		"gateway_service_executable", "gateway_service_installed", "gateway_service_last_exit", "gateway_service_restart_state", "gateway_service_running", "health_endpoint",
+		"health_listener_private", "host_update_stage", "image_digest_binding", "installed_release", "installation_configuration", "installation_directory", "machine_identity",
+		"installation_paths", "maintenance_fence", "migration_manifest_binding", "owner_credential_file", "postgres_major", "readiness_endpoint", "recovery_receipt", "relay_enrollment",
+		"relay_protocol", "running_image", "storage_capacity", "storage_credential_isolation", "storage_directory_separation", "tunnel_origin", "tunnel_route",
+		"update_recovery", "update_transaction", "verified_backup",
+	},
+	ComponentAdapter: {
+		"adapter_configuration", "adapter_data_directory", "adapter_profile_file", "adapter_service_enabled", "adapter_service_executable", "adapter_service_installed",
+		"adapter_service_last_exit", "adapter_service_restart_state", "adapter_service_running", "bootstrap_running_artifact", "bootstrap_selected_artifact", "bootstrap_supervisor",
+		"claude_plugin_registration", "client_identity_file", "codex_plugin_registration", "endpoint_attachment", "expired_endpoint_bindings", "expired_role_bindings",
+		"installed_release", "installer_path_aliases", "machine_credential_file", "mailbox_executable", "mailbox_mcp", "mailbox_state_directory", "notification_access",
+		"notification_enrollment", "notification_origin", "notification_protocol", "notification_transport", "plugin_launcher", "plugin_version", "portable_plugin_registration",
+		"relay_access", "relay_enrollment", "relay_origin", "relay_protocol", "relay_transport", "skill_set_parity",
+	},
+	ComponentBootstrap: {
+		"accepted_state", "bootstrap_directory", "bootstrap_lock", "candidate_health", "candidate_state", "catalog_freshness", "catalog_reachability", "catalog_sequence",
+		"catalog_signature", "current_artifact_integrity", "current_catalog_allowed", "current_critical_block", "current_manifest_signature", "current_platform_compatibility",
+		"current_slot", "disk_space", "journal_state", "minimum_bootstrap_release", "minimum_recovery_protocol", "previous_artifact_integrity", "previous_catalog_allowed",
+		"previous_critical_block", "previous_manifest_signature", "previous_platform_compatibility", "previous_slot", "recovery_state", "release_keys", "rollback_available",
+		"run_lock", "running_artifact", "supervisor_process", "swap_state",
+	},
+	ComponentTelegram: {
+		"access_credential_file", "bot_api", "bot_credential_file", "claim_backlog", "claim_backlog_age", "conversation_route_integrity", "cycle_liveness",
+		"deleted_topic_target", "gateway_endpoint_attachment", "gateway_endpoint_identity", "gateway_service_enabled", "gateway_service_executable", "gateway_service_installed",
+		"gateway_service_last_exit", "gateway_service_restart_state", "gateway_service_running", "installed_release", "machine_credential_file", "message_less_update_stall",
+		"notification_access", "notification_enrollment", "notification_origin", "notification_protocol", "notification_transport", "polling_liveness", "relay_access",
+		"relay_cycle_liveness", "relay_enrollment", "relay_origin", "relay_protocol", "relay_transport", "retry_state", "running_release", "single_user_policy",
+		"state_integrity", "stuck_head_delivery", "successful_cycle_liveness", "telegram_configuration", "telegram_cycle_liveness", "terminal_inbound_rejection",
+		"terminal_outbound_rejection", "transient_retry_stall",
+	},
+}
+
+// RequiredComponentCheckCodes returns the stable component doctor contract
+// that a fleet report must contain in full. The returned slice is independent
+// of the internal registry and can be safely modified by the caller.
+func RequiredComponentCheckCodes(component Component) []string {
+	return append([]string(nil), requiredComponentCheckCodes[component]...)
+}
+
+// NewComponentReport validates and canonicalizes a non-fleet doctor report,
+// including its complete component-specific check contract.
+func NewComponentReport(component Component, identity Identity, checks []Check) (Report, error) {
+	report, err := New(component, identity, checks)
+	if err != nil {
+		return Report{}, err
+	}
+	if component == ComponentFleet || !hasRequiredComponentChecks(report) {
+		return Report{}, errors.New("incomplete component diagnostic report")
+	}
+	return report, nil
+}
+
 // AggregateFleet compares already-produced doctor reports. It never opens a
 // network connection or reads component state directly.
 func AggregateFleet(reports []Report, policy FleetPolicy) (Report, error) {
@@ -68,7 +125,7 @@ func AggregateFleet(reports []Report, policy FleetPolicy) (Report, error) {
 	skillOK := true
 	for _, report := range reports {
 		canonical, err := New(report.Component, report.Identity, report.Checks)
-		if err != nil || report.SchemaVersion != SchemaVersion || !reflect.DeepEqual(report, canonical) || report.Component == ComponentFleet || report.Identity.MachineID == "" {
+		if err != nil || report.SchemaVersion != SchemaVersion || !reflect.DeepEqual(report, canonical) || report.Component == ComponentFleet || report.Identity.MachineID == "" || !hasRequiredComponentChecks(report) {
 			return Report{}, errors.New("invalid fleet diagnostic report")
 		}
 		key := fleetKey(report.Identity.MachineID, report.Component)
@@ -138,6 +195,23 @@ func AggregateFleet(reports []Report, policy FleetPolicy) (Report, error) {
 		fleetBoolCheck(skillOK && len(skills) <= 1, "skill_set_skew", "install_matching_skill_set"),
 	}
 	return New(ComponentFleet, Identity{CatalogSequence: policy.CatalogSequence}, checks)
+}
+
+func hasRequiredComponentChecks(report Report) bool {
+	required, ok := requiredComponentCheckCodes[report.Component]
+	if !ok || len(required) == 0 || len(report.Checks) < len(required) {
+		return false
+	}
+	present := make(map[string]struct{}, len(report.Checks))
+	for _, check := range report.Checks {
+		present[check.Code] = struct{}{}
+	}
+	for _, code := range required {
+		if _, ok := present[code]; !ok {
+			return false
+		}
+	}
+	return true
 }
 
 func validFleetRange(minimum, maximum int64) bool {

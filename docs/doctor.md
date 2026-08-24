@@ -159,8 +159,11 @@ punaro-bootstrap fleet-doctor \
 
 Repeat `--report` and `--expect` for every required machine/component pair.
 Fleet doctor does not contact machines. It rejects missing or duplicate
-identities, untrusted release documents, catalog/release mismatch, unsupported
-upgrade edges, protocol/schema skew, or plugin/skill drift.
+identities, empty or partial component check sets, untrusted release documents,
+catalog/release mismatch, unsupported upgrade edges, protocol/schema skew, or
+plugin/skill drift. Each component doctor therefore emits its complete stable
+check-code contract, using `unavailable` when a prerequisite prevents a
+downstream check from being proven.
 
 ## Stable check-code registry
 

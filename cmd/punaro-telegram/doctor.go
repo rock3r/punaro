@@ -124,7 +124,7 @@ func runTelegramDoctor(args []string, stdout, stderr io.Writer) int {
 	defer cancel()
 	cfg, err := loadTelegramDoctorConfig(ctx)
 	if err != nil {
-		report, reportErr := punarodiagnostic.New(punarodiagnostic.ComponentTelegram, punarodiagnostic.Identity{Platform: runtime.GOOS + "-" + runtime.GOARCH}, telegramUnavailableChecks())
+		report, reportErr := punarodiagnostic.NewComponentReport(punarodiagnostic.ComponentTelegram, punarodiagnostic.Identity{Platform: runtime.GOOS + "-" + runtime.GOARCH}, telegramUnavailableChecks())
 		return writeTelegramDoctorReport(stdout, stderr, report, reportErr)
 	}
 
@@ -192,7 +192,7 @@ func runTelegramDoctor(args []string, stdout, stderr io.Writer) int {
 	releaseSequence, _ := strconv.ParseInt(telegramBuildSequence, 10, 64)
 	catalogSequence, _ := strconv.ParseInt(telegramBuildCatalogSequence, 10, 64)
 	identity := punarodiagnostic.Identity{MachineID: cfg.machineID, Release: telegramBuildRelease, ReleaseSequence: releaseSequence, CatalogSequence: catalogSequence, Protocol: relay.ProtocolVersion, Platform: runtime.GOOS + "-" + runtime.GOARCH}
-	report, reportErr := punarodiagnostic.New(punarodiagnostic.ComponentTelegram, identity, checks)
+	report, reportErr := punarodiagnostic.NewComponentReport(punarodiagnostic.ComponentTelegram, identity, checks)
 	return writeTelegramDoctorReport(stdout, stderr, report, reportErr)
 }
 

@@ -103,7 +103,12 @@ func TestFleetDoctorCLIAggregatesOnlyLocallyVerifiedSignedReports(t *testing.T) 
 
 func mustFleetDoctorReport(t *testing.T, component punarodiagnostic.Component, identity punarodiagnostic.Identity) punarodiagnostic.Report {
 	t.Helper()
-	report, err := punarodiagnostic.New(component, identity, []punarodiagnostic.Check{punarodiagnostic.Pass("ready")})
+	codes := punarodiagnostic.RequiredComponentCheckCodes(component)
+	checks := make([]punarodiagnostic.Check, 0, len(codes))
+	for _, code := range codes {
+		checks = append(checks, punarodiagnostic.Pass(code))
+	}
+	report, err := punarodiagnostic.New(component, identity, checks)
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -187,7 +187,7 @@ func runAdapterDoctor(args []string, stdout, stderr io.Writer) int {
 		}
 		checks = append(checks, unavailableRelayDoctorChecks("relay")...)
 		checks = append(checks, unavailableRelayDoctorChecks("notification")...)
-		report, reportErr := punarodiagnostic.New(punarodiagnostic.ComponentAdapter, punarodiagnostic.Identity{Platform: runtime.GOOS + "-" + runtime.GOARCH}, checks)
+		report, reportErr := punarodiagnostic.NewComponentReport(punarodiagnostic.ComponentAdapter, punarodiagnostic.Identity{Platform: runtime.GOOS + "-" + runtime.GOARCH}, checks)
 		return writeAdapterDoctorReport(stdout, stderr, report, reportErr)
 	}
 
@@ -289,7 +289,7 @@ func runAdapterDoctor(args []string, stdout, stderr io.Writer) int {
 		identity.CatalogSequence = bootstrapReport.Identity.CatalogSequence
 		identity.ArtifactDigest = bootstrapReport.Identity.ArtifactDigest
 	}
-	report, reportErr := punarodiagnostic.New(punarodiagnostic.ComponentAdapter, identity, checks)
+	report, reportErr := punarodiagnostic.NewComponentReport(punarodiagnostic.ComponentAdapter, identity, checks)
 	return writeAdapterDoctorReport(stdout, stderr, report, reportErr)
 }
 

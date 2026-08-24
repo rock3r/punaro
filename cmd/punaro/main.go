@@ -667,7 +667,7 @@ func runServerDoctor(args []string, stdout, stderr io.Writer) int {
 	defer cancel()
 	installation, err := serverDoctorLoad(ctx, *directory)
 	if err != nil {
-		report, reportErr := punarodiagnostic.New(punarodiagnostic.ComponentServer, punarodiagnostic.Identity{MachineID: *machineID, Platform: runtime.GOOS + "-" + runtime.GOARCH}, unavailableServerDoctorChecks(*gatewayColocated))
+		report, reportErr := punarodiagnostic.NewComponentReport(punarodiagnostic.ComponentServer, punarodiagnostic.Identity{MachineID: *machineID, Platform: runtime.GOOS + "-" + runtime.GOARCH}, unavailableServerDoctorChecks(*gatewayColocated))
 		if reportErr != nil || writeJSON(stdout, stderr, report) != 0 {
 			_, _ = fmt.Fprintln(stderr, "punaro doctor failed: diagnostic report unavailable")
 			return 2
@@ -713,7 +713,7 @@ func unavailableServerDoctorChecks(gatewayColocated bool) []punarodiagnostic.Che
 		"access_admission", "administration_listener_private", "application_credential_file", "attachment_blob_containment", "attachment_blob_directory",
 		"backup_directory", "backup_freshness", "blob_storage_private", "compose_manifest_binding", "compose_override", "daemon_environment", "data_directory",
 		"database_connection", "database_listener_private", "database_owner", "database_pair", "database_schema",
-		"health_endpoint", "health_listener_private", "host_update_stage", "image_digest_binding", "installed_release", "installation_directory", "machine_identity",
+		"health_endpoint", "health_listener_private", "host_update_stage", "image_digest_binding", "installed_release", "installation_directory", "installation_paths", "machine_identity",
 		"maintenance_fence", "migration_manifest_binding", "owner_credential_file", "postgres_major", "readiness_endpoint", "recovery_receipt", "relay_enrollment",
 		"relay_protocol", "running_image", "storage_capacity", "storage_credential_isolation", "storage_directory_separation", "tunnel_origin", "tunnel_route",
 		"update_recovery", "update_transaction", "verified_backup",
@@ -853,7 +853,7 @@ func diagnoseServer(ctx context.Context, installation operator.Installation, mac
 		checks = append(checks, punarodiagnostic.Pass("readiness_endpoint"))
 	}
 
-	return punarodiagnostic.New(punarodiagnostic.ComponentServer, identity, checks)
+	return punarodiagnostic.NewComponentReport(punarodiagnostic.ComponentServer, identity, checks)
 }
 
 func serverDoctorCapabilities(installation operator.Installation) []string {
@@ -926,7 +926,7 @@ var serverPathDiagnostics = []serverPathDiagnostic{
 }
 
 func unavailableServerPathChecks() []punarodiagnostic.Check {
-	checks := make([]punarodiagnostic.Check, 0, len(serverPathDiagnostics))
+	checks := make([]punarodiagnostic.Check, 0, len(serverPathDiagnostics)+1)
 	emitted := make(map[string]struct{}, len(serverPathDiagnostics))
 	for _, definition := range serverPathDiagnostics {
 		if _, duplicate := emitted[definition.code]; duplicate {
@@ -935,6 +935,7 @@ func unavailableServerPathChecks() []punarodiagnostic.Check {
 		emitted[definition.code] = struct{}{}
 		checks = append(checks, punarodiagnostic.Unavailable(definition.code, definition.remediation))
 	}
+	checks = append(checks, punarodiagnostic.Unavailable("installation_paths", "repair_installation_paths"))
 	return checks
 }
 
@@ -969,11 +970,17 @@ func serverPathChecks(failures []string) []punarodiagnostic.Check {
 	for _, definition := range serverPathDiagnostics {
 		known[definition.failure] = struct{}{}
 	}
+	unknownFailure := false
 	for _, failure := range failures {
 		if _, ok := known[failure]; !ok {
-			checks = append(checks, punarodiagnostic.Fail("installation_paths", "repair_installation_paths"))
+			unknownFailure = true
 			break
 		}
+	}
+	if unknownFailure {
+		checks = append(checks, punarodiagnostic.Fail("installation_paths", "repair_installation_paths"))
+	} else {
+		checks = append(checks, punarodiagnostic.Pass("installation_paths"))
 	}
 	return checks
 }
