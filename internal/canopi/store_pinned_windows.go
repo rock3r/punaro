@@ -145,24 +145,43 @@ func renamePinnedWindowsStateFile(directory *os.File, file *os.File, targetName 
 		return err
 	}
 	nameBytes := (len(name) - 1) * 2
+	nameLength, err := checkedWindowsInformationLength(nameBytes)
+	if err != nil {
+		return err
+	}
+	nameUnits := nameBytes / 2
+	if nameUnits > windows.MAX_LONG_PATH {
+		return errors.New("canopi state filename is too long")
+	}
 	var information pinnedWindowsFileRenameInformation
 	buffer := make([]byte, int(unsafe.Offsetof(information.FileName))+nameBytes)
-	typed := (*pinnedWindowsFileRenameInformation)(unsafe.Pointer(&buffer[0]))
+	bufferLength, err := checkedWindowsInformationLength(len(buffer))
+	if err != nil {
+		return err
+	}
+	typed := (*pinnedWindowsFileRenameInformation)(unsafe.Pointer(&buffer[0])) // #nosec G103 -- buffer is sized for this documented variable-length Windows structure.
 	typed.ReplaceIfExists = windows.FILE_RENAME_REPLACE_IF_EXISTS | windows.FILE_RENAME_POSIX_SEMANTICS
 	typed.RootDirectory = windows.Handle(directory.Fd())
-	typed.FileNameLength = uint32(nameBytes)
-	copy((*[windows.MAX_LONG_PATH]uint16)(unsafe.Pointer(&typed.FileName[0]))[:nameBytes/2:nameBytes/2], name)
+	typed.FileNameLength = nameLength
+	copy((*[windows.MAX_LONG_PATH]uint16)(unsafe.Pointer(&typed.FileName[0]))[:nameUnits:nameUnits], name) // #nosec G103 -- the checked name length bounds this documented trailing array.
 	var iosb windows.IO_STATUS_BLOCK
-	return windows.NtSetInformationFile(windows.Handle(file.Fd()), &iosb, &buffer[0], uint32(len(buffer)), windows.FileRenameInformation)
+	return windows.NtSetInformationFile(windows.Handle(file.Fd()), &iosb, &buffer[0], bufferLength, windows.FileRenameInformation)
 }
 
 func discardPinnedWindowsStateFile(file *os.File) error {
 	var iosb windows.IO_STATUS_BLOCK
 	deleteFile := []byte{1}
-	err := windows.NtSetInformationFile(windows.Handle(file.Fd()), &iosb, &deleteFile[0], uint32(len(deleteFile)), windows.FileDispositionInformation)
+	err := windows.NtSetInformationFile(windows.Handle(file.Fd()), &iosb, &deleteFile[0], 1, windows.FileDispositionInformation)
 	closeErr := file.Close()
 	if err != nil {
 		return err
 	}
 	return closeErr
+}
+
+func checkedWindowsInformationLength(length int) (uint32, error) {
+	if length < 0 || uint64(length) > uint64(^uint32(0)) {
+		return 0, errors.New("windows file information is too large")
+	}
+	return uint32(length), nil // #nosec G115 -- the range is checked above.
 }
