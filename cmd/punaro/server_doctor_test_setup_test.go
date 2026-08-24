@@ -10,6 +10,7 @@ func init() {
 	serverDoctorPathCheck = directServerDoctorPaths
 	serverDoctorStorageCheck = directServerDoctorStorage
 	serverDoctorBackupCheck = directServerDoctorBackups
+	serverDoctorFileDigest = directServerDoctorFileDigest
 	serverDoctorProfileLoad = loadServerDoctorProfile
 	serverDoctorRecoveryReceiptCheck = func(_ context.Context, request serverDoctorRecoveryReceiptRequest) knownDoctorBool {
 		return inspectServerDoctorRecoveryReceipt(request)

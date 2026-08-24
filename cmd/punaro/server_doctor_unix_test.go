@@ -30,9 +30,9 @@ func TestFileDigestMatchesHonorsDeadlineInIsolatedReader(t *testing.T) {
 		t.Fatal(err)
 	}
 	previous := serverDoctorFileDigest
-	serverDoctorFileDigest = func(ctx context.Context, _ string) (string, bool) {
+	serverDoctorFileDigest = func(ctx context.Context, _ string) serverDoctorFileDigestState {
 		<-ctx.Done()
-		return "", false
+		return serverDoctorFileDigestState{}
 	}
 	t.Cleanup(func() { serverDoctorFileDigest = previous })
 	ctx, cancel := context.WithTimeout(t.Context(), 20*time.Millisecond)

@@ -557,8 +557,26 @@ func TestDoctorFileDigestCommandValidatesAndHashesRegularFile(t *testing.T) {
 		t.Fatalf("digest command code=%d", code)
 	}
 	want := sha256.Sum256(body)
-	if got := strings.TrimSpace(stdout.String()); got != hex.EncodeToString(want[:]) {
-		t.Fatalf("digest=%q want=%x", got, want)
+	var state serverDoctorFileDigestState
+	if json.Unmarshal(stdout.Bytes(), &state) != nil || !state.Known || state.Digest != hex.EncodeToString(want[:]) {
+		t.Fatalf("digest state=%#v want=%x", state, want)
+	}
+}
+
+func TestDoctorFileDigestDelegatesCompleteInspectionToIsolatedHelper(t *testing.T) {
+	previous := serverDoctorFileDigest
+	called := false
+	serverDoctorFileDigest = func(_ context.Context, path string) serverDoctorFileDigestState {
+		called = true
+		if path != "/stalled/compose.operator.yaml" {
+			t.Fatalf("digest path=%q", path)
+		}
+		return serverDoctorFileDigestState{}
+	}
+	t.Cleanup(func() { serverDoctorFileDigest = previous })
+	state := fileDigestMatches(t.Context(), "/stalled/compose.operator.yaml", strings.Repeat("a", 64))
+	if !called || state.Known {
+		t.Fatalf("isolated digest called=%t state=%#v", called, state)
 	}
 }
 

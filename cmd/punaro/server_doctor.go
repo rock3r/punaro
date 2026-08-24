@@ -9,7 +9,6 @@ import (
 	"encoding/json"
 	"errors"
 	"flag"
-	"fmt"
 	"io"
 	"net/http"
 	"os"
@@ -61,6 +60,11 @@ type serverDoctorPathRequest struct {
 type serverDoctorBackupState struct {
 	Available knownDoctorBool `json:"available"`
 	Fresh     knownDoctorBool `json:"fresh"`
+}
+
+type serverDoctorFileDigestState struct {
+	Known  bool   `json:"known"`
+	Digest string `json:"digest,omitempty"`
 }
 
 type serverDoctorProfilePayload struct {
@@ -552,41 +556,40 @@ func fileDigestMatches(ctx context.Context, path, expected string) knownDoctorBo
 	if ctx.Err() != nil {
 		return knownDoctorBool{}
 	}
-	info, err := os.Lstat(path) // #nosec G703 -- fixed generated file below the validated installation root.
-	if err != nil || !info.Mode().IsRegular() || info.Mode()&os.ModeSymlink != 0 {
-		return known(true, false)
-	}
-	digest, ok := serverDoctorFileDigest(ctx, path)
-	if ctx.Err() != nil || !ok {
+	state := serverDoctorFileDigest(ctx, path)
+	if ctx.Err() != nil || !state.Known {
 		return knownDoctorBool{}
 	}
-	return known(true, digest == expected)
+	return known(true, state.Digest == expected)
 }
 
 var serverDoctorFileDigest = isolatedServerDoctorFileDigest
 
-func isolatedServerDoctorFileDigest(ctx context.Context, path string) (string, bool) {
+func isolatedServerDoctorFileDigest(ctx context.Context, path string) serverDoctorFileDigestState {
 	executable, err := os.Executable()
 	if err != nil {
-		return "", false
+		return serverDoctorFileDigestState{}
 	}
 	output, ok := boundedCommand(ctx, executable, "doctor-file-digest", "--path", path)
-	digest := strings.TrimSpace(output)
-	if !ok || len(digest) != 64 {
-		return "", false
+	if !ok {
+		return serverDoctorFileDigestState{}
 	}
-	if _, err := hex.DecodeString(digest); err != nil {
-		return "", false
+	decoder := json.NewDecoder(strings.NewReader(output))
+	decoder.DisallowUnknownFields()
+	var state serverDoctorFileDigestState
+	if decoder.Decode(&state) != nil || decoder.Decode(&struct{}{}) != io.EOF || !state.Known || state.Digest != "" && len(state.Digest) != 64 {
+		return serverDoctorFileDigestState{}
 	}
-	return digest, true
+	if state.Digest != "" {
+		if _, err := hex.DecodeString(state.Digest); err != nil {
+			return serverDoctorFileDigestState{}
+		}
+	}
+	return state
 }
 
-func directServerDoctorFileDigest(_ context.Context, path string) (string, bool) {
-	var output strings.Builder
-	if runDoctorFileDigest([]string{"--path", path}, &output) != 0 {
-		return "", false
-	}
-	return strings.TrimSpace(output.String()), true
+func directServerDoctorFileDigest(_ context.Context, path string) serverDoctorFileDigestState {
+	return inspectServerDoctorFileDigest(path)
 }
 
 func runDoctorFileDigest(args []string, stdout io.Writer) int {
@@ -596,26 +599,42 @@ func runDoctorFileDigest(args []string, stdout io.Writer) int {
 	if flags.Parse(args) != nil || flags.NArg() != 0 || *path == "" || !filepath.IsAbs(*path) || filepath.Clean(*path) != *path {
 		return 2
 	}
-	expected, err := os.Lstat(*path) // #nosec G703 -- explicit fixed doctor input.
-	if err != nil || !expected.Mode().IsRegular() || expected.Mode()&os.ModeSymlink != 0 || expected.Size() < 1 || expected.Size() > 1<<20 {
+	state := inspectServerDoctorFileDigest(*path)
+	if !state.Known {
 		return 1
 	}
-	file, err := os.Open(*path) // #nosec G304,G703 -- child-isolated validated doctor input.
-	if err != nil {
+	if json.NewEncoder(stdout).Encode(state) != nil {
 		return 1
+	}
+	return 0
+}
+
+func inspectServerDoctorFileDigest(path string) serverDoctorFileDigestState {
+	expected, err := os.Lstat(path) // #nosec G703 -- explicit fixed doctor input inside deadline-killed helper.
+	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return serverDoctorFileDigestState{Known: true}
+		}
+		return serverDoctorFileDigestState{}
+	}
+	if !expected.Mode().IsRegular() || expected.Mode()&os.ModeSymlink != 0 || expected.Size() < 1 || expected.Size() > 1<<20 {
+		return serverDoctorFileDigestState{Known: true}
+	}
+	file, err := os.Open(path) // #nosec G304,G703 -- child-isolated validated doctor input.
+	if err != nil {
+		return serverDoctorFileDigestState{}
 	}
 	defer func() { _ = file.Close() }()
 	opened, err := file.Stat()
 	if err != nil || !opened.Mode().IsRegular() || !os.SameFile(expected, opened) || opened.Size() != expected.Size() {
-		return 1
+		return serverDoctorFileDigestState{}
 	}
 	hash := sha256.New()
 	written, err := io.CopyN(hash, file, (1<<20)+1)
 	if err != nil && !errors.Is(err, io.EOF) || written != opened.Size() {
-		return 1
+		return serverDoctorFileDigestState{}
 	}
-	_, _ = fmt.Fprintln(stdout, hex.EncodeToString(hash.Sum(nil)))
-	return 0
+	return serverDoctorFileDigestState{Known: true, Digest: hex.EncodeToString(hash.Sum(nil))}
 }
 
 func inspectInstalledRelease(image string) knownDoctorBool {
