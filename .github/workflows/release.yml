@@ -43,124 +43,21 @@ permissions:
   contents: read
 
 jobs:
-  image:
-    name: Publish digest-pinned gateway image
+  preflight:
+    name: Validate release request before publication
     runs-on: ubuntu-latest
     permissions:
       contents: read
-      packages: write
     outputs:
-      image: ${{ steps.publish.outputs.image }}
+      release: ${{ steps.identity.outputs.release }}
+      sequence: ${{ steps.identity.outputs.sequence }}
+      catalog_sequence: ${{ steps.identity.outputs.catalog_sequence }}
+      minimum_bootstrap_release: ${{ steps.identity.outputs.minimum_bootstrap_release }}
+      minimum_safe_sequence: ${{ steps.identity.outputs.minimum_safe_sequence }}
+      critical_blocks: ${{ steps.identity.outputs.critical_blocks }}
+      supported_from: ${{ steps.identity.outputs.supported_from }}
     steps:
-      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
-      - uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6
-        with:
-          go-version-file: go.mod
-      - name: Publish image with SBOM and provenance
-        id: publish
-        env:
-          GHCR_TOKEN: ${{ github.token }}
-          RELEASE: ${{ inputs.release }}
-          SEQUENCE: ${{ inputs.sequence }}
-          CATALOG_SEQUENCE: ${{ inputs.catalog_sequence }}
-        run: |
-          set -eu
-          repository="ghcr.io/${GITHUB_REPOSITORY_OWNER,,}/punaro"
-          facts=$(env -u GOOS -u GOARCH -u CGO_ENABLED go run ./cmd/punaro-release build-facts \
-            --release "$RELEASE" \
-            --plugin-root "$PWD")
-          compose_sha256=$(printf '%s\n' "$facts" | jq -er .compose_sha256)
-          migration_sha256=$(printf '%s\n' "$facts" | jq -er .migration_manifest_sha256)
-          skill_sha256=$(printf '%s\n' "$facts" | jq -er .skill_set_sha256)
-          plugin_runtime_sha256=$(printf '%s\n' "$facts" | jq -er .plugin_runtime_sha256)
-          printf '%s' "$GHCR_TOKEN" | docker login ghcr.io --username "$GITHUB_ACTOR" --password-stdin
-          metadata="$RUNNER_TEMP/punaro-image-metadata.json"
-          docker buildx build \
-            --platform linux/amd64 \
-            --provenance mode=max \
-            --sbom true \
-            --build-arg "PUNARO_RELEASE=$RELEASE" \
-            --build-arg "PUNARO_SEQUENCE=$SEQUENCE" \
-            --build-arg "PUNARO_CATALOG_SEQUENCE=$CATALOG_SEQUENCE" \
-            --build-arg "PUNARO_IMAGE=$repository:$RELEASE" \
-            --build-arg "PUNARO_COMPOSE_SHA256=$compose_sha256" \
-            --build-arg "PUNARO_MIGRATION_SHA256=$migration_sha256" \
-            --build-arg "PUNARO_SKILL_SET_SHA256=$skill_sha256" \
-            --build-arg "PUNARO_PLUGIN_RUNTIME_SHA256=$plugin_runtime_sha256" \
-            --label "org.opencontainers.image.revision=$GITHUB_SHA" \
-            --label "org.opencontainers.image.version=$RELEASE" \
-            --metadata-file "$metadata" \
-            --tag "$repository:$RELEASE" \
-            --push .
-          digest=$(jq -er '."containerimage.digest"' "$metadata")
-          case "$digest" in sha256:[0-9a-f][0-9a-f]*) ;; *) printf '%s\n' 'published image digest is invalid' >&2; exit 2 ;; esac
-          [ "${#digest}" -eq 71 ] || { printf '%s\n' 'published image digest is invalid' >&2; exit 2; }
-          image="$repository@$digest"
-          printf 'image=%s\n' "$image" >>"$GITHUB_OUTPUT"
-
-  build:
-    name: Build ${{ matrix.goos }}/${{ matrix.goarch }}
-    needs: image
-    runs-on: ${{ matrix.runner }}
-    strategy:
-      fail-fast: true
-      matrix:
-        include:
-          - runner: macos-14
-            goos: darwin
-            goarch: arm64
-            cgo: '1'
-          - runner: ubuntu-latest
-            goos: linux
-            goarch: amd64
-            cgo: '0'
-          - runner: ubuntu-latest
-            goos: linux
-            goarch: arm64
-            cgo: '0'
-          - runner: windows-latest
-            goos: windows
-            goarch: amd64
-            cgo: '0'
-    steps:
-      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
-      - uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6
-        with:
-          go-version-file: go.mod
-      - name: Build native artifacts
-        shell: bash
-        env:
-          GOOS: ${{ matrix.goos }}
-          GOARCH: ${{ matrix.goarch }}
-          CGO_ENABLED: ${{ matrix.cgo }}
-        run: >-
-          ./scripts/build-release-artifacts.sh --output-dir dist
-          --release "${{ inputs.release }}"
-          --sequence "${{ inputs.sequence }}"
-          --catalog-sequence "${{ inputs.catalog_sequence }}"
-          --image "${{ needs.image.outputs.image }}"
-      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
-        with:
-          name: punaro-${{ matrix.goos }}-${{ matrix.goarch }}
-          path: dist/*
-          if-no-files-found: error
-
-  publish:
-    name: Assemble catalog and draft GitHub Release
-    needs: [image, build]
-    runs-on: ubuntu-latest
-    permissions:
-      contents: write
-    steps:
-      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
-      - uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6
-        with:
-          go-version-file: go.mod
-      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
-        with:
-          path: dist
-          merge-multiple: true
-      - name: Resolve release identity
+      - name: Resolve release identity and policy
         id: identity
         env:
           INPUT_RELEASE: ${{ inputs.release }}
@@ -240,6 +137,10 @@ jobs:
               fi
             done
           fi
+          if gh release view "$release" >/dev/null 2>&1; then
+            printf '%s\n' "release $release already exists" >&2
+            exit 2
+          fi
           {
             printf 'release=%s\n' "$release"
             printf 'sequence=%s\n' "$sequence"
@@ -249,15 +150,134 @@ jobs:
             printf 'critical_blocks=%s\n' "$critical_blocks"
             printf 'supported_from=%s\n' "$supported_from"
           } >>"$GITHUB_OUTPUT"
+
+  image:
+    name: Publish digest-pinned gateway image
+    needs: preflight
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    outputs:
+      image: ${{ steps.publish.outputs.image }}
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
+      - uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6
+        with:
+          go-version-file: go.mod
+      - name: Publish image with SBOM and provenance
+        id: publish
+        env:
+          GHCR_TOKEN: ${{ github.token }}
+          RELEASE: ${{ needs.preflight.outputs.release }}
+          SEQUENCE: ${{ needs.preflight.outputs.sequence }}
+          CATALOG_SEQUENCE: ${{ needs.preflight.outputs.catalog_sequence }}
+        run: |
+          set -eu
+          repository="ghcr.io/${GITHUB_REPOSITORY_OWNER,,}/punaro"
+          facts=$(env -u GOOS -u GOARCH -u CGO_ENABLED go run ./cmd/punaro-release build-facts \
+            --release "$RELEASE" \
+            --plugin-root "$PWD")
+          compose_sha256=$(printf '%s\n' "$facts" | jq -er .compose_sha256)
+          migration_sha256=$(printf '%s\n' "$facts" | jq -er .migration_manifest_sha256)
+          skill_sha256=$(printf '%s\n' "$facts" | jq -er .skill_set_sha256)
+          plugin_runtime_sha256=$(printf '%s\n' "$facts" | jq -er .plugin_runtime_sha256)
+          printf '%s' "$GHCR_TOKEN" | docker login ghcr.io --username "$GITHUB_ACTOR" --password-stdin
+          metadata="$RUNNER_TEMP/punaro-image-metadata.json"
+          docker buildx build \
+            --platform linux/amd64 \
+            --provenance mode=max \
+            --sbom true \
+            --build-arg "PUNARO_RELEASE=$RELEASE" \
+            --build-arg "PUNARO_SEQUENCE=$SEQUENCE" \
+            --build-arg "PUNARO_CATALOG_SEQUENCE=$CATALOG_SEQUENCE" \
+            --build-arg "PUNARO_IMAGE=$repository:$RELEASE" \
+            --build-arg "PUNARO_COMPOSE_SHA256=$compose_sha256" \
+            --build-arg "PUNARO_MIGRATION_SHA256=$migration_sha256" \
+            --build-arg "PUNARO_SKILL_SET_SHA256=$skill_sha256" \
+            --build-arg "PUNARO_PLUGIN_RUNTIME_SHA256=$plugin_runtime_sha256" \
+            --label "org.opencontainers.image.revision=$GITHUB_SHA" \
+            --label "org.opencontainers.image.version=$RELEASE" \
+            --metadata-file "$metadata" \
+            --tag "$repository:$RELEASE" \
+            --push .
+          digest=$(jq -er '."containerimage.digest"' "$metadata")
+          case "$digest" in sha256:[0-9a-f][0-9a-f]*) ;; *) printf '%s\n' 'published image digest is invalid' >&2; exit 2 ;; esac
+          [ "${#digest}" -eq 71 ] || { printf '%s\n' 'published image digest is invalid' >&2; exit 2; }
+          image="$repository@$digest"
+          printf 'image=%s\n' "$image" >>"$GITHUB_OUTPUT"
+
+  build:
+    name: Build ${{ matrix.goos }}/${{ matrix.goarch }}
+    needs: [preflight, image]
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: true
+      matrix:
+        include:
+          - runner: macos-14
+            goos: darwin
+            goarch: arm64
+            cgo: '1'
+          - runner: ubuntu-latest
+            goos: linux
+            goarch: amd64
+            cgo: '0'
+          - runner: ubuntu-latest
+            goos: linux
+            goarch: arm64
+            cgo: '0'
+          - runner: windows-latest
+            goos: windows
+            goarch: amd64
+            cgo: '0'
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
+      - uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6
+        with:
+          go-version-file: go.mod
+      - name: Build native artifacts
+        shell: bash
+        env:
+          GOOS: ${{ matrix.goos }}
+          GOARCH: ${{ matrix.goarch }}
+          CGO_ENABLED: ${{ matrix.cgo }}
+        run: >-
+          ./scripts/build-release-artifacts.sh --output-dir dist
+          --release "${{ needs.preflight.outputs.release }}"
+          --sequence "${{ needs.preflight.outputs.sequence }}"
+          --catalog-sequence "${{ needs.preflight.outputs.catalog_sequence }}"
+          --image "${{ needs.image.outputs.image }}"
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: punaro-${{ matrix.goos }}-${{ matrix.goarch }}
+          path: dist/*
+          if-no-files-found: error
+
+  publish:
+    name: Assemble catalog and draft GitHub Release
+    needs: [preflight, image, build]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
+      - uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6
+        with:
+          go-version-file: go.mod
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          path: dist
+          merge-multiple: true
       - name: Assemble unsigned catalog and manifest
         env:
-          RELEASE: ${{ steps.identity.outputs.release }}
-          SEQUENCE: ${{ steps.identity.outputs.sequence }}
-          CATALOG_SEQUENCE: ${{ steps.identity.outputs.catalog_sequence }}
-          MINIMUM_BOOTSTRAP_RELEASE: ${{ steps.identity.outputs.minimum_bootstrap_release }}
-          MINIMUM_SAFE_SEQUENCE: ${{ steps.identity.outputs.minimum_safe_sequence }}
-          CRITICAL_BLOCKS: ${{ steps.identity.outputs.critical_blocks }}
-          SUPPORTED_FROM: ${{ steps.identity.outputs.supported_from }}
+          RELEASE: ${{ needs.preflight.outputs.release }}
+          SEQUENCE: ${{ needs.preflight.outputs.sequence }}
+          CATALOG_SEQUENCE: ${{ needs.preflight.outputs.catalog_sequence }}
+          MINIMUM_BOOTSTRAP_RELEASE: ${{ needs.preflight.outputs.minimum_bootstrap_release }}
+          MINIMUM_SAFE_SEQUENCE: ${{ needs.preflight.outputs.minimum_safe_sequence }}
+          CRITICAL_BLOCKS: ${{ needs.preflight.outputs.critical_blocks }}
+          SUPPORTED_FROM: ${{ needs.preflight.outputs.supported_from }}
           RELEASE_PUBLIC_KEYS: ${{ vars.PUNARO_RELEASE_PUBLIC_KEYS }}
           GH_TOKEN: ${{ github.token }}
         run: |
@@ -314,7 +334,7 @@ jobs:
           fi
       - name: Publish GitHub Releases
         env:
-          RELEASE: ${{ steps.identity.outputs.release }}
+          RELEASE: ${{ needs.preflight.outputs.release }}
           GH_TOKEN: ${{ github.token }}
         run: |
           set -eu

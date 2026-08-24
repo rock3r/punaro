@@ -42,6 +42,14 @@ if ! grep -Fq -- '--provenance mode=max' "$repo_dir/.github/workflows/release.ym
 	printf '%s\n' 'release workflow does not publish and bind the attested GHCR image' >&2
 	exit 1
 fi
+if ! grep -Fq '  preflight:' "$repo_dir/.github/workflows/release.yml" ||
+	! grep -Fq 'needs: preflight' "$repo_dir/.github/workflows/release.yml" ||
+	! grep -Fq 'needs.preflight.outputs.release' "$repo_dir/.github/workflows/release.yml" ||
+	! grep -Fq 'needs.preflight.outputs.minimum_safe_sequence' "$repo_dir/.github/workflows/release.yml" ||
+	! grep -Fq 'gh release view "$release"' "$repo_dir/.github/workflows/release.yml"; then
+	printf '%s\n' 'release workflow does not validate every release input before the image job' >&2
+	exit 1
+fi
 if ! grep -Fq 'ARG PUNARO_RELEASE' "$repo_dir/Dockerfile" ||
 	! grep -Fq 'COPY .mcp.json mcp.json ./' "$repo_dir/Dockerfile" ||
 	! grep -Fq 'COPY scripts/punaro-plugin-mcp scripts/punaro-plugin-mcp.cmd ./scripts/' "$repo_dir/Dockerfile" ||
