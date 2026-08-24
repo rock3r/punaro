@@ -527,3 +527,32 @@ func TestProviderEnqueueBudgetsStayBelowClaudeHookDeadline(t *testing.T) {
 		t.Fatalf("primary budget = %s, must leave time for the durable contention lane", maxPrimaryLaneBudget)
 	}
 }
+
+func TestSpoolOperationReturnsWhenHookDeadlineExpires(t *testing.T) {
+	started := make(chan struct{})
+	release := make(chan struct{})
+	operationDone := make(chan struct{})
+	ctx, cancel := context.WithTimeout(context.Background(), 25*time.Millisecond)
+	defer cancel()
+
+	startedAt := time.Now()
+	err := runSpoolOperation(ctx, func() error {
+		close(started)
+		<-release
+		close(operationDone)
+		return nil
+	})
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("runSpoolOperation() = %v, want deadline exceeded", err)
+	}
+	if elapsed := time.Since(startedAt); elapsed > 500*time.Millisecond {
+		t.Fatalf("deadline-bounded spool operation took %s", elapsed)
+	}
+	<-started
+	close(release)
+	select {
+	case <-operationDone:
+	case <-time.After(time.Second):
+		t.Fatal("blocked spool operation did not finish after release")
+	}
+}

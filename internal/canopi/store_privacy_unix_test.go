@@ -8,6 +8,8 @@ import (
 	"path/filepath"
 	"testing"
 	"time"
+
+	"github.com/rock3r/punaro/canopi/protocol"
 )
 
 func TestStateRepairLockSerializesConcurrentRepair(t *testing.T) {
@@ -114,6 +116,58 @@ func TestOpenStoreExcludesWriterThroughSymlinkedParentAlias(t *testing.T) {
 	second, err := OpenStore(filepath.Join(aliasDirectory, "state", "state.json"), DefaultConfig())
 	if !errors.Is(err, ErrStateStoreLocked) || second != nil {
 		t.Fatalf("OpenStore() through parent alias = %#v, %v; want ErrStateStoreLocked", second, err)
+	}
+}
+
+func TestOpenStorePinsPersistenceAcrossParentAliasRetarget(t *testing.T) {
+	root := t.TempDir()
+	firstRoot := filepath.Join(root, "first")
+	secondRoot := filepath.Join(root, "second")
+	for _, directory := range []string{
+		filepath.Join(firstRoot, "state"),
+		filepath.Join(secondRoot, "state"),
+	} {
+		if err := os.MkdirAll(directory, 0o700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	alias := filepath.Join(root, "current")
+	if err := os.Symlink(firstRoot, alias); err != nil {
+		t.Fatal(err)
+	}
+	store, err := OpenStore(filepath.Join(alias, "state", "state.json"), DefaultConfig())
+	if err != nil {
+		t.Fatal(err)
+	}
+	now := time.Now().UTC()
+	if result, err := store.Apply(event("event-1", "agent", protocol.StateWorking, now)); err != nil || !result.Applied {
+		t.Fatalf("first Apply() = %+v, %v", result, err)
+	}
+	if err := os.Remove(alias); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(secondRoot, alias); err != nil {
+		t.Fatal(err)
+	}
+	if result, err := store.Apply(event("event-2", "agent", protocol.StateDone, now.Add(time.Second))); err != nil || !result.Applied {
+		t.Fatalf("second Apply() = %+v, %v", result, err)
+	}
+	if err := store.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	pinnedPath := filepath.Join(firstRoot, "state", "state.json")
+	reopened, err := OpenStore(pinnedPath, DefaultConfig())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = reopened.Close() }()
+	snapshot := reopened.Snapshot(now.Add(time.Second))
+	if snapshot.Revision != 2 || len(snapshot.Agents) != 1 || snapshot.Agents[0].EventID != "event-2" {
+		t.Fatalf("pinned snapshot = %#v, want revision 2 with event-2", snapshot)
+	}
+	if _, err := os.Stat(filepath.Join(secondRoot, "state", "state.json")); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("retargeted state path was written: %v", err)
 	}
 }
 

@@ -54,7 +54,7 @@ func (s Spool) Enqueue(event protocol.Event) error {
 	if err != nil {
 		return err
 	}
-	if err := config.ensureDirectory(); err != nil {
+	if err := runSpoolOperation(operationCtx, config.ensureDirectory); err != nil {
 		return err
 	}
 	if err := contextErr(operationCtx); err != nil {
@@ -485,6 +485,19 @@ func contextErr(ctx context.Context) error {
 		return ctx.Err()
 	default:
 		return nil
+	}
+}
+
+func runSpoolOperation(ctx context.Context, operation func() error) error {
+	result := make(chan error, 1)
+	go func() {
+		result <- operation()
+	}()
+	select {
+	case err := <-result:
+		return err
+	case <-ctx.Done():
+		return ctx.Err()
 	}
 }
 

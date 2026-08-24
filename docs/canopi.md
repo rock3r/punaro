@@ -157,11 +157,13 @@ interrupted replacement left the target absent. Every later replacement first
 recovers or clears a leftover backup, so a failed flush or cleanup cannot wedge
 subsequent ingestion. A kernel-held lifetime lock per
 state path rejects overlapping collector writers and is released by `Close` or
-process exit. Windows canonicalizes case aliases before deriving the lock path.
-It resolves the existing state file or its parent by handle, collapsing extended
-device paths, short names, case variants, and directory aliases to one identity.
-Unix resolves the existing state path or its parent before hashing, so paths
-whose ancestors traverse symlinks cannot acquire separate writer locks.
+process exit. The collector canonicalizes and pins the state file's parent
+directory before locking, recovery, reads, and every later replacement, so
+retargeting an ancestor symlink cannot divert persistence away from the locked
+identity. Windows resolves that parent by handle and canonicalizes case,
+collapsing extended device paths, short names, case variants, and directory
+aliases. Unix resolves all parent symlinks. The state file itself remains subject
+to the no-link checks above rather than resolving a file link to its target.
 The predictable state-lock file itself is created exclusively and opened without
 following links; an unsafe pre-existing entry is removed, directory-synced, and
 recreated with current-user-only protection. Cross-process repair is serialized
@@ -273,9 +275,10 @@ mutex on Windows, so concurrent hooks cannot unlink each other's replacement loc
 The configured spool capacity includes a fixed contention reserve (one sixteenth,
 at least one and at most 256 slots). Normal and contention lanes therefore remain
 jointly bounded while concurrent hooks can publish without waiting past their
-provider deadline. The complete hook-facing enqueue is capped at 1.75 seconds,
-not just its lock acquisition. The primary phase defaults to 250 ms and is capped
-at 750 ms; cleanup and capacity scans use cancellable 128-entry batches, and an
+provider deadline. The complete hook-facing enqueue, including directory
+creation and protection, is capped at 1.75 seconds, not just its lock acquisition.
+The primary phase defaults to 250 ms and is capped at 750 ms; cleanup and capacity
+scans use cancellable 128-entry batches, and an
 exhausted primary budget immediately falls through to the contention reserve.
 Active contention temporaries hold kernel locks, so cleanup
 can reclaim crash leftovers without deleting an in-progress publication. A

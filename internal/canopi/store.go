@@ -154,12 +154,18 @@ func OpenStore(path string, config Config) (*Store, error) {
 	if err != nil {
 		return nil, err
 	}
-	store := NewStore(normalized)
-	store.persist = func(state persistedStore) error { return persistStore(path, state, normalized.MaxStateBytes) }
 	if err := prepareStateDirectory(filepath.Dir(path)); err != nil {
 		return nil, fmt.Errorf("protect Canopi state directory: %w", err)
 	}
-	release, err := acquireStateStoreLock(path)
+	pinnedPath, err := canonicalStateLockIdentity(path)
+	if err != nil {
+		return nil, fmt.Errorf("pin Canopi state path: %w", err)
+	}
+	store := NewStore(normalized)
+	store.persist = func(state persistedStore) error {
+		return persistStore(pinnedPath, state, normalized.MaxStateBytes)
+	}
+	release, err := acquireStateStoreLock(pinnedPath)
 	if err != nil {
 		return nil, fmt.Errorf("lock Canopi state: %w", err)
 	}
@@ -170,10 +176,10 @@ func OpenStore(path string, config Config) (*Store, error) {
 			_ = store.Close()
 		}
 	}()
-	if err := recoverStateReplacement(path); err != nil {
+	if err := recoverStateReplacement(pinnedPath); err != nil {
 		return nil, fmt.Errorf("recover Canopi state replacement: %w", err)
 	}
-	file, err := openPrivateStateFile(path)
+	file, err := openPrivateStateFile(pinnedPath)
 	if errors.Is(err, os.ErrNotExist) {
 		keepOpen = true
 		return store, nil

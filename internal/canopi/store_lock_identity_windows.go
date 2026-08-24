@@ -11,11 +11,6 @@ import (
 )
 
 func canonicalStateLockIdentity(path string) (string, error) {
-	if final, err := finalWindowsPath(path); err == nil {
-		return strings.ToLower(final), nil
-	} else if !errors.Is(err, windows.ERROR_FILE_NOT_FOUND) && !errors.Is(err, windows.ERROR_PATH_NOT_FOUND) {
-		return "", err
-	}
 	parent, err := finalWindowsPath(filepath.Dir(path))
 	if err != nil {
 		return "", err
