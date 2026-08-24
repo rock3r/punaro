@@ -33,17 +33,40 @@ jobs:
       - uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6
         with:
           go-version-file: go.mod
+      - name: Validate notarization request
+        env:
+          INPUT_RELEASE: ${{ inputs.release }}
+          INPUT_SEQUENCE: ${{ inputs.sequence }}
+          INPUT_CATALOG_SEQUENCE: ${{ inputs.catalog_sequence }}
+          INPUT_IMAGE: ${{ inputs.image }}
+        run: |
+          set -eu
+          case "$INPUT_SEQUENCE" in ''|*[!0-9]*) printf '%s\n' 'sequence must be a positive integer' >&2; exit 2 ;; esac
+          case "$INPUT_CATALOG_SEQUENCE" in ''|*[!0-9]*) printf '%s\n' 'catalog sequence must be a positive integer' >&2; exit 2 ;; esac
+          go run ./cmd/punaro-release validate-request \
+            --release "$INPUT_RELEASE" \
+            --sequence "$INPUT_SEQUENCE" \
+            --catalog-sequence "$INPUT_CATALOG_SEQUENCE" \
+            --minimum-bootstrap-release "$INPUT_RELEASE"
+          if ! printf '%s\n' "$INPUT_IMAGE" | grep -Eq '^ghcr\.io/rock3r/punaro@sha256:[0-9a-f]{64}$'; then
+            printf '%s\n' 'image must be the digest-pinned Punaro GHCR image' >&2
+            exit 2
+          fi
       - name: Build Darwin arm64 artifacts
         env:
           GOOS: darwin
           GOARCH: arm64
           CGO_ENABLED: '1'
+          INPUT_RELEASE: ${{ inputs.release }}
+          INPUT_SEQUENCE: ${{ inputs.sequence }}
+          INPUT_CATALOG_SEQUENCE: ${{ inputs.catalog_sequence }}
+          INPUT_IMAGE: ${{ inputs.image }}
         run: >-
           ./scripts/build-release-artifacts.sh --output-dir dist
-          --release "${{ inputs.release }}"
-          --sequence "${{ inputs.sequence }}"
-          --catalog-sequence "${{ inputs.catalog_sequence }}"
-          --image "${{ inputs.image }}"
+          --release "$INPUT_RELEASE"
+          --sequence "$INPUT_SEQUENCE"
+          --catalog-sequence "$INPUT_CATALOG_SEQUENCE"
+          --image "$INPUT_IMAGE"
       - name: Import Developer ID certificate
         env:
           MACOS_DEVELOPER_ID_APPLICATION_P12: ${{ secrets.MACOS_DEVELOPER_ID_APPLICATION_P12 }}

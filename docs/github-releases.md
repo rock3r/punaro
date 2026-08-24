@@ -43,7 +43,10 @@ The `macos-notarize` workflow is `workflow_dispatch` only. It builds
 signs each binary under `dev.sebastiano.punaro.<component>`, wraps them in a
 UDZO DMG (the only staple-able container we ship today), notarizes with the
 Apple ID + app-specific password, and staples the ticket. It uploads the DMG
-as a workflow artifact and does not create a GitHub Release.
+as a workflow artifact and does not create a GitHub Release. Before any
+secret-bearing step, it validates the release and sequence policy plus the
+exact digest-pinned Punaro GHCR image; dispatch inputs are passed through the
+environment and consumed as quoted values.
 
 ```sh
 gh workflow run macos-notarize.yml --repo rock3r/punaro --ref <branch>
