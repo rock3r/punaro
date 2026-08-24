@@ -1,6 +1,7 @@
 package backup
 
 import (
+	"context"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
@@ -11,6 +12,42 @@ import (
 	"testing"
 	"time"
 )
+
+func TestListContextStopsBeforeVerificationWhenCanceled(t *testing.T) {
+	root := t.TempDir()
+	requirePrivate(t, root)
+	ctx, cancel := context.WithCancel(t.Context())
+	cancel()
+	if _, err := ListContext(ctx, root); err == nil {
+		t.Fatal("canceled backup listing continued into verification")
+	}
+}
+
+func TestReadManifestContextHonorsCancellation(t *testing.T) {
+	directory := t.TempDir()
+	requirePrivate(t, directory)
+	paths := writeRequiredTestFiles(t, directory)
+	manifest := testManifest(t, directory, paths)
+	writeManifest(t, directory, manifest)
+	ctx, cancel := context.WithCancel(t.Context())
+	cancel()
+	if _, _, err := readManifestContext(ctx, filepath.Join(directory, manifestName)); err == nil {
+		t.Fatal("canceled manifest read continued")
+	}
+}
+
+func TestListContextLimitStopsAfterBoundedRootEntries(t *testing.T) {
+	root := t.TempDir()
+	requirePrivate(t, root)
+	for _, name := range []string{"one", "two"} {
+		if err := os.Mkdir(filepath.Join(root, name), 0o700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if _, err := ListContextLimit(t.Context(), root, 1); err == nil {
+		t.Fatal("bounded backup listing accepted excess root entries")
+	}
+}
 
 func TestVerifyAcceptsExactPrivateBackup(t *testing.T) {
 	directory := t.TempDir()

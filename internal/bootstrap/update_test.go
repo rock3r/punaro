@@ -334,7 +334,23 @@ func TestUpdateRejectsStaleCatalog(t *testing.T) {
 }
 
 func TestUpdateRejectsCriticalBlock(t *testing.T) {
-	origin := newSignedOrigin(t, originSpec{payload: testArtifact, goos: runtime.GOOS, goarch: runtime.GOARCH, criticalBlocks: []int64{1}})
+	origin := newSignedOrigin(t, originSpec{payload: testArtifact, goos: runtime.GOOS, goarch: runtime.GOARCH})
+	catalogPath := punarorelease.CatalogReleaseName + "/" + punarorelease.CatalogFile
+	catalog := string(origin.Files[catalogPath])
+	blocked := strings.Replace(catalog, `"critical_blocks":[]`, `"critical_blocks":[1]`, 1)
+	if blocked == catalog {
+		t.Fatal("catalog critical blocks field unavailable")
+	}
+	signature, err := punarorelease.Sign([]byte(blocked), testKeyID, origin.priv)
+	if err != nil {
+		t.Fatal(err)
+	}
+	signatureJSON, err := punarorelease.EncodeEnvelope(signature)
+	if err != nil {
+		t.Fatal(err)
+	}
+	origin.Files[catalogPath] = []byte(blocked)
+	origin.Files[punarorelease.CatalogReleaseName+"/"+punarorelease.CatalogSignatureFile] = signatureJSON
 	dir := privateDir(t)
 	if _, err := Update(Request{Directory: dir, Origin: origin.URL, Keys: origin.Keys, GOOS: runtime.GOOS, GOARCH: runtime.GOARCH, Now: time.Date(2026, 8, 20, 0, 0, 0, 0, time.UTC)}); err == nil {
 		t.Fatal("critically blocked release accepted")

@@ -17,7 +17,7 @@ memory-client:
 	go build -trimpath -o "$(PUNARO_MEMORY_OUTPUT)" ./cmd/punaro-memory
 
 release-artifacts:
-	./scripts/build-release-artifacts.sh --output-dir ./dist
+	./scripts/build-release-artifacts.sh --output-dir ./dist --release "$(RELEASE)" --sequence "$(SEQUENCE)" --catalog-sequence "$(CATALOG_SEQUENCE)" --image "$(IMAGE)"
 
 test:
 	python3 ./scripts/test-agent-plugin.py

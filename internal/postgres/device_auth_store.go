@@ -12,6 +12,7 @@ import (
 	"errors"
 	"sort"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/google/uuid"
@@ -45,6 +46,16 @@ func OpenAdministration(ctx context.Context, cfg Config) (*Administration, error
 	dsn, err := ReadDSNFile(cfg.DSNFile)
 	if err != nil {
 		return nil, err
+	}
+	return OpenAdministrationDSN(ctx, dsn)
+}
+
+// OpenAdministrationDSN opens the host-local owner connection from an already
+// protected and validated in-memory DSN. Diagnostic callers use this after a
+// deadline-isolated credential read.
+func OpenAdministrationDSN(ctx context.Context, dsn string) (*Administration, error) {
+	if strings.TrimSpace(dsn) == "" {
+		return nil, errors.New("PostgreSQL connection configuration is invalid")
 	}
 	db, err := open(ctx, dsn)
 	if err != nil {

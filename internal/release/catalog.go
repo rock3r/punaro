@@ -6,8 +6,9 @@ import (
 )
 
 const (
-	maxCatalogReleases = 32
-	maxCatalogLifetime = 30 * 24 * time.Hour
+	maxCatalogReleases       = 32
+	maxCatalogCriticalBlocks = 32
+	maxCatalogLifetime       = 30 * 24 * time.Hour
 )
 
 // Catalog is the short-lived signed list of currently allowed releases.
@@ -42,7 +43,7 @@ func ParseCatalog(body []byte) (Catalog, error) {
 }
 
 func (catalog Catalog) validate() error {
-	if catalog.Schema != releaseDocumentSchema || catalog.Sequence < 1 || !validProductReleaseName(catalog.CurrentRelease) || catalog.MinimumSafeSequence < 1 {
+	if catalog.Schema != releaseDocumentSchema || catalog.Sequence < 1 || !ValidProductReleaseName(catalog.CurrentRelease) || catalog.MinimumSafeSequence < 1 {
 		return errors.New("invalid catalog identity")
 	}
 	published, ok := parseCanonicalUTC(catalog.PublishedAt)
@@ -59,7 +60,9 @@ func (catalog Catalog) validate() error {
 	seenName := map[string]struct{}{}
 	seenSequence := map[int64]struct{}{}
 	lowest := catalog.Releases[0].Sequence
+	highest := catalog.Releases[0].Sequence
 	foundCurrent := false
+	currentSequence := int64(0)
 	for _, entry := range catalog.Releases {
 		if err := entry.validate(); err != nil {
 			return err
@@ -75,16 +78,23 @@ func (catalog Catalog) validate() error {
 		if entry.Sequence < lowest {
 			lowest = entry.Sequence
 		}
+		if entry.Sequence > highest {
+			highest = entry.Sequence
+		}
 		if entry.Release == catalog.CurrentRelease {
 			foundCurrent = true
+			currentSequence = entry.Sequence
 		}
 	}
-	if !foundCurrent || catalog.MinimumSafeSequence > lowest {
+	if !foundCurrent || currentSequence != highest || catalog.MinimumSafeSequence > lowest {
 		return errors.New("invalid catalog coverage")
+	}
+	if len(catalog.CriticalBlocks) > maxCatalogCriticalBlocks {
+		return errors.New("invalid critical blocks")
 	}
 	seenBlock := map[int64]struct{}{}
 	for _, sequence := range catalog.CriticalBlocks {
-		if sequence < 1 {
+		if sequence < 1 || sequence >= currentSequence {
 			return errors.New("invalid critical block")
 		}
 		if _, exists := seenBlock[sequence]; exists {
@@ -96,7 +106,7 @@ func (catalog Catalog) validate() error {
 }
 
 func (entry CatalogRelease) validate() error {
-	if !validProductReleaseName(entry.Release) || entry.Sequence < 1 || entry.ManifestLength < 1 || entry.ManifestLength > MaximumManifestBytes || !validSHA256(entry.ManifestSHA256) {
+	if !ValidProductReleaseName(entry.Release) || entry.Sequence < 1 || entry.ManifestLength < 1 || entry.ManifestLength > MaximumManifestBytes || !validSHA256(entry.ManifestSHA256) {
 		return errors.New("invalid catalog release")
 	}
 	return validateManifestPath(entry.Release, entry.ManifestPath)

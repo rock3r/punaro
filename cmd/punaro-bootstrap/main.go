@@ -21,28 +21,56 @@ import (
 
 func main() {
 	if err := run(os.Args[1:]); err != nil {
-		fmt.Fprintln(os.Stderr, err.Error())
-		os.Exit(2)
+		code := 2
+		var coded interface{ ExitCode() int }
+		if errors.As(err, &coded) {
+			code = coded.ExitCode()
+		}
+		if err.Error() != "" {
+			fmt.Fprintln(os.Stderr, err.Error())
+		}
+		os.Exit(code)
 	}
 }
 
 func run(args []string) error {
 	if len(args) == 0 {
-		return errors.New("usage: punaro-bootstrap update|status|rollback|run|seed-checkout")
+		return errors.New("usage: punaro-bootstrap update|status|doctor|fleet-doctor|rollback|run|seed-checkout|version")
 	}
 	switch args[0] {
 	case "update":
 		return runUpdate(args[1:])
 	case "status":
 		return runStatus(args[1:])
+	case "doctor":
+		if code := runBootstrapDoctor(args[1:], os.Stdout, os.Stderr); code != 0 {
+			return bootstrapExitError{code: code}
+		}
+		return nil
+	case "doctor-bootstrap-report":
+		if code := bootstrap.RunDoctorHelper(args[1:], os.Stdout); code != 0 {
+			return bootstrapExitError{code: code}
+		}
+		return nil
+	case "fleet-doctor":
+		if code := runFleetDoctor(args[1:], os.Stdout, os.Stderr); code != 0 {
+			return bootstrapExitError{code: code}
+		}
+		return nil
 	case "rollback":
 		return runRollback(args[1:])
 	case "run":
 		return runRun(args[1:])
 	case "seed-checkout":
 		return runSeedCheckout(args[1:])
+	case "version":
+		if len(args) != 1 || bootstrapBuildRelease == "" {
+			return bootstrapExitError{code: 1}
+		}
+		fmt.Println(bootstrapBuildRelease)
+		return nil
 	default:
-		return errors.New("usage: punaro-bootstrap update|status|rollback|run|seed-checkout")
+		return errors.New("usage: punaro-bootstrap update|status|doctor|fleet-doctor|rollback|run|seed-checkout|version")
 	}
 }
 

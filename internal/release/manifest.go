@@ -18,6 +18,10 @@ const (
 	maxArtifactBytes       = 256 << 20
 )
 
+// ProductionPostgreSQLMajor is the exact database major bound to artifacts
+// built from this source revision and to the release manifests it assembles.
+const ProductionPostgreSQLMajor = 18
+
 // ProtocolRange is an inclusive wire-protocol interval.
 type ProtocolRange struct {
 	Min int64 `json:"min"`
@@ -67,11 +71,14 @@ func ParseReleaseManifest(body []byte) (ReleaseManifest, error) {
 }
 
 func (manifest ReleaseManifest) validate() error {
-	if manifest.Schema != releaseDocumentSchema || manifest.Sequence < 1 || !validProductReleaseName(manifest.Release) || !canonicalUTCTime(manifest.PublishedAt) {
+	if manifest.Schema != releaseDocumentSchema || manifest.Sequence < 1 || !ValidProductReleaseName(manifest.Release) || !canonicalUTCTime(manifest.PublishedAt) {
 		return errors.New("invalid release identity")
 	}
-	if !validProtocolRange(manifest.GatewayProtocol) || !validProtocolRange(manifest.ClientProtocol) || manifest.MinimumRecoveryProtocol < 1 || !validProductReleaseName(manifest.MinimumBootstrapRelease) {
+	if !validProtocolRange(manifest.GatewayProtocol) || !validProtocolRange(manifest.ClientProtocol) || manifest.MinimumRecoveryProtocol < 1 {
 		return errors.New("invalid protocol bound")
+	}
+	if err := validateReleasePolicy(manifest.Release, manifest.MinimumBootstrapRelease, manifest.SupportedFrom); err != nil {
+		return err
 	}
 	if err := validPublishedDatabase(manifest.Database, manifest.PostgreSQLMajor); err != nil {
 		return err
@@ -104,11 +111,23 @@ func (manifest ReleaseManifest) validate() error {
 		seenIdentity[identity] = struct{}{}
 		seenPath[artifact.Path] = struct{}{}
 	}
-	if err := validReleaseNameList(manifest.SupportedFrom, maxSupportedFrom); err != nil {
-		return err
-	}
 	if err := validReleaseNameList(manifest.SteppingStones, maxSteppingStones); err != nil {
 		return err
+	}
+	return nil
+}
+
+func validateReleasePolicy(release, minimumBootstrapRelease string, supportedFrom []string) error {
+	if !ValidProductReleaseName(release) || !ValidProductReleaseName(minimumBootstrapRelease) {
+		return errors.New("invalid release policy")
+	}
+	if err := validReleaseNameList(supportedFrom, maxSupportedFrom); err != nil {
+		return err
+	}
+	for _, source := range supportedFrom {
+		if source == release {
+			return errors.New("invalid release policy")
+		}
 	}
 	return nil
 }
@@ -130,8 +149,64 @@ func (artifact Artifact) validate(release string) error {
 	return nil
 }
 
-func validProductReleaseName(name string) bool {
-	return releaseNamePattern.MatchString(name) && !reservedReleaseName(name)
+// ValidProductReleaseName reports whether name is a canonical immutable
+// product release identity accepted by signed manifests and catalogs.
+func ValidProductReleaseName(name string) bool {
+	if !releaseNamePattern.MatchString(name) || reservedReleaseName(name) || !strings.HasPrefix(name, "v") {
+		return false
+	}
+	version := strings.TrimPrefix(name, "v")
+	version, build, hasBuild := strings.Cut(version, "+")
+	if hasBuild && !validSemverIdentifiers(build, false) {
+		return false
+	}
+	version, prerelease, hasPrerelease := strings.Cut(version, "-")
+	if hasPrerelease && !validSemverIdentifiers(prerelease, true) {
+		return false
+	}
+	core := strings.Split(version, ".")
+	if len(core) != 3 {
+		return false
+	}
+	for _, identifier := range core {
+		if !validSemverNumericIdentifier(identifier) {
+			return false
+		}
+	}
+	return true
+}
+
+func validSemverIdentifiers(value string, rejectNumericLeadingZero bool) bool {
+	for _, identifier := range strings.Split(value, ".") {
+		if identifier == "" {
+			return false
+		}
+		numeric := true
+		for _, character := range identifier {
+			if character < '0' || character > '9' {
+				numeric = false
+			}
+			if character != '-' && (character < '0' || character > '9') && (character < 'A' || character > 'Z') && (character < 'a' || character > 'z') {
+				return false
+			}
+		}
+		if rejectNumericLeadingZero && numeric && !validSemverNumericIdentifier(identifier) {
+			return false
+		}
+	}
+	return true
+}
+
+func validSemverNumericIdentifier(value string) bool {
+	if value == "" || len(value) > 1 && value[0] == '0' {
+		return false
+	}
+	for _, character := range value {
+		if character < '0' || character > '9' {
+			return false
+		}
+	}
+	return true
 }
 
 func validProtocolRange(value ProtocolRange) bool {
@@ -167,7 +242,7 @@ func validReleaseNameList(names []string, limit int) error {
 	}
 	seen := map[string]struct{}{}
 	for _, name := range names {
-		if !validProductReleaseName(name) {
+		if !ValidProductReleaseName(name) {
 			return errors.New("invalid release list")
 		}
 		if _, exists := seen[name]; exists {

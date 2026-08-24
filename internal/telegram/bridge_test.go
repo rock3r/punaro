@@ -2,6 +2,7 @@ package telegram
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"path/filepath"
 	"testing"
@@ -9,6 +10,16 @@ import (
 
 	"github.com/rock3r/punaro/internal/relay"
 )
+
+type failSecondRichSender struct{ calls int }
+
+func (s *failSecondRichSender) SendRichMessage(context.Context, int64, int64, string) (int64, error) {
+	s.calls++
+	if s.calls == 2 {
+		return 0, errors.New("fixture send failure")
+	}
+	return int64(s.calls), nil
+}
 
 type fakeBridgeRelay struct {
 	advertised []string
@@ -63,6 +74,63 @@ func TestBridgeSyncsInboundAndOutboundThroughOneAttachedGatewayEndpoint(t *testi
 		t.Fatalf("next=%d submitted=%d advertised=%#v acked=%#v sent=%#v", next, submitted, relayClient.advertised, relayClient.acked, richSender.html)
 	}
 }
+
+func TestBridgeReportsOutboundHeadProgressBeforeLaterSendFailure(t *testing.T) {
+	t.Parallel()
+	state, err := Open(filepath.Join(t.TempDir(), "telegram.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = state.Close() })
+	if err := state.SetRoute(55, 7, "conversation-1"); err != nil {
+		t.Fatal(err)
+	}
+	relayClient := &fakeBridgeRelay{deliveries: []relay.Delivery{
+		{ID: "delivery-1", Message: relay.Message{ID: "message-1", ConversationID: "conversation-1", FromEndpoint: "agent/a", Body: "first"}},
+		{ID: "delivery-2", Message: relay.Message{ID: "message-2", ConversationID: "conversation-1", FromEndpoint: "agent/a", Body: "second"}},
+	}}
+	bridge := Bridge{
+		Relay:    relayClient,
+		Endpoint: "telegram/gateway",
+		State:    state,
+		Poller:   fakePoller{},
+		Gateway:  Gateway{AllowedUserID: 55, State: state, Submit: func(context.Context, Submission) error { return nil }},
+		Sender:   &failSecondRichSender{},
+	}
+	_, err = bridge.SyncOnce(t.Context(), 10)
+	var cycleErr *GatewayCycleError
+	if !errors.As(err, &cycleErr) || cycleErr.Phase != GatewayPhaseSend || !cycleErr.OutboundBlocked || !cycleErr.OutboundProgress || len(relayClient.acked) != 1 || relayClient.acked[0] != "delivery-1" {
+		t.Fatalf("err=%#v acked=%#v", cycleErr, relayClient.acked)
+	}
+}
+
+func TestClassifyGatewayCycleFailureSeparatesRetryAndTerminalPlanes(t *testing.T) {
+	t.Parallel()
+	permanentRelay := permanentRelayFixtureError{}
+	for _, test := range []struct {
+		name  string
+		err   error
+		class GatewayFailureClass
+	}{
+		{name: "transient unauthorized Telegram", err: &GatewayCycleError{Phase: GatewayPhaseSend, Err: BotAPIStatusError{Method: "sendRichMessage", Status: 401}}, class: GatewayFailureTransient},
+		{name: "deleted topic", err: &GatewayCycleError{Phase: GatewayPhaseSend, Err: BotAPIStatusError{Method: "sendRichMessage", Status: 400, Kind: BotAPIErrorDeletedTopic}}, class: GatewayFailureDeletedTopic},
+		{name: "permanent outbound Telegram", err: &GatewayCycleError{Phase: GatewayPhaseSend, Err: BotAPIStatusError{Method: "sendRichMessage", Status: 403}}, class: GatewayFailureOutboundTelegramPermanent},
+		{name: "permanent inbound relay", err: &GatewayCycleError{Phase: GatewayPhaseInbound, Err: permanentRelay}, class: GatewayFailureInboundRelayPermanent},
+		{name: "permanent relay outside inbound", err: &GatewayCycleError{Phase: GatewayPhaseAdvertise, Err: permanentRelay}, class: GatewayFailureTransient},
+		{name: "message-less poll", err: &GatewayCycleError{Phase: GatewayPhasePoll, Err: BotAPIStatusError{Method: "getUpdates", Status: 404}}, class: GatewayFailureMessageLessPoll},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			if got := ClassifyGatewayCycleFailure(test.err); got != test.class {
+				t.Fatalf("class=%s want %s", got, test.class)
+			}
+		})
+	}
+}
+
+type permanentRelayFixtureError struct{}
+
+func (permanentRelayFixtureError) Error() string               { return "provider controlled" }
+func (permanentRelayFixtureError) PermanentRelayFailure() bool { return true }
 
 func TestBridgeResumesIncompleteClaimBeforePollingInbound(t *testing.T) {
 	t.Parallel()

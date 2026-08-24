@@ -28,6 +28,17 @@ Do not put credentials, relay URLs, project IDs, or download paths in either
 plugin manifest. Those values remain in operator-controlled local
 configuration.
 
+Each skill runs the installed adapter's read-only doctor before first use when
+readiness is uncertain and after relevant local or relay failures. A skill may
+report stable failed check/remediation identifiers, but doctor does not grant
+repair, restart, enrollment, update, credential, routing, or Telegram-topic
+authority. Pass the installed plugin root to `punaro-adapter doctor` so
+portable/Codex/Claude registration, launcher, version, and skill-set digest
+parity are included. The launcher check is release-bound: it hashes both
+package-relative launchers and both MCP registration files, so replacing an
+executable launcher or changing its registered command fails doctor even when
+the skill trees are unchanged. See [the doctor guide](doctor.md).
+
 ## Load the portable plugin
 
 Point an Agent Plugins 1.0 compatible client at the repository root. The client

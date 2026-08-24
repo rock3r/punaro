@@ -22,6 +22,7 @@ import (
 	"time"
 
 	"github.com/rock3r/punaro/internal/adapter"
+	"github.com/rock3r/punaro/internal/bootstrap"
 	"github.com/rock3r/punaro/internal/clientidentity"
 	"github.com/rock3r/punaro/internal/clienttransport"
 	"github.com/rock3r/punaro/internal/relay"
@@ -39,6 +40,9 @@ type adapterConfig struct {
 	accessToken     adapter.AccessServiceToken
 	transportPolicy clienttransport.Policy
 	invokerCommand  string
+	profileFile     string
+	privateKeyFile  string
+	identityFile    string
 }
 
 const (
@@ -95,10 +99,27 @@ func main() {
 		err = runAttachmentNotify(os.Args[2:])
 	case os.Args[1] == "mailbox-mcp":
 		err = runMailboxMCP()
+	case os.Args[1] == "doctor":
+		os.Exit(runAdapterDoctor(os.Args[2:], os.Stdout, os.Stderr))
+	case os.Args[1] == "doctor-bootstrap-report":
+		os.Exit(bootstrap.RunDoctorHelper(os.Args[2:], os.Stdout))
+	case os.Args[1] == "doctor-plugin-inspect":
+		os.Exit(runAdapterPluginInspect(os.Args[2:], os.Stdout))
+	case os.Args[1] == "doctor-mailbox-inspect":
+		os.Exit(runAdapterMailboxInspect(os.Args[2:], os.Stdout))
+	case os.Args[1] == "doctor-service-inspect":
+		os.Exit(runAdapterServiceInspect(os.Args[2:], os.Stdout))
+	case os.Args[1] == "doctor-bootstrap-release-inspect":
+		os.Exit(runAdapterBootstrapReleaseInspect(os.Args[2:], os.Stdout))
+	case os.Args[1] == "version":
+		if adapterBuildRelease == "" {
+			os.Exit(1)
+		}
+		_, err = fmt.Fprintln(os.Stdout, adapterBuildRelease)
 	case os.Args[1] == "validate-relay-transport":
 		err = validateRelayTransport(os.Args[2:])
 	default:
-		err = fmt.Errorf("unknown command %q (supported: send, claim, get, create, rename, bind-role, register-role, contacts list, contacts resolve, invoke, member set, member remove, attachment-notify, mailbox-mcp, validate-relay-transport)", os.Args[1])
+		err = fmt.Errorf("unknown command %q (supported: send, claim, get, create, rename, bind-role, register-role, contacts list, contacts resolve, invoke, member set, member remove, attachment-notify, mailbox-mcp, doctor, version, validate-relay-transport)", os.Args[1])
 	}
 	if err != nil {
 		if shouldLogAdapterStop(err) {
@@ -1129,7 +1150,7 @@ func loadConfig() (adapterConfig, error) {
 	if (accessToken.ClientID == "") != (accessToken.ClientSecret == "") {
 		return adapterConfig{}, fmt.Errorf("both PUNARO_CF_ACCESS_CLIENT_ID and PUNARO_CF_ACCESS_CLIENT_SECRET are required together")
 	}
-	return adapterConfig{relayURL: relayURL, machineID: machineID, privateKey: key, attachedGroup: group, mailboxBinary: mailboxBinary, mailboxState: settings["PUNARO_MAILBOX_STATE_DIR"], dataDir: dataDir, pollInterval: pollInterval, accessToken: accessToken, transportPolicy: transportPolicy, invokerCommand: settings["PUNARO_INVOKER_COMMAND"]}, nil
+	return adapterConfig{relayURL: relayURL, machineID: machineID, privateKey: key, attachedGroup: group, mailboxBinary: mailboxBinary, mailboxState: settings["PUNARO_MAILBOX_STATE_DIR"], dataDir: dataDir, pollInterval: pollInterval, accessToken: accessToken, transportPolicy: transportPolicy, invokerCommand: settings["PUNARO_INVOKER_COMMAND"], profileFile: selectedAdapterProfilePath(), privateKeyFile: keyFile, identityFile: settings["PUNARO_CLIENT_IDENTITY_FILE"]}, nil
 }
 
 func parseLANHTTPSetting(raw string) (bool, error) {
@@ -1166,10 +1187,10 @@ func loadClientIdentity(settings map[string]string, relayURL, machineID string, 
 // than evaluating it as shell or service-manager syntax. A non-empty process
 // environment setting intentionally overrides the corresponding profile entry.
 func loadAdapterProfile() (map[string]string, error) {
-	path := strings.TrimSpace(os.Getenv(adapterProfileFileEnv))
+	path := selectedAdapterProfilePath()
 	explicitPath := path != ""
-	if !explicitPath {
-		path = installedAdapterProfilePath()
+	if strings.TrimSpace(os.Getenv(adapterProfileFileEnv)) == "" {
+		explicitPath = false
 		if path == "" {
 			// Preserve environment-only deployments when the optional default
 			// profile root is unavailable. An explicitly selected profile still
@@ -1211,6 +1232,13 @@ func loadAdapterProfile() (map[string]string, error) {
 		settings[name] = strings.TrimSpace(value)
 	}
 	return settings, nil
+}
+
+func selectedAdapterProfilePath() string {
+	if path := strings.TrimSpace(os.Getenv(adapterProfileFileEnv)); path != "" {
+		return path
+	}
+	return installedAdapterProfilePath()
 }
 
 const (

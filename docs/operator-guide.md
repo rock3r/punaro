@@ -528,8 +528,24 @@ requires recovery. It waits up to 30 seconds for readiness and then runs the
 same checks as doctor. Raw `docker compose up` and `punarod` never migrate.
 
 Use `punaro status --directory ...` for a non-mutating report and `punaro doctor
---directory ...` for a failing health gate. Reports contain only capability and
-content-free path/schema/health states. The generated M-5 server Compose file
+--directory ... --machine-id punaro-lxc --relay-profile
+/absolute/private/server-doctor.env` for an Internet/proxy failing health gate.
+Provision that owner-only profile with `punaro doctor-profile write`; it stores
+only the fixed origin, diagnostic machine ID, and absolute references to
+separately protected Ed25519 and Cloudflare Access credential files. The
+diagnostic machine must be enrolled when relay is enabled; relay-only checks
+are optional when relay is intentionally disabled. Access health requires both
+a successful credentialed probe and rejection of a fresh credentialless probe
+before it reaches Punaro. A trusted-LAN installation may derive only its edge
+topology checks locally; enabled relay enrollment and protocol are reported
+unavailable rather than inferred. The
+exact formats and trusted-LAN omission are in [doctor.md](doctor.md). Add
+`--gateway-co-located` only when this host is explicitly responsible for the
+local `punaro-telegram` system service; otherwise collect its separate doctor
+report. Reports contain only capability and
+content-free path/schema/health states. The report contract, exact exit codes,
+fleet aggregation, and complete stable check registry are documented in
+[doctor.md](doctor.md). The generated M-5 server Compose file
 still uses an externally provisioned PostgreSQL service; the bundled production
 PostgreSQL/profile shape arrives in M-23.
 

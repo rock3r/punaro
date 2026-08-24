@@ -412,6 +412,28 @@ type Store struct {
 	metrics          *Metrics
 }
 
+// DoctorAttachments returns only aggregate lease states for the authenticated
+// machine. It performs no cleanup or lease renewal.
+func (s *Store) DoctorAttachments(machineID string, now time.Time) (AttachmentDoctorSnapshot, error) {
+	if !ValidMachineID(machineID) {
+		return AttachmentDoctorSnapshot{}, ErrForbidden
+	}
+	var snapshot AttachmentDoctorSnapshot
+	if err := s.db.QueryRowContext(context.Background(), `SELECT
+		COALESCE(SUM(CASE WHEN lease_until > ? THEN 1 ELSE 0 END),0),
+		COALESCE(SUM(CASE WHEN lease_until <= ? THEN 1 ELSE 0 END),0)
+		FROM endpoints WHERE machine_id = ?`, now.UnixMilli(), now.UnixMilli(), machineID).Scan(&snapshot.ActiveEndpoints, &snapshot.ExpiredEndpoints); err != nil {
+		return AttachmentDoctorSnapshot{}, errors.New("attachment state unavailable")
+	}
+	if err := s.db.QueryRowContext(context.Background(), `SELECT
+		COALESCE(SUM(CASE WHEN lease_until > ? THEN 1 ELSE 0 END),0),
+		COALESCE(SUM(CASE WHEN lease_until <= ? THEN 1 ELSE 0 END),0)
+		FROM role_bindings WHERE machine_id = ?`, now.UnixMilli(), now.UnixMilli(), machineID).Scan(&snapshot.ActiveRoles, &snapshot.ExpiredRoles); err != nil {
+		return AttachmentDoctorSnapshot{}, errors.New("attachment state unavailable")
+	}
+	return snapshot, nil
+}
+
 // Open creates or opens a SQLite WAL database with the full durable delivery
 // schema. The database directory is private to the service account.
 func Open(database string) (*Store, error) {

@@ -19,6 +19,32 @@ const (
 	maxRequestBodyBytes              = 64 << 10
 	maximumSessionFenceAge           = 2 * time.Second
 	defaultSessionRevalidateInterval = maximumSessionFenceAge / 2
+	// DoctorPath is the exact signed, read-only relay reachability probe.
+	DoctorPath = "/v1/doctor"
+	// DoctorNotificationsPath is the exact signed, read-only WebSocket
+	// handshake probe. It never registers for or emits wake events.
+	DoctorNotificationsPath = "/v1/doctor/notifications"
+	// ResponseNonceHeader confirms that a response came from the authenticated
+	// Punaro route rather than an intermediary which rejected the request.
+	ResponseNonceHeader = "X-Punaro-Response-Nonce"
+	// ProtocolHeader carries the bounded relay protocol identity.
+	ProtocolHeader = "X-Punaro-Protocol"
+	// DoctorEndpointHeader selects one endpoint owned by the authenticated
+	// machine for a read-only attachment check.
+	DoctorEndpointHeader = "X-Punaro-Doctor-Endpoint"
+	// DoctorAttachmentHeader and the following aggregate headers report only
+	// bounded, content-free endpoint and role attachment state.
+	DoctorAttachmentHeader = "X-Punaro-Endpoint-Attached"
+	// DoctorActiveEndpointsHeader reports a bounded count of active endpoints.
+	DoctorActiveEndpointsHeader = "X-Punaro-Active-Endpoints"
+	// DoctorExpiredEndpointsHeader reports a bounded count of expired endpoints.
+	DoctorExpiredEndpointsHeader = "X-Punaro-Expired-Endpoints"
+	// DoctorActiveRolesHeader reports a bounded count of active roles.
+	DoctorActiveRolesHeader = "X-Punaro-Active-Roles"
+	// DoctorExpiredRolesHeader reports a bounded count of expired roles.
+	DoctorExpiredRolesHeader = "X-Punaro-Expired-Roles"
+	// ProtocolVersion is the relay doctor protocol supported by this release.
+	ProtocolVersion = 1
 )
 
 // HandlerOptions make lease timing explicit and injectable for tests.
@@ -89,6 +115,14 @@ func (h *handler) serveHTTP(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusRequestEntityTooLarge, "request body is too large")
 		return
 	}
+	if r.Method == http.MethodHead && r.URL.Path == DoctorPath {
+		h.doctor(w, r, body)
+		return
+	}
+	if r.Method == http.MethodGet && r.URL.Path == DoctorNotificationsPath {
+		h.doctorNotifications(w, r, body)
+		return
+	}
 	session, err := h.authenticate(r, body)
 	if err != nil {
 		if errors.Is(err, ErrMaintenance) {
@@ -98,6 +132,7 @@ func (h *handler) serveHTTP(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusUnauthorized, "authentication required")
 		return
 	}
+	w.Header().Set(ResponseNonceHeader, r.Header.Get("X-Punaro-Nonce"))
 	machineID := session.MachineID
 	authority := PrincipalAuthority{PrincipalID: session.PrincipalID, CredentialLookupID: session.CredentialLookupID, CredentialGeneration: session.CredentialGeneration}
 	now := h.now().UTC()
@@ -210,6 +245,53 @@ func (h *handler) serveHTTP(w http.ResponseWriter, r *http.Request) {
 	default:
 		writeError(w, http.StatusNotFound, "route not found")
 	}
+}
+
+func (h *handler) doctor(w http.ResponseWriter, r *http.Request, body []byte) {
+	if len(body) != 0 || r.URL.RawPath != "" || r.URL.EscapedPath() != r.URL.Path {
+		writeError(w, http.StatusBadRequest, "invalid doctor request")
+		return
+	}
+	session, err := h.auth.AuthenticateReadOnlyDoctor(r, body, h.now())
+	if err != nil {
+		writeError(w, http.StatusUnauthorized, "authentication required")
+		return
+	}
+	w.Header().Set("Cache-Control", "no-store")
+	w.Header().Set(ResponseNonceHeader, r.Header.Get("X-Punaro-Nonce"))
+	w.Header().Set(ProtocolHeader, strconv.Itoa(ProtocolVersion))
+	if backend, ok := h.store.(AttachmentDoctorBackend); ok {
+		if snapshot, snapshotErr := backend.DoctorAttachments(session.MachineID, h.now().UTC()); snapshotErr == nil {
+			w.Header().Set(DoctorActiveEndpointsHeader, strconv.Itoa(snapshot.ActiveEndpoints))
+			w.Header().Set(DoctorExpiredEndpointsHeader, strconv.Itoa(snapshot.ExpiredEndpoints))
+			w.Header().Set(DoctorActiveRolesHeader, strconv.Itoa(snapshot.ActiveRoles))
+			w.Header().Set(DoctorExpiredRolesHeader, strconv.Itoa(snapshot.ExpiredRoles))
+		}
+	}
+	if endpoint := r.Header.Get(DoctorEndpointHeader); endpoint != "" {
+		attached := ValidEndpoint(endpoint) && h.auth.AllowsEndpoint(session.MachineID, endpoint) && h.store.AssertEndpointOwnership(session.MachineID, endpoint, h.now().UTC()) == nil
+		w.Header().Set(DoctorAttachmentHeader, strconv.FormatBool(attached))
+	}
+	w.WriteHeader(http.StatusNoContent)
+}
+
+func (h *handler) doctorNotifications(w http.ResponseWriter, r *http.Request, body []byte) {
+	if len(body) != 0 || r.URL.RawPath != "" || r.URL.EscapedPath() != r.URL.Path {
+		writeError(w, http.StatusBadRequest, "invalid doctor request")
+		return
+	}
+	if _, err := h.auth.AuthenticateReadOnlyDoctor(r, body, h.now()); err != nil {
+		writeError(w, http.StatusUnauthorized, "authentication required")
+		return
+	}
+	w.Header().Set("Cache-Control", "no-store")
+	w.Header().Set(ResponseNonceHeader, r.Header.Get("X-Punaro-Nonce"))
+	w.Header().Set(ProtocolHeader, strconv.Itoa(ProtocolVersion))
+	connection, err := websocket.Accept(w, r, &websocket.AcceptOptions{CompressionMode: websocket.CompressionDisabled})
+	if err != nil {
+		return
+	}
+	_ = connection.Close(websocket.StatusNormalClosure, "")
 }
 
 func (h *handler) registerRole(w http.ResponseWriter, body []byte, machineID string, now time.Time, idempotencyKey string) {

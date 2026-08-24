@@ -280,6 +280,21 @@ type Backend interface {
 	ConversationsForMachine(machineID string, now time.Time) ([]Conversation, error)
 }
 
+// AttachmentDoctorSnapshot is a bounded, content-free attachment aggregate
+// for one authenticated machine.
+type AttachmentDoctorSnapshot struct {
+	ActiveEndpoints  int
+	ExpiredEndpoints int
+	ActiveRoles      int
+	ExpiredRoles     int
+}
+
+// AttachmentDoctorBackend supports the signed read-only doctor route without
+// exposing endpoint or role inventory.
+type AttachmentDoctorBackend interface {
+	DoctorAttachments(machineID string, now time.Time) (AttachmentDoctorSnapshot, error)
+}
+
 // InvocationBackend is intentionally separate from Backend while PostgreSQL
 // mail cutover parity is staged. Selected backends without it fail closed
 // rather than treating a normal message or notification as process control.

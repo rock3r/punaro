@@ -1,22 +1,31 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"crypto/ed25519"
 	"crypto/rand"
+	"database/sql"
 	"encoding/base64"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
 
+	"github.com/rock3r/punaro/internal/adapter"
 	attachmentv3 "github.com/rock3r/punaro/internal/attachment/v3"
+	"github.com/rock3r/punaro/internal/clientidentity"
+	punarodiagnostic "github.com/rock3r/punaro/internal/diagnostic"
+	"github.com/rock3r/punaro/internal/plugindiagnostic"
 	"github.com/rock3r/punaro/internal/relay"
 	"github.com/zeebo/blake3"
 )
@@ -278,6 +287,733 @@ func TestLoadConfigRequiresPrivateKeyAndAttachmentGroup(t *testing.T) {
 	if _, err := loadConfig(); err == nil {
 		t.Fatal("missing private key file accepted")
 	}
+}
+
+func TestAdapterDoctorEmitsStrictHealthyReport(t *testing.T) {
+	clearAdapterEnvironment(t)
+	preserveAdapterDoctorDependencies(t)
+	profile := writeInstallerProfile(t, "https://relay.example")
+	mailboxState := filepath.Join(filepath.Dir(filepath.Dir(filepath.Dir(profile))), ".local", "state", "ai-agent", "mailbox")
+	if err := os.MkdirAll(mailboxState, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv(adapterProfileFileEnv, profile)
+	healthy := adapter.DoctorProbeResult{Transport: true, Origin: true, Access: true, Enrolled: true, Protocol: true, AttachmentsKnown: true, ActiveEndpoints: 2, ExpiredEndpoints: 3, ExpiredRoles: 4}
+	adapterDoctorRelayProbe = func(context.Context, adapterConfig) (adapter.DoctorProbeResult, error) { return healthy, nil }
+	adapterDoctorNotificationProbe = func(context.Context, adapterConfig) (adapter.DoctorProbeResult, error) { return healthy, nil }
+	adapterDoctorMailboxProbe = func(context.Context, adapterConfig) (mailboxDoctorResult, error) {
+		return mailboxDoctorResult{Attached: []string{"agent/a", "agent/b"}, Configuration: true, DataDirectory: true, DistinctPaths: true, Healthy: true}, nil
+	}
+	probedEndpoints := make([]string, 0, 2)
+	adapterDoctorEndpointProbe = func(_ context.Context, _ adapterConfig, endpoint string) (adapter.DoctorProbeResult, error) {
+		probedEndpoints = append(probedEndpoints, endpoint)
+		result := healthy
+		result.Attached = true
+		return result, nil
+	}
+	adapterDoctorServiceProbe = func(context.Context, adapterConfig) (serviceDoctorResult, error) {
+		return serviceDoctorResult{Installed: true, Enabled: true, Running: true, Executable: true, ExitStatus: true, RestartState: true}, nil
+	}
+	adapterBuildRelease = "v0.1.0-alpha.1"
+	adapterDoctorBootstrapReleaseProbe = func(context.Context) string { return "v0.1.0-alpha.0" }
+	adapterDoctorBootstrapProbe = func(_ context.Context, _ string, bootstrapRelease string) (punarodiagnostic.Report, error) {
+		if bootstrapRelease != "v0.1.0-alpha.0" {
+			t.Fatalf("bootstrap release=%q", bootstrapRelease)
+		}
+		return healthyAdapterBootstrapReport(t), nil
+	}
+	adapterDoctorPluginProbe = func(context.Context, string) pluginDoctorResult {
+		return pluginDoctorResult{Portable: true, Codex: true, Claude: true, Launcher: true, Version: "v0.1.0-alpha.1", SkillDigest: "sha256:" + strings.Repeat("a", 64)}
+	}
+	var stdout, stderr bytes.Buffer
+	if code := runAdapterDoctor(nil, &stdout, &stderr); code != 0 {
+		t.Fatalf("code=%d stdout=%q stderr=%q", code, stdout.String(), stderr.String())
+	}
+	report, err := punarodiagnostic.Decode(bytes.NewReader(stdout.Bytes()))
+	if err != nil || !report.Healthy || report.Component != punarodiagnostic.ComponentAdapter || report.Identity.MachineID != "profile-machine" || report.Identity.Protocol != 1 {
+		t.Fatalf("report=%#v err=%v", report, err)
+	}
+	if strings.Join(probedEndpoints, ",") != "agent/a,agent/b" {
+		t.Fatalf("endpoint probes=%v", probedEndpoints)
+	}
+	for _, code := range []string{"expired_endpoint_bindings", "expired_role_bindings"} {
+		found := false
+		for _, check := range report.Checks {
+			if check.Code == code {
+				found = true
+				if check.Status != punarodiagnostic.StatusFail || check.Required {
+					t.Fatalf("retired binding check=%#v", check)
+				}
+			}
+		}
+		if !found {
+			t.Fatalf("missing retired binding check %q", code)
+		}
+	}
+	for _, forbidden := range []string{profile, "relay.example", "machine.key", "agent-mailbox", "PUNARO_CF_ACCESS"} {
+		if strings.Contains(stdout.String(), forbidden) {
+			t.Fatalf("doctor leaked %q: %s", forbidden, stdout.String())
+		}
+	}
+}
+
+func TestAdapterDoctorConfigurationLoadHonorsDeadline(t *testing.T) {
+	preserveAdapterDoctorDependencies(t)
+	started := make(chan struct{})
+	blocked := make(chan struct{})
+	t.Cleanup(func() { close(blocked) })
+	adapterDoctorConfigLoad = func() (adapterConfig, error) {
+		close(started)
+		<-blocked
+		return adapterConfig{}, nil
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go func() {
+		<-started
+		cancel()
+	}()
+	if _, err := loadAdapterDoctorConfig(ctx); !errors.Is(err, context.Canceled) {
+		t.Fatalf("configuration load error=%v", err)
+	}
+}
+
+func TestAdapterDoctorReportsIndependentRelayFailures(t *testing.T) {
+	clearAdapterEnvironment(t)
+	preserveAdapterDoctorDependencies(t)
+	profile := writeInstallerProfile(t, "https://relay.example")
+	mailboxState := filepath.Join(filepath.Dir(filepath.Dir(filepath.Dir(profile))), ".local", "state", "ai-agent", "mailbox")
+	if err := os.MkdirAll(mailboxState, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv(adapterProfileFileEnv, profile)
+	adapterDoctorRelayProbe = func(context.Context, adapterConfig) (adapter.DoctorProbeResult, error) {
+		return adapter.DoctorProbeResult{Transport: true}, errors.New("https://secret.example/token provider body")
+	}
+	adapterDoctorNotificationProbe = func(context.Context, adapterConfig) (adapter.DoctorProbeResult, error) {
+		return adapter.DoctorProbeResult{Transport: true, Origin: true, Access: true, Enrolled: true, Protocol: true}, nil
+	}
+	adapterDoctorMailboxProbe = func(context.Context, adapterConfig) (mailboxDoctorResult, error) {
+		return mailboxDoctorResult{Attached: []string{"agent/a"}, Configuration: true, DataDirectory: true, DistinctPaths: true, Healthy: true}, nil
+	}
+	adapterDoctorEndpointProbe = func(context.Context, adapterConfig, string) (adapter.DoctorProbeResult, error) {
+		return adapter.DoctorProbeResult{Transport: true, Origin: true, Access: true, Enrolled: true, Protocol: true, Attached: true}, nil
+	}
+	adapterDoctorServiceProbe = func(context.Context, adapterConfig) (serviceDoctorResult, error) {
+		return serviceDoctorResult{Installed: true, Enabled: true, Running: true, Executable: true, ExitStatus: true, RestartState: true}, nil
+	}
+	var stdout, stderr bytes.Buffer
+	if code := runAdapterDoctor(nil, &stdout, &stderr); code != 1 || stderr.Len() != 0 {
+		t.Fatalf("code=%d stdout=%q stderr=%q", code, stdout.String(), stderr.String())
+	}
+	report, err := punarodiagnostic.Decode(bytes.NewReader(stdout.Bytes()))
+	if err != nil || report.Healthy || checkStatus(report, "relay_transport") != punarodiagnostic.StatusPass || checkStatus(report, "relay_origin") != punarodiagnostic.StatusFail || checkStatus(report, "notification_protocol") != punarodiagnostic.StatusPass {
+		t.Fatalf("report=%#v err=%v", report, err)
+	}
+	if strings.Contains(stdout.String(), "secret") || strings.Contains(stdout.String(), "https://") || strings.Contains(stdout.String(), "provider") {
+		t.Fatalf("doctor leaked remote error: %s", stdout.String())
+	}
+}
+
+func TestAdapterDoctorRejectsStaleMachineAttachmentForCurrentEndpoint(t *testing.T) {
+	clearAdapterEnvironment(t)
+	preserveAdapterDoctorDependencies(t)
+	profile := writeInstallerProfile(t, "https://relay.example")
+	mailboxState := filepath.Join(filepath.Dir(filepath.Dir(filepath.Dir(profile))), ".local", "state", "ai-agent", "mailbox")
+	if err := os.MkdirAll(mailboxState, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv(adapterProfileFileEnv, profile)
+	healthy := adapter.DoctorProbeResult{Transport: true, Origin: true, Access: true, Enrolled: true, Protocol: true, AttachmentsKnown: true, ActiveEndpoints: 1}
+	adapterDoctorRelayProbe = func(context.Context, adapterConfig) (adapter.DoctorProbeResult, error) { return healthy, nil }
+	adapterDoctorNotificationProbe = func(context.Context, adapterConfig) (adapter.DoctorProbeResult, error) { return healthy, nil }
+	adapterDoctorMailboxProbe = func(context.Context, adapterConfig) (mailboxDoctorResult, error) {
+		return mailboxDoctorResult{Attached: []string{"agent/current"}, Configuration: true, DataDirectory: true, DistinctPaths: true, Healthy: true}, nil
+	}
+	adapterDoctorEndpointProbe = func(context.Context, adapterConfig, string) (adapter.DoctorProbeResult, error) {
+		return adapter.DoctorProbeResult{Transport: true, Origin: true, Access: true, Enrolled: true, Protocol: true}, nil
+	}
+	adapterDoctorServiceProbe = func(context.Context, adapterConfig) (serviceDoctorResult, error) { return serviceDoctorResult{}, nil }
+	var stdout bytes.Buffer
+	if code := runAdapterDoctor(nil, &stdout, io.Discard); code != 1 {
+		t.Fatalf("code=%d report=%s", code, stdout.String())
+	}
+	report, err := punarodiagnostic.Decode(bytes.NewReader(stdout.Bytes()))
+	if err != nil || checkStatus(report, "endpoint_attachment") != punarodiagnostic.StatusFail {
+		t.Fatalf("report=%#v err=%v", report, err)
+	}
+}
+
+func TestMailboxDoctorPerformsOnlyInitializeAndToolsHandshake(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("POSIX helper fixture")
+	}
+	directory := t.TempDir()
+	state := filepath.Join(directory, "mailbox")
+	if err := os.Mkdir(state, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	helper := filepath.Join(directory, "agent-mailbox")
+	script := `#!/bin/sh
+read initialize
+printf '%s\n' '{"jsonrpc":"2.0","id":1,"result":{"protocolVersion":"2024-11-05","capabilities":{},"serverInfo":{"name":"fixture","version":"1"}}}'
+read initialized
+read tools
+printf '%s\n' '{"jsonrpc":"2.0","id":2,"result":{"tools":[]}}'
+read unexpected && exit 9
+exit 0
+`
+	if err := os.WriteFile(helper, []byte(script), 0o700); err != nil { // #nosec G306 -- executable test helper.
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithTimeout(t.Context(), 5*time.Second)
+	defer cancel()
+	if err := probeMailboxMCP(ctx, adapterConfig{mailboxBinary: helper, mailboxState: state}); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestMailboxDoctorIsolationHonorsDeadline(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("POSIX blocking executable fixture")
+	}
+	blocker := filepath.Join(t.TempDir(), "blocked-mailbox-doctor")
+	if err := os.WriteFile(blocker, []byte("#!/bin/sh\nexec sleep 10\n"), 0o700); err != nil { // #nosec G306 -- private executable deadline fixture.
+		t.Fatal(err)
+	}
+	previous := adapterDoctorMailboxExecutable
+	adapterDoctorMailboxExecutable = func() (string, error) { return blocker, nil }
+	t.Cleanup(func() { adapterDoctorMailboxExecutable = previous })
+	ctx, cancel := context.WithTimeout(t.Context(), 20*time.Millisecond)
+	defer cancel()
+	started := time.Now()
+	_, err := inspectAdapterMailboxIsolated(ctx, adapterConfig{mailboxBinary: blocker, mailboxState: t.TempDir(), attachedGroup: "group/punaro"})
+	if err == nil || time.Since(started) > time.Second {
+		t.Fatalf("isolated mailbox error=%v elapsed=%s", err, time.Since(started))
+	}
+}
+
+func TestAdapterPathChecksAreReturnedByIsolatedHelper(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("POSIX private-directory fixture")
+	}
+	root := t.TempDir()
+	dataDir, mailboxState := filepath.Join(root, "data"), filepath.Join(root, "mailbox")
+	if err := os.Mkdir(dataDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Mkdir(mailboxState, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	write := func(name string) string {
+		path := filepath.Join(root, name)
+		if err := os.WriteFile(path, []byte("fixture"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		return path
+	}
+	request := mailboxDoctorRequest{Binary: "missing-agent-mailbox", State: mailboxState, Group: "group/punaro", DataDir: dataDir, ProfileFile: write("profile"), PrivateKeyFile: write("private-key"), IdentityFile: write("identity")}
+	body, err := json.Marshal(request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var stdout bytes.Buffer
+	if code := runAdapterMailboxInspect([]string{"--request", base64.RawURLEncoding.EncodeToString(body)}, &stdout); code != 0 {
+		t.Fatalf("helper exit=%d output=%q", code, stdout.String())
+	}
+	var result mailboxDoctorResult
+	if json.NewDecoder(&stdout).Decode(&result) != nil || !result.DataDirectory || !result.DistinctPaths || result.Configuration {
+		t.Fatalf("isolated path result=%#v", result)
+	}
+}
+
+func TestMailboxDoctorReadsOnlyBoundedActiveAttachments(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("POSIX helper fixture")
+	}
+	writeHelper := func(body string) string {
+		helper := filepath.Join(t.TempDir(), "agent-mailbox")
+		script := "#!/bin/sh\nprintf '%s\\n' '" + body + "'\n"
+		if err := os.WriteFile(helper, []byte(script), 0o700); err != nil { // #nosec G306 -- executable test helper.
+			t.Fatal(err)
+		}
+		return helper
+	}
+	mailboxState := t.TempDir()
+	if err := os.Chmod(mailboxState, 0o700); err != nil { // #nosec G302 -- private mailbox fixture.
+		t.Fatal(err)
+	}
+	config := adapterConfig{mailboxBinary: writeHelper(`[{"person":"agent/b","active":true},{"person":"agent/retired","active":false},{"person":"agent/a","active":true}]`), mailboxState: mailboxState, attachedGroup: "group/punaro"}
+	attached, err := probeMailboxAttachments(t.Context(), config)
+	if err != nil || strings.Join(attached, ",") != "agent/a,agent/b" {
+		t.Fatalf("attached=%v err=%v", attached, err)
+	}
+	memberships := make([]map[string]any, maximumMailboxDoctorEndpoints+1)
+	for index := range memberships {
+		memberships[index] = map[string]any{"person": fmt.Sprintf("agent/%03d", index), "active": true}
+	}
+	oversized, err := json.Marshal(memberships)
+	if err != nil {
+		t.Fatal(err)
+	}
+	config.mailboxBinary = writeHelper(string(oversized))
+	if _, err := probeMailboxAttachments(t.Context(), config); err == nil {
+		t.Fatal("oversized mailbox attachment set was accepted")
+	}
+}
+
+func TestMailboxDoctorContainsAttachmentProbeMutation(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("POSIX helper fixture")
+	}
+	state := t.TempDir()
+	if err := os.Chmod(state, 0o700); err != nil { // #nosec G302 -- private mailbox fixture.
+		t.Fatal(err)
+	}
+	database, err := sql.Open("sqlite", filepath.Join(state, "mailbox.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := database.ExecContext(t.Context(), `CREATE TABLE mailbox_fixture (value TEXT)`); err != nil {
+		t.Fatal(err)
+	}
+	if err := database.Close(); err != nil {
+		t.Fatal(err)
+	}
+	helper := filepath.Join(t.TempDir(), "agent-mailbox")
+	script := `#!/bin/sh
+if [ "$3" = group ]; then
+  printf '%s\n' changed >"$2/doctor-mutated"
+  printf '%s\n' '[{"person":"agent/a","active":true}]'
+  exit 0
+fi
+read initialize
+printf '%s\n' '{"jsonrpc":"2.0","id":1,"result":{"protocolVersion":"2024-11-05","capabilities":{},"serverInfo":{"name":"fixture","version":"1"}}}'
+read initialized
+read tools
+printf '%s\n' '{"jsonrpc":"2.0","id":2,"result":{"tools":[]}}'
+exit 0
+`
+	if err := os.WriteFile(helper, []byte(script), 0o700); err != nil { // #nosec G306 -- executable test helper.
+		t.Fatal(err)
+	}
+	result, err := probeAdapterMailbox(t.Context(), adapterConfig{mailboxBinary: helper, mailboxState: state, attachedGroup: "group/punaro"})
+	if err != nil || strings.Join(result.Attached, ",") != "agent/a" {
+		t.Fatalf("attachment probe result=%#v err=%v", result, err)
+	}
+	if _, err := os.Stat(filepath.Join(state, "doctor-mutated")); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("attachment probe escaped its disposable snapshot: %v", err)
+	}
+}
+
+func TestMailboxDoctorAllowsConcurrentLiveMailboxWrites(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("POSIX helper fixture")
+	}
+	state := t.TempDir()
+	if err := os.Chmod(state, 0o700); err != nil { // #nosec G302 -- private mailbox fixture.
+		t.Fatal(err)
+	}
+	database, err := sql.Open("sqlite", filepath.Join(state, "mailbox.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := database.ExecContext(t.Context(), `PRAGMA journal_mode = WAL; CREATE TABLE mailbox_fixture (value TEXT)`); err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = database.Close() }()
+	t.Setenv("PUNARO_TEST_LIVE_MAILBOX", state)
+	writerDone := make(chan error, 1)
+	go func() {
+		deadline := time.Now().Add(5 * time.Second)
+		for {
+			if _, err := os.Stat(filepath.Join(state, "probe-ready")); err == nil {
+				break
+			}
+			if time.Now().After(deadline) {
+				writerDone <- errors.New("mailbox probe did not start")
+				return
+			}
+			time.Sleep(5 * time.Millisecond)
+		}
+		if _, err := database.ExecContext(t.Context(), `INSERT INTO mailbox_fixture (value) VALUES ('concurrent')`); err != nil {
+			writerDone <- err
+			return
+		}
+		writerDone <- os.WriteFile(filepath.Join(state, "write-complete"), []byte("done"), 0o600)
+	}()
+	helper := filepath.Join(t.TempDir(), "agent-mailbox")
+	script := `#!/bin/sh
+if [ "$3" = group ]; then
+  printf '%s\n' ready >"$PUNARO_TEST_LIVE_MAILBOX/probe-ready"
+  while [ ! -f "$PUNARO_TEST_LIVE_MAILBOX/write-complete" ]; do sleep 0.01; done
+  printf '%s\n' '[{"person":"agent/a","active":true}]'
+  exit 0
+fi
+read initialize
+printf '%s\n' '{"jsonrpc":"2.0","id":1,"result":{"protocolVersion":"2024-11-05","capabilities":{},"serverInfo":{"name":"fixture","version":"1"}}}'
+read initialized
+read tools
+printf '%s\n' '{"jsonrpc":"2.0","id":2,"result":{"tools":[]}}'
+exit 0
+`
+	if err := os.WriteFile(helper, []byte(script), 0o700); err != nil { // #nosec G306 -- executable test helper.
+		t.Fatal(err)
+	}
+	result, probeErr := probeAdapterMailbox(t.Context(), adapterConfig{mailboxBinary: helper, mailboxState: state, attachedGroup: "group/punaro"})
+	writerErr := <-writerDone
+	if probeErr != nil || strings.Join(result.Attached, ",") != "agent/a" || writerErr != nil {
+		t.Fatalf("mailbox result=%#v probe_err=%v writer_err=%v", result, probeErr, writerErr)
+	}
+	var rows int
+	if err := database.QueryRowContext(t.Context(), `SELECT COUNT(*) FROM mailbox_fixture WHERE value = 'concurrent'`).Scan(&rows); err != nil || rows != 1 {
+		t.Fatalf("concurrent mailbox WAL write rows=%d err=%v", rows, err)
+	}
+}
+
+func TestMailboxDoctorContainsStateMutationDuringHandshake(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("POSIX helper fixture")
+	}
+	directory := t.TempDir()
+	state := filepath.Join(directory, "mailbox")
+	if err := os.Mkdir(state, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	database, err := sql.Open("sqlite", filepath.Join(state, "mailbox.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := database.ExecContext(t.Context(), `CREATE TABLE mailbox_fixture (value TEXT)`); err != nil {
+		t.Fatal(err)
+	}
+	if err := database.Close(); err != nil {
+		t.Fatal(err)
+	}
+	helper := filepath.Join(directory, "agent-mailbox")
+	script := `#!/bin/sh
+if [ "$3" = group ]; then
+  printf '%s\n' '[]'
+  exit 0
+fi
+read initialize
+printf '%s\n' changed >"$2/doctor-mutated"
+printf '%s\n' '{"jsonrpc":"2.0","id":1,"result":{"protocolVersion":"2024-11-05","capabilities":{},"serverInfo":{"name":"fixture","version":"1"}}}'
+read initialized
+read tools
+printf '%s\n' '{"jsonrpc":"2.0","id":2,"result":{"tools":[]}}'
+exit 0
+`
+	if err := os.WriteFile(helper, []byte(script), 0o700); err != nil { // #nosec G306 -- executable test helper.
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithTimeout(t.Context(), 5*time.Second)
+	defer cancel()
+	if _, err := probeAdapterMailbox(ctx, adapterConfig{mailboxBinary: helper, mailboxState: state, attachedGroup: "group/punaro"}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(filepath.Join(state, "doctor-mutated")); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("MCP probe escaped its disposable snapshot: %v", err)
+	}
+}
+
+func TestMailboxDoctorContainsStateMutationAfterFailedHandshake(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("POSIX helper fixture")
+	}
+	tests := []struct {
+		name     string
+		script   string
+		expected string
+	}{
+		{
+			name:     "initialize",
+			expected: "mailbox MCP initialize failed",
+			script: `#!/bin/sh
+read initialize
+printf '%s\n' changed >"$2/doctor-mutated"
+printf '%s\n' '{"jsonrpc":"2.0","id":1,"error":{"code":-32000,"message":"failed"}}'
+`,
+		},
+		{
+			name:     "tools list",
+			expected: "mailbox MCP tools handshake failed",
+			script: `#!/bin/sh
+read initialize
+printf '%s\n' '{"jsonrpc":"2.0","id":1,"result":{"protocolVersion":"2024-11-05","capabilities":{},"serverInfo":{"name":"fixture","version":"1"}}}'
+read initialized
+read tools
+printf '%s\n' changed >"$2/doctor-mutated"
+printf '%s\n' '{"jsonrpc":"2.0","id":2,"error":{"code":-32000,"message":"failed"}}'
+`,
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			directory := t.TempDir()
+			state := filepath.Join(directory, "mailbox")
+			if err := os.Mkdir(state, 0o700); err != nil {
+				t.Fatal(err)
+			}
+			database, err := sql.Open("sqlite", filepath.Join(state, "mailbox.db"))
+			if err != nil {
+				t.Fatal(err)
+			}
+			if _, err := database.ExecContext(t.Context(), `CREATE TABLE mailbox_fixture (value TEXT)`); err != nil {
+				t.Fatal(err)
+			}
+			if err := database.Close(); err != nil {
+				t.Fatal(err)
+			}
+			helper := filepath.Join(directory, "agent-mailbox")
+			if err := os.WriteFile(helper, []byte(test.script), 0o700); err != nil { // #nosec G306 -- executable test helper.
+				t.Fatal(err)
+			}
+			ctx, cancel := context.WithTimeout(t.Context(), 5*time.Second)
+			defer cancel()
+			_, err = probeAdapterMailbox(ctx, adapterConfig{mailboxBinary: helper, mailboxState: state, attachedGroup: "group/punaro"})
+			if err == nil || err.Error() != test.expected {
+				t.Fatalf("failed %s handshake error=%v", test.name, err)
+			}
+			if _, err := os.Stat(filepath.Join(state, "doctor-mutated")); !errors.Is(err, os.ErrNotExist) {
+				t.Fatalf("failed %s probe escaped its disposable snapshot: %v", test.name, err)
+			}
+		})
+	}
+}
+
+func TestInstalledAgentMailboxDoctorSmoke(t *testing.T) {
+	binary, err := exec.LookPath("agent-mailbox")
+	if err != nil {
+		t.Skip("agent-mailbox is not installed")
+	}
+	state := filepath.Join(t.TempDir(), "mailbox")
+	if err := os.Mkdir(state, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithTimeout(t.Context(), 10*time.Second)
+	defer cancel()
+	command := exec.CommandContext(ctx, binary, "--state-dir", state, "group", "create", "--group", "group/punaro") // #nosec G204,G702 -- installed binary smoke test with fixed arguments.
+	if output, err := command.CombinedOutput(); err != nil {
+		t.Fatalf("create installed mailbox fixture: %v: %s", err, output)
+	}
+	membersBefore, err := exec.CommandContext(ctx, binary, "--state-dir", state, "group", "members", "--group", "group/punaro", "--json").CombinedOutput() // #nosec G204,G702 -- installed binary smoke test with fixed arguments.
+	if err != nil {
+		t.Fatalf("inspect installed mailbox fixture: %v: %s", err, membersBefore)
+	}
+	if _, err := probeAdapterMailbox(ctx, adapterConfig{mailboxBinary: binary, mailboxState: state, attachedGroup: "group/punaro"}); err != nil {
+		t.Fatal(err)
+	}
+	membersAfter, err := exec.CommandContext(ctx, binary, "--state-dir", state, "group", "members", "--group", "group/punaro", "--json").CombinedOutput() // #nosec G204,G702 -- installed binary smoke test with fixed arguments.
+	if err != nil || !bytes.Equal(membersAfter, membersBefore) {
+		t.Fatalf("mailbox doctor changed logical membership state: err=%v before=%q after=%q", err, membersBefore, membersAfter)
+	}
+}
+
+func TestPluginDoctorValidatesAllAdaptersLauncherAndExactSkillTree(t *testing.T) {
+	root, err := filepath.Abs(filepath.Join("..", ".."))
+	if err != nil {
+		t.Fatal(err)
+	}
+	digest, err := plugindiagnostic.SkillSetDigest(filepath.Join(root, "skills"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	runtimeDigest, err := plugindiagnostic.RuntimeDigest(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	oldRelease, oldDigest, oldRuntimeDigest := adapterBuildRelease, adapterExpectedSkillSetDigest, adapterExpectedPluginRuntimeDigest
+	adapterBuildRelease, adapterExpectedSkillSetDigest, adapterExpectedPluginRuntimeDigest = "v0.1.0-alpha.1", digest, runtimeDigest
+	t.Cleanup(func() {
+		adapterBuildRelease, adapterExpectedSkillSetDigest, adapterExpectedPluginRuntimeDigest = oldRelease, oldDigest, oldRuntimeDigest
+	})
+	result := inspectAdapterPlugin(t.Context(), root)
+	if !result.Portable || !result.Codex || !result.Claude || !result.Launcher || result.Version != "v0.1.0-alpha.1" || result.SkillDigest != "sha256:"+digest {
+		t.Fatalf("plugin=%#v", result)
+	}
+	var helperOutput bytes.Buffer
+	if code := runAdapterPluginInspect([]string{"--root", root}, &helperOutput); code != 0 {
+		t.Fatalf("plugin inspection helper code=%d", code)
+	}
+	var helperResult pluginDoctorResult
+	if json.Unmarshal(helperOutput.Bytes(), &helperResult) != nil || helperResult != result {
+		t.Fatalf("plugin inspection helper=%#v want=%#v", helperResult, result)
+	}
+	adapterExpectedSkillSetDigest = strings.Repeat("f", 64)
+	if tampered := inspectAdapterPlugin(t.Context(), root); tampered.SkillDigest != "" {
+		t.Fatalf("skill drift passed: %#v", tampered)
+	}
+	adapterExpectedSkillSetDigest = digest
+	adapterExpectedPluginRuntimeDigest = strings.Repeat("f", 64)
+	if tampered := inspectAdapterPlugin(t.Context(), root); tampered.Launcher {
+		t.Fatalf("launcher or MCP registration drift passed: %#v", tampered)
+	}
+}
+
+func TestPluginDoctorHonorsCanceledContext(t *testing.T) {
+	root, err := filepath.Abs(filepath.Join("..", ".."))
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(t.Context())
+	cancel()
+	if result := inspectAdapterPlugin(ctx, root); result != (pluginDoctorResult{}) {
+		t.Fatalf("canceled plugin inspection returned data: %#v", result)
+	}
+}
+
+func TestPluginDoctorRejectsDuplicateIdentityFields(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "plugin.json")
+	if err := os.WriteFile(path, []byte(`{"name":"punaro","version":"0.1.0","version":"9.9.9"}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := readPluginIdentity(t.Context(), path); ok {
+		t.Fatal("duplicate plugin version accepted")
+	}
+}
+
+func checkStatus(report punarodiagnostic.Report, code string) punarodiagnostic.Status {
+	for _, check := range report.Checks {
+		if check.Code == code {
+			return check.Status
+		}
+	}
+	return ""
+}
+
+func preserveAdapterDoctorDependencies(t *testing.T) {
+	t.Helper()
+	configLoad := adapterDoctorConfigLoad
+	relayProbe, notificationProbe, endpointProbe := adapterDoctorRelayProbe, adapterDoctorNotificationProbe, adapterDoctorEndpointProbe
+	mailboxProbe, serviceProbe := adapterDoctorMailboxProbe, adapterDoctorServiceProbe
+	bootstrapReleaseProbe, bootstrapProbe, pluginProbe := adapterDoctorBootstrapReleaseProbe, adapterDoctorBootstrapProbe, adapterDoctorPluginProbe
+	buildRelease := adapterBuildRelease
+	t.Cleanup(func() {
+		adapterDoctorConfigLoad = configLoad
+		adapterDoctorRelayProbe, adapterDoctorNotificationProbe = relayProbe, notificationProbe
+		adapterDoctorEndpointProbe = endpointProbe
+		adapterDoctorMailboxProbe, adapterDoctorServiceProbe = mailboxProbe, serviceProbe
+		adapterDoctorBootstrapReleaseProbe, adapterDoctorBootstrapProbe, adapterDoctorPluginProbe = bootstrapReleaseProbe, bootstrapProbe, pluginProbe
+		adapterBuildRelease = buildRelease
+	})
+}
+
+func TestInspectAdapterBootstrapReleaseExecutesInstalledIdentity(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("shell fixture is Unix-only")
+	}
+	executable := filepath.Join(t.TempDir(), "punaro-bootstrap")
+	if err := os.WriteFile(executable, []byte("#!/bin/sh\n[ \"$1\" = version ] || exit 2\nprintf '%s\\n' v0.1.0-alpha.0\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(executable, 0o700); err != nil { // #nosec G302 -- private executable fixture in a test-owned temporary directory.
+		t.Fatal(err)
+	}
+	if release := inspectAdapterBootstrapRelease(t.Context(), executable); release != "v0.1.0-alpha.0" {
+		t.Fatalf("bootstrap release=%q", release)
+	}
+}
+
+func TestAdapterBootstrapReleaseIsolationHonorsDeadline(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("POSIX blocking executable fixture")
+	}
+	blocker := filepath.Join(t.TempDir(), "blocked-bootstrap-release-doctor")
+	if err := os.WriteFile(blocker, []byte("#!/bin/sh\nexec sleep 10\n"), 0o700); err != nil { // #nosec G306 -- private executable deadline fixture.
+		t.Fatal(err)
+	}
+	previous := adapterDoctorBootstrapReleaseExecutable
+	adapterDoctorBootstrapReleaseExecutable = func() (string, error) { return blocker, nil }
+	t.Cleanup(func() { adapterDoctorBootstrapReleaseExecutable = previous })
+	ctx, cancel := context.WithTimeout(t.Context(), 20*time.Millisecond)
+	defer cancel()
+	started := time.Now()
+	if release := inspectAdapterBootstrapReleaseIsolated(ctx, defaultAdapterBootstrapExecutable()); release != "" || time.Since(started) > time.Second {
+		t.Fatalf("isolated bootstrap release=%q elapsed=%s", release, time.Since(started))
+	}
+}
+
+func TestAdapterBootstrapReleaseHelperReturnsInstalledIdentity(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("shell fixture is Unix-only")
+	}
+	executable := filepath.Join(t.TempDir(), "punaro-bootstrap")
+	if err := os.WriteFile(executable, []byte("#!/bin/sh\n[ \"$1\" = version ] || exit 2\nprintf '%s\\n' v0.1.0-alpha.0\n"), 0o700); err != nil { // #nosec G306 -- private executable fixture.
+		t.Fatal(err)
+	}
+	var stdout bytes.Buffer
+	if code := runAdapterBootstrapReleaseInspect([]string{"--executable", executable}, &stdout); code != 0 {
+		t.Fatalf("bootstrap release helper code=%d output=%q", code, stdout.String())
+	}
+	var result bootstrapReleaseDoctorResult
+	if json.Unmarshal(stdout.Bytes(), &result) != nil || result.Release != "v0.1.0-alpha.0" {
+		t.Fatalf("bootstrap release helper=%#v", result)
+	}
+}
+
+func TestAdapterServiceIsolationHonorsDeadline(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("POSIX blocking executable fixture")
+	}
+	blocker := filepath.Join(t.TempDir(), "blocked-adapter-service-doctor")
+	if err := os.WriteFile(blocker, []byte("#!/bin/sh\nexec sleep 10\n"), 0o700); err != nil { // #nosec G306 -- private executable deadline fixture.
+		t.Fatal(err)
+	}
+	previous := adapterDoctorServiceExecutable
+	adapterDoctorServiceExecutable = func() (string, error) { return blocker, nil }
+	t.Cleanup(func() { adapterDoctorServiceExecutable = previous })
+	ctx, cancel := context.WithTimeout(t.Context(), 20*time.Millisecond)
+	defer cancel()
+	started := time.Now()
+	if result, err := inspectAdapterServiceIsolated(ctx, adapterConfig{}); err == nil || result != (serviceDoctorResult{}) || time.Since(started) > time.Second {
+		t.Fatalf("isolated service=%#v error=%v elapsed=%s", result, err, time.Since(started))
+	}
+}
+
+func TestAdapterServiceHelperReturnsStrictSnapshot(t *testing.T) {
+	var stdout bytes.Buffer
+	if code := runAdapterServiceInspect(nil, &stdout); code != 0 {
+		t.Fatalf("adapter service helper code=%d output=%q", code, stdout.String())
+	}
+	decoder := json.NewDecoder(bytes.NewReader(stdout.Bytes()))
+	decoder.DisallowUnknownFields()
+	var result serviceDoctorResult
+	if decoder.Decode(&result) != nil || decoder.Decode(&struct{}{}) != io.EOF {
+		t.Fatalf("adapter service helper returned invalid snapshot: %q", stdout.String())
+	}
+}
+
+func TestAdapterServiceHelperFailureMakesEveryServiceCheckUnavailable(t *testing.T) {
+	checks := adapterServiceDoctorChecks(serviceDoctorResult{}, errors.New("deadline"))
+	if len(checks) != 6 {
+		t.Fatalf("service checks=%d", len(checks))
+	}
+	for _, check := range checks {
+		if check.Status != punarodiagnostic.StatusUnavailable {
+			t.Fatalf("service check %#v is not unavailable", check)
+		}
+	}
+}
+
+func TestAdapterDoctorCommandOutputIsBounded(t *testing.T) {
+	output := boundedDoctorOutput{maximum: 64 << 10}
+	oversized := strings.Repeat("x", output.maximum+1)
+	if written, err := output.Write([]byte(oversized)); err != nil || written != len(oversized) || output.buffer.Len() != output.maximum || !output.overflow {
+		t.Fatalf("length=%d overflow=%v written=%d err=%v", output.buffer.Len(), output.overflow, written, err)
+	}
+}
+
+func healthyAdapterBootstrapReport(t *testing.T) punarodiagnostic.Report {
+	t.Helper()
+	report, err := punarodiagnostic.New(punarodiagnostic.ComponentBootstrap, punarodiagnostic.Identity{
+		Release: "v0.1.0-alpha.1", ReleaseSequence: 1, CatalogSequence: 1,
+		ArtifactDigest: "sha256:" + strings.Repeat("b", 64), Platform: runtime.GOOS + "-" + runtime.GOARCH,
+	}, []punarodiagnostic.Check{punarodiagnostic.Pass("current_artifact_integrity"), punarodiagnostic.Pass("running_artifact"), punarodiagnostic.Pass("supervisor_process")})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return report
 }
 
 func TestMailboxMCPCommandUsesInstalledNonDefaultState(t *testing.T) {
@@ -895,6 +1631,11 @@ func TestEnvironmentSettingsExplicitlyOverrideInstalledProfile(t *testing.T) {
 	profile := writeInstallerProfile(t, "https://profile.example")
 	t.Setenv("HOME", filepath.Dir(filepath.Dir(filepath.Dir(profile))))
 	t.Setenv("PUNARO_MACHINE_ID", "explicit-machine")
+	identity := filepath.Join(filepath.Dir(profile), "client-identity.json")
+	body, err := (clientidentity.State{Version: clientidentity.Version, Origin: "https://profile.example", ClientBinding: "11111111-1111-4111-8111-111111111111", LegacyMachineID: "explicit-machine"}).Encode()
+	if err != nil || os.WriteFile(identity, body, 0o600) != nil {
+		t.Fatal("could not update identity fixture")
+	}
 	config, err := loadConfig()
 	if err != nil {
 		t.Fatal(err)
@@ -916,10 +1657,6 @@ func TestLoadConfigRequiresMatchingOptInClientIdentityBeforeTransport(t *testing
 	if err != nil {
 		t.Fatal(err)
 	}
-	profileContents = append(profileContents, []byte("PUNARO_CLIENT_IDENTITY_FILE="+identity+"\nPUNARO_CLIENT_BINDING="+binding+"\n")...)
-	if err := os.WriteFile(profile, profileContents, 0o600); err != nil { // #nosec G703 -- test fixture path from writeInstallerProfile.
-		t.Fatal(err)
-	}
 	t.Setenv(adapterProfileFileEnv, profile)
 	if _, err := loadConfig(); err != nil {
 		t.Fatalf("matching identity state rejected: %v", err)
@@ -936,7 +1673,8 @@ func TestLoadConfigRequiresMatchingOptInClientIdentityBeforeTransport(t *testing
 	if _, err := loadConfig(); err == nil {
 		t.Fatal("fresh identity state unexpectedly matched legacy adapter")
 	}
-	if err := os.WriteFile(profile, append(profileContents[:len(profileContents)-len("PUNARO_CLIENT_BINDING="+binding+"\n")], nil...), 0o600); err != nil { // #nosec G703 -- test fixture path from writeInstallerProfile.
+	partial := strings.Replace(string(profileContents), "PUNARO_CLIENT_BINDING="+binding+"\n", "", 1)
+	if err := os.WriteFile(profile, []byte(partial), 0o600); err != nil { // #nosec G703 -- test fixture path from writeInstallerProfile.
 		t.Fatal(err)
 	}
 	if _, err := loadConfig(); err == nil {
@@ -981,8 +1719,15 @@ func writeInstallerProfile(t *testing.T, relayURL string) string {
 	if err := os.MkdirAll(dataDir, 0o700); err != nil {
 		t.Fatal(err)
 	}
+	mailboxBin := filepath.Join(home, ".local", "bin", "agent-mailbox")
+	if err := os.MkdirAll(filepath.Dir(mailboxBin), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(mailboxBin, []byte("fixture"), 0o700); err != nil { // #nosec G306 -- executable test fixture.
+		t.Fatal(err)
+	}
 	profile := filepath.Join(configDir, "adapter.env")
-	contents := strings.Join([]string{
+	lines := []string{
 		"# Created by the installer.",
 		"PUNARO_ADAPTER_RELAY_URL=" + relayURL,
 		"PUNARO_MACHINE_ID=profile-machine",
@@ -991,9 +1736,21 @@ func writeInstallerProfile(t *testing.T, relayURL string) string {
 		"PUNARO_ADAPTER_DATA_DIR=" + dataDir,
 		"PUNARO_MAILBOX_STATE_DIR=" + filepath.Join(home, ".local", "state", "ai-agent", "mailbox"),
 		"PUNARO_ADAPTER_POLL_INTERVAL=30s",
-		"PUNARO_AGENT_MAILBOX_BIN=agent-mailbox",
-		"",
-	}, "\n")
+		"PUNARO_AGENT_MAILBOX_BIN=" + mailboxBin,
+	}
+	if strings.HasPrefix(relayURL, "https://") {
+		identityFile := filepath.Join(configDir, "client-identity.json")
+		clientBinding := "11111111-1111-4111-8111-111111111111"
+		identityBody, encodeErr := (clientidentity.State{Version: clientidentity.Version, Origin: relayURL, ClientBinding: clientBinding, LegacyMachineID: "profile-machine"}).Encode()
+		if encodeErr != nil {
+			t.Fatal(encodeErr)
+		}
+		if err := os.WriteFile(identityFile, identityBody, 0o600); err != nil {
+			t.Fatal(err)
+		}
+		lines = append(lines, "PUNARO_CLIENT_IDENTITY_FILE="+identityFile, "PUNARO_CLIENT_BINDING="+clientBinding)
+	}
+	contents := strings.Join(append(lines, ""), "\n")
 	if err := os.WriteFile(profile, []byte(contents), 0o600); err != nil {
 		t.Fatal(err)
 	}
@@ -1072,5 +1829,143 @@ func TestWriteBootstrapReadyRejectsSymlink(t *testing.T) {
 	t.Setenv(bootstrapReadyEnv, path)
 	if err := writeBootstrapReady(); err == nil {
 		t.Fatal("symlink ready path accepted")
+	}
+}
+
+func TestPrivateWindowsDescriptorRejectsEveryUnauthorizedAllowACE(t *testing.T) {
+	owner := "S-1-5-21-100-200-300-1001"
+	valid := "O:" + owner + "G:SYD:PAI(A;OICI;FA;;;" + owner + ")(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)"
+	if !privateWindowsDescriptor(valid) {
+		t.Fatal("owner/system/administrator-only DACL was rejected")
+	}
+	for name, descriptor := range map[string]string{
+		"everyone":          valid + "(A;OICI;FR;;;WD)",
+		"users":             valid + "(A;OICI;FR;;;BU)",
+		"authenticated":     valid + "(A;OICI;FR;;;AU)",
+		"different account": valid + "(A;OICI;FR;;;S-1-5-21-100-200-300-1002)",
+		"null dacl":         "O:" + owner + "G:SYD:NO_ACCESS_CONTROL",
+		"missing owner":     "G:SYD:PAI(A;OICI;FA;;;SY)",
+		"malformed ace":     "O:" + owner + "G:SYD:PAI(A;FA;;;" + owner + ")",
+	} {
+		t.Run(name, func(t *testing.T) {
+			if privateWindowsDescriptor(descriptor) {
+				t.Fatalf("unsafe descriptor accepted: %s", descriptor)
+			}
+		})
+	}
+}
+
+func TestAdapterServiceBindingRejectsStalePlatformDefinitions(t *testing.T) {
+	for goos, valid := range map[string]string{
+		"linux":   "[Service]\nExecStart=%h/.local/bin/punaro-bootstrap run --directory %h/.local/state/punaro-bootstrap\n",
+		"darwin":  `<plist><dict><key>Label</key><string>org.punaro.adapter</string><key>ProgramArguments</key><array><string>/bin/sh</string><string>-c</string><string>exec "$HOME/.local/bin/punaro-bootstrap" run --directory "$HOME/.local/state/punaro-bootstrap"</string></array></dict></plist>`,
+		"windows": strings.ReplaceAll(adapterWindowsRunnerBody, "\n", "\r\n"),
+	} {
+		t.Run(goos, func(t *testing.T) {
+			if !adapterServiceFileBound(goos, valid) {
+				t.Fatalf("valid %s service rejected", goos)
+			}
+			stale := strings.Replace(valid, "punaro-bootstrap", "punaro-adapter", 1)
+			if adapterServiceFileBound(goos, stale) {
+				t.Fatalf("stale %s service accepted", goos)
+			}
+			if adapterServiceFileBound(goos, valid+valid) {
+				t.Fatalf("ambiguous %s service accepted", goos)
+			}
+			if goos == "linux" && adapterServiceFileBound(goos, "# ExecStart=%h/.local/bin/punaro-bootstrap run --directory %h/.local/state/punaro-bootstrap\nExecStart=%h/.local/bin/punaro-adapter\n") {
+				t.Fatal("commented expected Linux service binding was accepted")
+			}
+		})
+	}
+}
+
+func TestAdapterWindowsRunnerRequiresExactReleaseBoundContent(t *testing.T) {
+	template, err := os.ReadFile(filepath.Join("..", "..", "deploy", "windows", "Run-PunaroAdapter.ps1"))
+	if err != nil || string(template) != adapterWindowsRunnerBody {
+		t.Fatalf("release-bound Windows runner drifted: err=%v body=%q", err, template)
+	}
+	valid := strings.ReplaceAll(adapterWindowsRunnerBody, "\n", "\r\n")
+	if !adapterServiceFileBound("windows", valid) {
+		t.Fatal("exact Windows runner rejected")
+	}
+	for _, stale := range []string{
+		"# $bin = Join-Path $root 'bin\\punaro-bootstrap.exe'\r\n# & $bin run --directory $bootstrap\r\n& 'C:\\attacker.exe'\r\n",
+		strings.Replace(valid, "exit $LASTEXITCODE", "exit 0", 1),
+		valid + "& 'C:\\attacker.exe'\r\n",
+	} {
+		if adapterServiceFileBound("windows", stale) {
+			t.Fatalf("modified Windows runner accepted: %q", stale)
+		}
+	}
+}
+
+func TestAdapterLaunchdBindingRequiresStructuralInstalledAndEffectiveCommands(t *testing.T) {
+	command := `exec "$HOME/.local/bin/punaro-bootstrap" run --directory "$HOME/.local/state/punaro-bootstrap"`
+	validPlist := `<plist><dict><key>Label</key><string>org.punaro.adapter</string><key>ProgramArguments</key><array><string>/bin/sh</string><string>-c</string><string>` + command + `</string></array><key>Other</key><string>ignored</string></dict></plist>`
+	if !adapterLaunchdPlistBound(validPlist) {
+		t.Fatal("valid structural LaunchAgent plist rejected")
+	}
+	for _, stale := range []string{
+		`<plist><dict><key>Label</key><string>org.punaro.adapter</string><key>Unrelated</key><string>` + command + `</string><key>ProgramArguments</key><array><string>/bin/sh</string><string>-c</string><string>exec /tmp/attacker</string></array></dict></plist>`,
+		strings.Replace(validPlist, "org.punaro.adapter", "org.attacker.adapter", 1),
+		strings.Replace(validPlist, "<string>-c</string>", "<string>-c</string><string>extra</string>", 1),
+		validPlist + validPlist,
+	} {
+		if adapterLaunchdPlistBound(stale) {
+			t.Fatalf("stale LaunchAgent plist accepted: %s", stale)
+		}
+	}
+
+	validEffective := "path = /Users/seb/Library/LaunchAgents/org.punaro.adapter.plist\nstate = running\nprogram = /bin/sh\narguments = {\n\t/bin/sh\n\t-c\n\t" + command + "\n}\nruns = 1\n"
+	if !adapterLaunchdEffectiveBound(validEffective) {
+		t.Fatal("valid effective launchd command rejected")
+	}
+	for _, stale := range []string{
+		strings.Replace(validEffective, "program = /bin/sh", "program = /tmp/attacker", 1),
+		strings.Replace(validEffective, command, "exec /tmp/attacker", 1),
+		strings.Replace(validEffective, "\t-c\n", "\t-c\n\textra\n", 1),
+		validEffective + validEffective,
+	} {
+		if adapterLaunchdEffectiveBound(stale) {
+			t.Fatalf("stale effective launchd command accepted: %q", stale)
+		}
+	}
+}
+
+func TestAdapterWindowsTaskRequiresExactProtectedRunner(t *testing.T) {
+	powershell := `C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe`
+	runner := `C:\Users\Seb\AppData\Local\Punaro\Run-PunaroAdapter.ps1`
+	valid := `<Task><Actions><Exec><Command>` + powershell + `</Command><Arguments>-NoProfile -NonInteractive -WindowStyle Hidden -ExecutionPolicy Bypass -File "` + runner + `"</Arguments></Exec></Actions></Task>`
+	if !adapterWindowsTaskBound(valid, powershell, runner) {
+		t.Fatal("valid scheduled task rejected")
+	}
+	for _, stale := range []string{
+		strings.Replace(valid, "Run-PunaroAdapter.ps1", "attacker.ps1", 1),
+		strings.Replace(valid, "-NoProfile ", "", 1),
+		strings.Replace(valid, "-NonInteractive ", "", 1),
+		strings.Replace(valid, `<Command>`+powershell+`</Command>`, `<Command>C:\evil.exe</Command><Arguments>`+powershell+`</Arguments>`, 1),
+		valid + valid,
+	} {
+		if adapterWindowsTaskBound(stale, powershell, runner) {
+			t.Fatal("stale scheduled task accepted")
+		}
+	}
+}
+
+func TestAdapterSystemdExecStartRequiresExactEffectiveBootstrapCommand(t *testing.T) {
+	home := "/home/seb"
+	valid := "{ path=/home/seb/.local/bin/punaro-bootstrap ; argv[]=/home/seb/.local/bin/punaro-bootstrap run --directory /home/seb/.local/state/punaro-bootstrap ; ignore_errors=no ; start_time=[n/a] ; stop_time=[n/a] ; pid=0 ; code=(null) ; status=0/0 }\n"
+	if !adapterSystemdExecStartBound(valid, home) {
+		t.Fatal("valid effective adapter ExecStart rejected")
+	}
+	for _, stale := range []string{
+		strings.Replace(valid, "/home/seb/.local/bin/punaro-bootstrap", "/tmp/punaro-bootstrap", 1),
+		strings.Replace(valid, "run --directory", "doctor --directory", 1),
+		valid + valid,
+		"",
+	} {
+		if adapterSystemdExecStartBound(stale, home) {
+			t.Fatalf("stale effective adapter ExecStart accepted: %q", stale)
+		}
 	}
 }

@@ -1,9 +1,11 @@
 package telegram
 
 import (
+	"bytes"
 	"context"
 	"database/sql"
 	"fmt"
+	"os"
 	"path/filepath"
 	"sync"
 	"testing"
@@ -46,6 +48,275 @@ func TestStateRecordsCompletedUpdatesAndRequiresExplicitTopicRoute(t *testing.T)
 	}
 	if err := state.SetRoute(100, 8, "conversation-1"); err == nil {
 		t.Fatal("one conversation was mapped to more than one Telegram topic")
+	}
+}
+
+func TestGatewayHealthSnapshotIsContentFreeAndReadOnly(t *testing.T) {
+	t.Parallel()
+	directory := t.TempDir()
+	database := filepath.Join(directory, "telegram.db")
+	state, err := Open(database)
+	if err != nil {
+		t.Fatal(err)
+	}
+	now := testCallbackNow
+	if err := state.RecordGatewayCycle(GatewayCycleRecord{At: now, Offset: 11, PollOK: true, RelayOK: true, TelegramOK: true}); err != nil {
+		t.Fatal(err)
+	}
+	if err := state.RecordGatewayCycle(GatewayCycleRecord{At: now.Add(time.Minute), Offset: 11, Failure: GatewayFailureTransient}); err != nil {
+		t.Fatal(err)
+	}
+	if err := state.SetRoute(55, 7, "conversation-1"); err != nil {
+		t.Fatal(err)
+	}
+	if err := state.AdoptExecution("conversation-1", 7); err != nil {
+		t.Fatal(err)
+	}
+	if err := state.MarkClaimComplete("conversation-1"); err != nil {
+		t.Fatal(err)
+	}
+	if err := state.Close(); err != nil {
+		t.Fatal(err)
+	}
+	before, err := os.ReadFile(database) // #nosec G304 -- test-owned database path.
+	if err != nil {
+		t.Fatal(err)
+	}
+	snapshot, err := InspectGatewayState(t.Context(), database, now.Add(2*time.Minute))
+	if err != nil {
+		t.Fatal(err)
+	}
+	after, err := os.ReadFile(database) // #nosec G304 -- test-owned database path.
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(before, after) {
+		t.Fatal("doctor inspection changed the Telegram database")
+	}
+	if !snapshot.Integrity || !snapshot.RoutesConsistent || snapshot.RouteCount != 1 || snapshot.IncompleteClaims != 0 || snapshot.LastSuccessAge != 2*time.Minute || snapshot.LastCycleAge != time.Minute || snapshot.ConsecutiveFailures != 1 || snapshot.LastFailure != GatewayFailureTransient {
+		t.Fatalf("snapshot=%#v", snapshot)
+	}
+}
+
+func TestGatewayHealthSeparatesTerminalFailureClassesAndStuckProgress(t *testing.T) {
+	t.Parallel()
+	database := filepath.Join(t.TempDir(), "telegram.db")
+	state, err := Open(database)
+	if err != nil {
+		t.Fatal(err)
+	}
+	now := testCallbackNow
+	for _, class := range []GatewayFailureClass{GatewayFailureInboundRelayPermanent, GatewayFailureOutboundTelegramPermanent, GatewayFailureDeletedTopic} {
+		if err := state.RecordGatewayCycle(GatewayCycleRecord{At: now, Offset: 8, Failure: class}); err != nil {
+			t.Fatal(err)
+		}
+		now = now.Add(time.Minute)
+	}
+	if err := state.Close(); err != nil {
+		t.Fatal(err)
+	}
+	snapshot, err := InspectGatewayState(t.Context(), database, now.Add(10*time.Minute))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if snapshot.TerminalInbound != 1 || snapshot.TerminalOutbound != 2 || snapshot.LastFailure != GatewayFailureDeletedTopic || snapshot.ConsecutiveFailures != 3 || !snapshot.StuckHead {
+		t.Fatalf("snapshot=%#v", snapshot)
+	}
+}
+
+func TestGatewayHealthOutboundStallIgnoresInboundOffsetProgress(t *testing.T) {
+	t.Parallel()
+	database := filepath.Join(t.TempDir(), "telegram.db")
+	state, err := Open(database)
+	if err != nil {
+		t.Fatal(err)
+	}
+	now := testCallbackNow
+	for cycle := range 3 {
+		if err := state.RecordGatewayCycle(GatewayCycleRecord{
+			At:              now.Add(time.Duration(cycle) * time.Minute),
+			Offset:          int64(8 + cycle),
+			PollOK:          true,
+			RelayOK:         true,
+			Failure:         GatewayFailureOutboundTelegramPermanent,
+			OutboundBlocked: true,
+		}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := state.Close(); err != nil {
+		t.Fatal(err)
+	}
+	snapshot, err := InspectGatewayState(t.Context(), database, now.Add(10*time.Minute))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !snapshot.StuckHead {
+		t.Fatalf("continuous inbound progress masked a stuck outbound head: %#v", snapshot)
+	}
+}
+
+func TestGatewayHealthPreservesBlockedHeadAcrossEarlierPhaseFailures(t *testing.T) {
+	t.Parallel()
+	database := filepath.Join(t.TempDir(), "telegram.db")
+	state, err := Open(database)
+	if err != nil {
+		t.Fatal(err)
+	}
+	now := testCallbackNow
+	cycles := []GatewayCycleRecord{
+		{At: now, Offset: 8, PollOK: true, RelayOK: true, OutboundBlocked: true, Failure: GatewayFailureTransient},
+		{At: now.Add(4 * time.Minute), Offset: 9, Failure: GatewayFailureTransient},
+		{At: now.Add(9 * time.Minute), Offset: 10, Failure: GatewayFailureTransient},
+	}
+	for _, cycle := range cycles {
+		if err := state.RecordGatewayCycle(cycle); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := state.Close(); err != nil {
+		t.Fatal(err)
+	}
+	snapshot, err := InspectGatewayState(t.Context(), database, now.Add(10*time.Minute))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !snapshot.StuckHead {
+		t.Fatalf("earlier-phase failures cleared the blocked outbound head age: %#v", snapshot)
+	}
+}
+
+func TestGatewayHealthSuccessfulCycleClearsPreservedBlockedHead(t *testing.T) {
+	t.Parallel()
+	database := filepath.Join(t.TempDir(), "telegram.db")
+	state, err := Open(database)
+	if err != nil {
+		t.Fatal(err)
+	}
+	now := testCallbackNow
+	cycles := []GatewayCycleRecord{
+		{At: now, Offset: 8, PollOK: true, RelayOK: true, OutboundBlocked: true, Failure: GatewayFailureTransient},
+		{At: now.Add(time.Minute), Offset: 9, Failure: GatewayFailureTransient},
+		{At: now.Add(2 * time.Minute), Offset: 9, PollOK: true, RelayOK: true, TelegramOK: true},
+	}
+	for _, cycle := range cycles {
+		if err := state.RecordGatewayCycle(cycle); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := state.Close(); err != nil {
+		t.Fatal(err)
+	}
+	snapshot, err := InspectGatewayState(t.Context(), database, now.Add(10*time.Minute))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if snapshot.StuckHead || snapshot.ConsecutiveFailures != 0 {
+		t.Fatalf("successful cycle did not clear the blocked outbound head: %#v", snapshot)
+	}
+}
+
+func TestOpenMigratesOutboundProgressLedgerInPlace(t *testing.T) {
+	t.Parallel()
+	database := filepath.Join(t.TempDir(), "telegram.db")
+	db, err := sql.Open("sqlite", database)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.ExecContext(t.Context(), `CREATE TABLE gateway_health (
+		id INTEGER PRIMARY KEY CHECK (id = 1),
+		last_cycle_at INTEGER NOT NULL,
+		last_success_at INTEGER,
+		last_poll_at INTEGER,
+		last_relay_at INTEGER,
+		last_telegram_at INTEGER,
+		last_progress_at INTEGER NOT NULL,
+		offset INTEGER NOT NULL,
+		consecutive_failures INTEGER NOT NULL,
+		last_failure TEXT NOT NULL,
+		terminal_inbound INTEGER NOT NULL,
+		terminal_outbound INTEGER NOT NULL
+	)`); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.Close(); err != nil {
+		t.Fatal(err)
+	}
+	state, err := Open(database)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = state.Close() }()
+	if err := state.RecordGatewayCycle(GatewayCycleRecord{At: testCallbackNow, Offset: 1, PollOK: true, RelayOK: true, OutboundBlocked: true, Failure: GatewayFailureTransient}); err != nil {
+		t.Fatal(err)
+	}
+	var columns int
+	if err := state.db.QueryRowContext(t.Context(), `SELECT COUNT(*) FROM pragma_table_info('gateway_health') WHERE name IN ('last_outbound_progress_at','outbound_blocked')`).Scan(&columns); err != nil || columns != 2 {
+		t.Fatalf("outbound progress columns=%d err=%v", columns, err)
+	}
+}
+
+func TestGatewayHealthClearsTerminalFailuresAfterSuccessfulRecovery(t *testing.T) {
+	t.Parallel()
+	database := filepath.Join(t.TempDir(), "telegram.db")
+	state, err := Open(database)
+	if err != nil {
+		t.Fatal(err)
+	}
+	now := testCallbackNow
+	for _, class := range []GatewayFailureClass{GatewayFailureInboundRelayPermanent, GatewayFailureOutboundTelegramPermanent, GatewayFailureDeletedTopic} {
+		if err := state.RecordGatewayCycle(GatewayCycleRecord{At: now, Offset: 8, Failure: class}); err != nil {
+			t.Fatal(err)
+		}
+		now = now.Add(time.Minute)
+	}
+	if err := state.RecordGatewayCycle(GatewayCycleRecord{At: now, Offset: 9, PollOK: true, RelayOK: true, TelegramOK: true}); err != nil {
+		t.Fatal(err)
+	}
+	if err := state.Close(); err != nil {
+		t.Fatal(err)
+	}
+	snapshot, err := InspectGatewayState(t.Context(), database, now.Add(time.Minute))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if snapshot.TerminalInbound != 0 || snapshot.TerminalOutbound != 0 || snapshot.LastFailure != GatewayFailureNone || snapshot.ConsecutiveFailures != 0 || snapshot.StuckHead {
+		t.Fatalf("snapshot=%#v", snapshot)
+	}
+}
+
+func TestInspectGatewayStateRejectsFutureHealthTimestamps(t *testing.T) {
+	t.Parallel()
+	database := filepath.Join(t.TempDir(), "telegram.db")
+	state, err := Open(database)
+	if err != nil {
+		t.Fatal(err)
+	}
+	now := testCallbackNow
+	if err := state.RecordGatewayCycle(GatewayCycleRecord{At: now.Add(time.Minute), Offset: 9, PollOK: true, RelayOK: true, TelegramOK: true}); err != nil {
+		t.Fatal(err)
+	}
+	if err := state.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := InspectGatewayState(t.Context(), database, now); err == nil {
+		t.Fatal("future gateway health timestamps were classified as fresh")
+	}
+}
+
+func TestInspectGatewayStateHonorsCanceledContext(t *testing.T) {
+	database := filepath.Join(t.TempDir(), "telegram.db")
+	state, err := Open(database)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := state.Close(); err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(t.Context())
+	cancel()
+	if _, err := InspectGatewayState(ctx, database, testCallbackNow); err == nil {
+		t.Fatal("canceled gateway state inspection continued with a fresh deadline")
 	}
 }
 

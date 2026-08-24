@@ -12,8 +12,10 @@ installers:
 The scripts build from the source checkout you run them from. Use a reviewed,
 pinned checkout or a verified release artifact; do not pipe a network download
 into a shell. `punaro-bootstrap` pulls from GitHub Releases, documented in
-[github-releases.md](github-releases.md). Until a catalog/manifest pair is
-signed, install from a reviewed checkout. Neither installer accepts or prints secret values. For the
+[github-releases.md](github-releases.md). The one-time client installer seeds a
+reviewed checkout; after a signed catalog/manifest pair is published, use
+`punaro-bootstrap update` for release changes instead of rebuilding in place.
+Neither installer accepts or prints secret values. For the
 supported fresh server path, follow the [production Compose lifecycle](production-compose.md#first-installation).
 It is the sole path that configures relay authority, device authentication,
 trusted attachment storage, memory APIs, ingress, and lifecycle recovery
@@ -102,8 +104,11 @@ that mailbox state, run from the reviewed Punaro checkout:
   --agent-guidance-dir /path/to/agent-project
 ```
 
-The machine ID must be unique. The script derives the exclusive endpoint
-namespace `agent/laptop-review/`, builds `punaro-adapter` and
+The machine ID must be unique. The script derives the checked-in plugin release
+and skill digest and embeds them into the fixed bootstrap and adapter binaries,
+so doctor can compare the installed supervisor to signed-release compatibility
+policy. It also derives the exclusive endpoint namespace
+`agent/laptop-review/`, builds `punaro-adapter` and
 `punaro-bootstrap`, seeds the current bootstrap slot from that checkout,
 creates the local `group/punaro-attached` group, writes owner-only local
 state, installs the launchd (macOS) or user-systemd (Linux) service
@@ -111,6 +116,27 @@ definition that launches `punaro-bootstrap run`, and prints a public
 enrollment JSON record. launchd declares it as a background process;
 systemd disables terminal input and sends output only to the journal. It does
 not start the adapter yet.
+
+When the signed release catalog is available, install it into the managed slot
+and keep the fixed bootstrap-owned service lifecycle:
+
+```sh
+punaro-bootstrap update \
+  --directory "$HOME/.local/state/punaro-bootstrap" \
+  --keys-file /absolute/private/punaro-release.pub \
+  --release v0.1.0-alpha.1
+punaro-bootstrap doctor \
+  --directory "$HOME/.local/state/punaro-bootstrap" \
+  --keys-file /absolute/private/punaro-release.pub \
+  --machine-id laptop-review
+punaro-adapter doctor --plugin-root /absolute/installed/punaro-plugin
+```
+
+The update verifies the signed catalog and manifest plus every exact artifact
+length/digest before changing slots. Do not download a binary named `latest`,
+replace current-slot files manually, or run a versioned adapter directly from
+the service. See [GitHub Releases](github-releases.md) and
+[doctor](doctor.md).
 
 ### Windows 10/11 client
 
@@ -137,6 +163,12 @@ verify with:
 
 ```powershell
 Get-ScheduledTask -TaskName 'Punaro Adapter'
+& "$env:LOCALAPPDATA\Punaro\bin\punaro-bootstrap.exe" doctor `
+  --directory "$env:LOCALAPPDATA\Punaro\bootstrap" `
+  --keys-file C:\absolute\private\punaro-release.pub `
+  --machine-id windows-review
+& "$env:LOCALAPPDATA\Punaro\bin\punaro-adapter.exe" doctor `
+  --plugin-root C:\absolute\installed\punaro-plugin
 ```
 
 The installer also builds `%LOCALAPPDATA%\Punaro\bin\punaro-trusted-attachment.exe`.

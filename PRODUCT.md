@@ -1,7 +1,7 @@
 # Product: Punaro
 
 > What Punaro is and where it is going. Architectural authority lives in `DESIGN.md` and
-> `docs/big-brain-plan.md`; this document is the product-level view. Last updated 2026-08-19.
+> `docs/big-brain-plan.md`; this document is the product-level view. Last updated 2026-08-23.
 
 ## 1. What this is
 
@@ -152,6 +152,13 @@ enrolled Telegram gateway are live; the claim/`user-telegram` model (PR #138) is
 now, and once it merges fresh topics will be created through the claim flow — no legacy
 routes are carried forward. Big Brain has the full canonical store, proposal machinery, lexical retrieval,
 and native client built, but runs dark pending its enablement slices.
+
+The alpha release candidate now has a shared read-only doctor contract for the
+Linux server and Telegram gateway plus macOS/Linux/Windows clients. It verifies
+release/update provenance, service and relay readiness, mailbox/plugin/skill
+parity, recovery state, and fleet compatibility without reading content or
+granting repair authority. The four-machine signed-release drill remains the
+deployment evidence gate.
 
 Runway, roughly in order:
 

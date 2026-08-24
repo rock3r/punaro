@@ -69,6 +69,96 @@ func TestAssembleWritesCatalogAndManifestForScannedArtifacts(t *testing.T) {
 	}
 }
 
+func TestAssembleRetainsEligiblePriorReleasesForRollback(t *testing.T) {
+	firstDir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(firstDir, "punaro-adapter-linux-amd64"), []byte("first"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	first, err := Assemble(AssembleRequest{
+		Directory: firstDir, Release: "v0.1.0-alpha.1", Sequence: 1, CatalogSequence: 1,
+		PublishedAt: time.Date(2026, 8, 16, 12, 0, 0, 0, time.UTC), ExpiresAt: time.Date(2026, 8, 23, 12, 0, 0, 0, time.UTC),
+		MinimumSafeSequence: 1, ComposeSHA256: testComposeDigest, MigrationManifestSHA256: testMigrateDigest,
+		Database: SchemaRange{Min: 10, Max: 44, Target: 44, RollbackFloor: 10}, PostgreSQLMajor: 18,
+		GatewayProtocol: ProtocolRange{Min: 1, Max: 1}, ClientProtocol: ProtocolRange{Min: 1, Max: 1},
+		MinimumRecoveryProtocol: 1, MinimumBootstrapRelease: "v0.1.0-alpha.1",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	secondDir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(secondDir, "punaro-adapter-linux-amd64"), []byte("second"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	second, err := Assemble(AssembleRequest{
+		Directory: secondDir, Release: "v0.1.0-alpha.2", Sequence: 2, CatalogSequence: 2, PreviousCatalog: &first.Catalog,
+		PublishedAt: time.Date(2026, 8, 17, 12, 0, 0, 0, time.UTC), ExpiresAt: time.Date(2026, 8, 24, 12, 0, 0, 0, time.UTC),
+		ComposeSHA256: testComposeDigest, MigrationManifestSHA256: testMigrateDigest,
+		Database: SchemaRange{Min: 10, Max: 44, Target: 44, RollbackFloor: 10}, PostgreSQLMajor: 18,
+		GatewayProtocol: ProtocolRange{Min: 1, Max: 1}, ClientProtocol: ProtocolRange{Min: 1, Max: 1},
+		MinimumRecoveryProtocol: 1, MinimumBootstrapRelease: "v0.1.0-alpha.1",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	prior := first.Catalog.Releases[0]
+	if len(second.Catalog.Releases) != 2 || second.Catalog.MinimumSafeSequence != 1 || !second.Catalog.Allows(prior.Release, prior.Sequence, prior.ManifestSHA256) {
+		t.Fatalf("replacement catalog lost rollback release: %#v", second.Catalog)
+	}
+}
+
+func TestAssembleRejectsCriticallyBlockedCurrentRelease(t *testing.T) {
+	request := policyAssembleRequest(t, "v0.1.0-alpha.2", 2, 2, 1, nil, []int64{2})
+	if _, err := Assemble(request); err == nil {
+		t.Fatal("assembly accepted a critically blocked current release")
+	}
+}
+
+func TestAssembleRejectsFutureCriticalBlock(t *testing.T) {
+	request := policyAssembleRequest(t, "v0.1.0-alpha.2", 2, 2, 1, nil, []int64{100})
+	if _, err := Assemble(request); err == nil {
+		t.Fatal("assembly accepted a future critical block")
+	}
+}
+
+func TestAssembleCapsMergedBlocksAndPrunesRetiredBlocks(t *testing.T) {
+	priorBlocks := make([]int64, maxCatalogCriticalBlocks)
+	for index := range priorBlocks {
+		priorBlocks[index] = int64(index + 1)
+	}
+	previous, err := Assemble(policyAssembleRequest(t, "v0.1.0-alpha.40", 40, 40, 1, nil, priorBlocks))
+	if err != nil {
+		t.Fatal(err)
+	}
+	tooMany := policyAssembleRequest(t, "v0.1.0-alpha.41", 41, 41, 1, &previous.Catalog, []int64{33})
+	if _, err := Assemble(tooMany); err == nil {
+		t.Fatal("assembly accepted more than 32 merged critical blocks")
+	}
+	pruned := policyAssembleRequest(t, "v0.1.0-alpha.41", 41, 41, 33, &previous.Catalog, []int64{33})
+	assembled, err := Assemble(pruned)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(assembled.Catalog.CriticalBlocks) != 1 || assembled.Catalog.CriticalBlocks[0] != 33 {
+		t.Fatalf("critical blocks=%v", assembled.Catalog.CriticalBlocks)
+	}
+}
+
+func policyAssembleRequest(t *testing.T, release string, sequence, catalogSequence, minimumSafe int64, previous *Catalog, blocks []int64) AssembleRequest {
+	t.Helper()
+	directory := t.TempDir()
+	if err := os.WriteFile(filepath.Join(directory, "punaro-adapter-linux-amd64"), []byte(release), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	return AssembleRequest{
+		Directory: directory, Release: release, Sequence: sequence, CatalogSequence: catalogSequence, PreviousCatalog: previous,
+		PublishedAt: time.Date(2026, 8, 16, 12, 0, 0, 0, time.UTC), ExpiresAt: time.Date(2026, 8, 23, 12, 0, 0, 0, time.UTC),
+		MinimumSafeSequence: minimumSafe, ComposeSHA256: testComposeDigest, MigrationManifestSHA256: testMigrateDigest,
+		Database: SchemaRange{Min: 10, Max: 44, Target: 44, RollbackFloor: 10}, PostgreSQLMajor: 18,
+		GatewayProtocol: ProtocolRange{Min: 1, Max: 1}, ClientProtocol: ProtocolRange{Min: 1, Max: 1},
+		MinimumRecoveryProtocol: 1, MinimumBootstrapRelease: "v0.1.0-alpha.1", CriticalBlocks: blocks,
+	}
+}
+
 func TestAssembleRejectsUnexpectedFilenamesAndAbsoluteArtifactPaths(t *testing.T) {
 	dir := t.TempDir()
 	if err := os.WriteFile(filepath.Join(dir, "latest"), []byte("nope"), 0o600); err != nil {

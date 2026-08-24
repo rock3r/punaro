@@ -7,19 +7,28 @@ import (
 	"crypto/rand"
 	"crypto/sha256"
 	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"flag"
 	"fmt"
 	"io"
 	"os"
 	"path/filepath"
+	"strconv"
 	"time"
 
+	"github.com/rock3r/punaro/internal/operator"
+	"github.com/rock3r/punaro/internal/plugindiagnostic"
 	punaropostgres "github.com/rock3r/punaro/internal/postgres"
 	punarorelease "github.com/rock3r/punaro/internal/release"
 )
 
-const productionPostgresMajor = 18
+var publicationNow = func() time.Time { return time.Now().UTC() }
+
+const (
+	maximumReleaseCriticalBlocks = 32
+	maximumReleaseSupportedFrom  = 32
+)
 
 func main() {
 	if err := run(os.Args[1:]); err != nil {
@@ -30,13 +39,27 @@ func main() {
 
 func run(args []string) error {
 	if len(args) == 0 {
-		return errors.New("usage: punaro-release assemble|validate|keygen|sign|verify")
+		return errors.New("usage: punaro-release assemble|build-facts|validate|validate-request|validate-advancement|verify-artifacts|publication-check|keygen|sign|verify")
 	}
 	switch args[0] {
 	case "assemble":
 		return runAssemble(args[1:])
+	case "build-facts":
+		facts, err := buildFacts(args[1:])
+		if err != nil {
+			return err
+		}
+		return json.NewEncoder(os.Stdout).Encode(facts)
 	case "validate":
 		return runValidate(args[1:])
+	case "validate-request":
+		return runValidateRequest(args[1:])
+	case "validate-advancement":
+		return runValidateAdvancement(args[1:])
+	case "verify-artifacts":
+		return runVerifyArtifacts(args[1:])
+	case "publication-check":
+		return runPublicationCheck(args[1:])
 	case "keygen":
 		return runKeygen(args[1:])
 	case "sign":
@@ -44,8 +67,39 @@ func run(args []string) error {
 	case "verify":
 		return runVerify(args[1:])
 	default:
-		return errors.New("usage: punaro-release assemble|validate|keygen|sign|verify")
+		return errors.New("usage: punaro-release assemble|build-facts|validate|validate-request|validate-advancement|verify-artifacts|publication-check|keygen|sign|verify")
 	}
+}
+
+type releaseBuildFacts struct {
+	Release                 string `json:"release"`
+	ComposeSHA256           string `json:"compose_sha256"`
+	MigrationManifestSHA256 string `json:"migration_manifest_sha256"`
+	SkillSetSHA256          string `json:"skill_set_sha256"`
+	PluginRuntimeSHA256     string `json:"plugin_runtime_sha256"`
+}
+
+func buildFacts(args []string) (releaseBuildFacts, error) {
+	flags := flag.NewFlagSet("punaro-release build-facts", flag.ContinueOnError)
+	flags.SetOutput(io.Discard)
+	releaseName := flags.String("release", "", "product release name")
+	pluginRoot := flags.String("plugin-root", "", "portable Punaro plugin root")
+	if flags.Parse(args) != nil || flags.NArg() != 0 || *releaseName == "" || *pluginRoot == "" {
+		return releaseBuildFacts{}, errors.New("release build facts are invalid")
+	}
+	version, err := plugindiagnostic.Version(*pluginRoot)
+	if err != nil || *releaseName != "v"+version {
+		return releaseBuildFacts{}, errors.New("release build facts are invalid")
+	}
+	skillDigest, err := plugindiagnostic.SkillSetDigest(filepath.Join(*pluginRoot, "skills"))
+	if err != nil {
+		return releaseBuildFacts{}, errors.New("release build facts are invalid")
+	}
+	runtimeDigest, err := plugindiagnostic.RuntimeDigest(*pluginRoot)
+	if err != nil {
+		return releaseBuildFacts{}, errors.New("release build facts are invalid")
+	}
+	return releaseBuildFacts{Release: *releaseName, ComposeSHA256: operator.ComposeManifestSHA256(), MigrationManifestSHA256: punaropostgres.MigrationManifestSHA256(), SkillSetSHA256: skillDigest, PluginRuntimeSHA256: runtimeDigest}, nil
 }
 
 func runAssemble(args []string) error {
@@ -57,10 +111,30 @@ func runAssemble(args []string) error {
 	catalogSequence := flags.Int64("catalog-sequence", 0, "monotonic catalog sequence")
 	publishedAt := flags.String("published-at", "", "UTC publication time")
 	expiresAt := flags.String("expires-at", "", "UTC catalog expiry")
-	composeFile := flags.String("compose-file", "deploy/compose/production.yaml", "compose source to hash")
 	image := flags.String("image", "", "optional digest-pinned gateway image")
 	minSafe := flags.Int64("minimum-safe-sequence", 0, "lowest sequence still safe for automatic updates")
 	minBootstrap := flags.String("minimum-bootstrap-release", "", "oldest bootstrap that may install this release")
+	previousCatalogFile := flags.String("previous-catalog", "", "verified live catalog whose eligible releases must be retained")
+	supportedFrom := []string{}
+	flags.Func("supported-from", "older release supported as a direct upgrade source; repeat at most 32 times", func(value string) error {
+		if len(supportedFrom) >= maximumReleaseSupportedFrom {
+			return errors.New("too many supported upgrade sources")
+		}
+		supportedFrom = append(supportedFrom, value)
+		return nil
+	})
+	criticalBlocks := []int64{}
+	flags.Func("critical-block", "release sequence to block; repeat at most 32 times", func(value string) error {
+		if len(criticalBlocks) >= maximumReleaseCriticalBlocks {
+			return errors.New("too many critical blocks")
+		}
+		sequence, err := strconv.ParseInt(value, 10, 64)
+		if err != nil || sequence < 1 {
+			return errors.New("critical block must be a positive integer")
+		}
+		criticalBlocks = append(criticalBlocks, sequence)
+		return nil
+	})
 	if err := flags.Parse(args); err != nil {
 		return errors.New("release assembly is invalid")
 	}
@@ -71,14 +145,25 @@ func runAssemble(args []string) error {
 	if err != nil {
 		return err
 	}
-	composeDigest, err := hashFile(*composeFile)
-	if err != nil {
-		return err
-	}
 	schema := currentSchemaRange()
+	var previousCatalog *punarorelease.Catalog
+	if *previousCatalogFile != "" {
+		body, readErr := os.ReadFile(*previousCatalogFile) // #nosec G304 -- explicit operator-supplied prior catalog.
+		if readErr != nil || len(body) > punarorelease.MaximumManifestBytes {
+			return errors.New("release assembly is invalid")
+		}
+		parsed, parseErr := punarorelease.ParseCatalog(body)
+		if parseErr != nil {
+			return errors.New("release assembly is invalid")
+		}
+		previousCatalog = &parsed
+	}
 	minimumSafe := *minSafe
 	if minimumSafe == 0 {
 		minimumSafe = *sequence
+		if previousCatalog != nil {
+			minimumSafe = previousCatalog.MinimumSafeSequence
+		}
 	}
 	bootstrapRelease := *minBootstrap
 	if bootstrapRelease == "" {
@@ -93,14 +178,17 @@ func runAssemble(args []string) error {
 		MinimumSafeSequence:     minimumSafe,
 		CatalogSequence:         *catalogSequence,
 		Image:                   *image,
-		ComposeSHA256:           composeDigest,
+		ComposeSHA256:           operator.ComposeManifestSHA256(),
 		MigrationManifestSHA256: punaropostgres.MigrationManifestSHA256(),
 		Database:                schema,
-		PostgreSQLMajor:         productionPostgresMajor,
+		PostgreSQLMajor:         punarorelease.ProductionPostgreSQLMajor,
 		GatewayProtocol:         punarorelease.ProtocolRange{Min: 1, Max: 1},
 		ClientProtocol:          punarorelease.ProtocolRange{Min: 1, Max: 1},
 		MinimumRecoveryProtocol: 1,
 		MinimumBootstrapRelease: bootstrapRelease,
+		PreviousCatalog:         previousCatalog,
+		SupportedFrom:           supportedFrom,
+		CriticalBlocks:          criticalBlocks,
 	})
 	return err
 }
@@ -109,6 +197,7 @@ func runValidate(args []string) error {
 	flags := flag.NewFlagSet("punaro-release validate", flag.ContinueOnError)
 	flags.SetOutput(io.Discard)
 	dir := flags.String("dir", "", "directory containing assembled documents")
+	releaseName := flags.String("release", "", "expected product release name")
 	if err := flags.Parse(args); err != nil {
 		return errors.New("release validation is invalid")
 	}
@@ -127,6 +216,9 @@ func runValidate(args []string) error {
 	if err != nil {
 		return err
 	}
+	if *releaseName != "" && manifest.Release != *releaseName {
+		return errors.New("release validation is invalid")
+	}
 	catalog, err := punarorelease.ParseCatalog(catalogBody)
 	if err != nil {
 		return err
@@ -134,6 +226,175 @@ func runValidate(args []string) error {
 	sum := sha256.Sum256(manifestBody)
 	if !catalog.Allows(manifest.Release, manifest.Sequence, hex.EncodeToString(sum[:])) {
 		return errors.New("catalog does not allow the assembled manifest")
+	}
+	return nil
+}
+
+func runValidateRequest(args []string) error {
+	flags := flag.NewFlagSet("punaro-release validate-request", flag.ContinueOnError)
+	flags.SetOutput(io.Discard)
+	releaseName := flags.String("release", "", "candidate product release name")
+	sequence := flags.Int64("sequence", 0, "candidate release sequence")
+	catalogSequence := flags.Int64("catalog-sequence", 0, "candidate catalog sequence")
+	minimumSafe := flags.Int64("minimum-safe-sequence", 0, "candidate safety floor")
+	minimumBootstrap := flags.String("minimum-bootstrap-release", "", "oldest compatible bootstrap release")
+	supportedFrom := []string{}
+	flags.Func("supported-from", "supported direct upgrade source; repeat at most 32 times", func(value string) error {
+		if len(supportedFrom) >= maximumReleaseSupportedFrom {
+			return errors.New("too many supported upgrade sources")
+		}
+		supportedFrom = append(supportedFrom, value)
+		return nil
+	})
+	criticalBlocks := []int64{}
+	flags.Func("critical-block", "release sequence to block; repeat at most 32 times", func(value string) error {
+		if len(criticalBlocks) >= maximumReleaseCriticalBlocks {
+			return errors.New("too many critical blocks")
+		}
+		parsed, err := strconv.ParseInt(value, 10, 64)
+		if err != nil || parsed < 1 {
+			return errors.New("critical block must be a positive integer")
+		}
+		criticalBlocks = append(criticalBlocks, parsed)
+		return nil
+	})
+	if flags.Parse(args) != nil || flags.NArg() != 0 {
+		return errors.New("release request validation is invalid")
+	}
+	if err := punarorelease.ValidatePublicationRequest(*releaseName, *minimumBootstrap, supportedFrom, *sequence, *catalogSequence, *minimumSafe, criticalBlocks); err != nil {
+		return errors.New("release request validation is invalid")
+	}
+	return nil
+}
+
+func runValidateAdvancement(args []string) error {
+	flags := flag.NewFlagSet("punaro-release validate-advancement", flag.ContinueOnError)
+	flags.SetOutput(io.Discard)
+	previousCatalogFile := flags.String("previous-catalog", "", "verified live catalog")
+	releaseName := flags.String("release", "", "candidate product release name")
+	sequence := flags.Int64("sequence", 0, "candidate release sequence")
+	catalogSequence := flags.Int64("catalog-sequence", 0, "candidate catalog sequence")
+	minimumSafe := flags.Int64("minimum-safe-sequence", 0, "candidate safety floor")
+	criticalBlocks := []int64{}
+	flags.Func("critical-block", "release sequence to block; repeat at most 32 times", func(value string) error {
+		if len(criticalBlocks) >= maximumReleaseCriticalBlocks {
+			return errors.New("too many critical blocks")
+		}
+		parsed, err := strconv.ParseInt(value, 10, 64)
+		if err != nil || parsed < 1 {
+			return errors.New("critical block must be a positive integer")
+		}
+		criticalBlocks = append(criticalBlocks, parsed)
+		return nil
+	})
+	if flags.Parse(args) != nil || flags.NArg() != 0 || *previousCatalogFile == "" || *releaseName == "" || *sequence < 1 || *catalogSequence < 1 || *minimumSafe < 0 {
+		return errors.New("catalog advancement validation is invalid")
+	}
+	body, err := os.ReadFile(*previousCatalogFile) // #nosec G304 -- explicit verified live-catalog path.
+	if err != nil || len(body) > punarorelease.MaximumManifestBytes {
+		return errors.New("catalog advancement validation is invalid")
+	}
+	previous, err := punarorelease.ParseCatalog(body)
+	if err != nil {
+		return errors.New("catalog advancement validation is invalid")
+	}
+	if *minimumSafe == 0 {
+		*minimumSafe = previous.MinimumSafeSequence
+	}
+	if err := punarorelease.ValidateCatalogAdvancement(previous, *releaseName, *sequence, *catalogSequence, *minimumSafe, criticalBlocks); err != nil {
+		return errors.New("catalog advancement validation is invalid")
+	}
+	return nil
+}
+
+func runVerifyArtifacts(args []string) error {
+	flags := flag.NewFlagSet("punaro-release verify-artifacts", flag.ContinueOnError)
+	flags.SetOutput(io.Discard)
+	dir := flags.String("dir", "", "directory containing downloaded native artifacts")
+	manifestFile := flags.String("manifest", "", "verified release manifest")
+	if flags.Parse(args) != nil || flags.NArg() != 0 || *dir == "" || *manifestFile == "" {
+		return errors.New("release artifact verification is invalid")
+	}
+	body, err := os.ReadFile(*manifestFile) // #nosec G304 -- explicit verified release manifest.
+	if err != nil || len(body) > punarorelease.MaximumManifestBytes {
+		return errors.New("release artifact verification is invalid")
+	}
+	manifest, err := punarorelease.ParseReleaseManifest(body)
+	if err != nil {
+		return errors.New("release artifact verification is invalid")
+	}
+	return punarorelease.VerifyArtifactDirectory(*dir, manifest)
+}
+
+func runPublicationCheck(args []string) error {
+	flags := flag.NewFlagSet("punaro-release publication-check", flag.ContinueOnError)
+	flags.SetOutput(io.Discard)
+	catalogFile := flags.String("catalog", "", "candidate signed catalog document")
+	previousFile := flags.String("previous-catalog", "", "optional verified live catalog document")
+	if flags.Parse(args) != nil || flags.NArg() != 0 || *catalogFile == "" {
+		return errors.New("release publication check is invalid")
+	}
+	candidateBody, err := os.ReadFile(*catalogFile) // #nosec G304 -- explicit operator-supplied catalog path.
+	if err != nil || len(candidateBody) > punarorelease.MaximumManifestBytes {
+		return errors.New("release publication check is invalid")
+	}
+	candidate, err := punarorelease.ParseCatalog(candidateBody)
+	if err != nil {
+		return errors.New("release publication check is invalid")
+	}
+	var previous *punarorelease.Catalog
+	if *previousFile != "" {
+		previousBody, readErr := os.ReadFile(*previousFile) // #nosec G304 -- explicit verified live catalog path.
+		if readErr != nil || len(previousBody) > punarorelease.MaximumManifestBytes {
+			return errors.New("release publication check is invalid")
+		}
+		parsed, parseErr := punarorelease.ParseCatalog(previousBody)
+		if parseErr != nil {
+			return errors.New("release publication check is invalid")
+		}
+		previous = &parsed
+	}
+	return validatePublicationCatalog(candidate, previous, publicationNow())
+}
+
+func validatePublicationCatalog(candidate punarorelease.Catalog, previous *punarorelease.Catalog, now time.Time) error {
+	if !candidate.Fresh(now) {
+		return errors.New("candidate release catalog is not currently fresh")
+	}
+	if previous != nil {
+		if candidate.Sequence <= previous.Sequence {
+			return errors.New("candidate release catalog sequence does not advance the live catalog")
+		}
+		if candidate.MinimumSafeSequence < previous.MinimumSafeSequence {
+			return errors.New("candidate release catalog lowers the live safety floor")
+		}
+		blocked := map[int64]bool{}
+		for _, sequence := range candidate.CriticalBlocks {
+			blocked[sequence] = true
+		}
+		for _, priorBlock := range previous.CriticalBlocks {
+			if priorBlock < candidate.MinimumSafeSequence {
+				continue
+			}
+			if !blocked[priorBlock] {
+				return errors.New("candidate release catalog removes a live critical block")
+			}
+		}
+		for _, prior := range previous.Releases {
+			if prior.Sequence < candidate.MinimumSafeSequence || blocked[prior.Sequence] {
+				continue
+			}
+			retained := false
+			for _, entry := range candidate.Releases {
+				if entry == prior {
+					retained = true
+					break
+				}
+			}
+			if !retained {
+				return errors.New("candidate release catalog drops an eligible live release")
+			}
+		}
 	}
 	return nil
 }
@@ -306,20 +567,6 @@ func currentSchemaRange() punarorelease.SchemaRange {
 		Target:        manifest.MaxSupported,
 		RollbackFloor: manifest.MinSupported,
 	}
-}
-
-func hashFile(path string) (string, error) {
-	file, err := os.Open(path) // #nosec G304 -- explicit compose source path.
-	if err != nil {
-		return "", errors.New("release assembly is invalid")
-	}
-	hash := sha256.New()
-	_, copyErr := io.Copy(hash, file)
-	closeErr := file.Close()
-	if copyErr != nil || closeErr != nil {
-		return "", errors.New("release assembly is invalid")
-	}
-	return hex.EncodeToString(hash.Sum(nil)), nil
 }
 
 func requireAbsentFile(path string) error {

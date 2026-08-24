@@ -7,6 +7,8 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"net"
+	"strings"
 	"sync"
 	"time"
 
@@ -55,6 +57,16 @@ func OpenApplication(ctx context.Context, cfg Config) (*Database, error) {
 	dsn, err := ReadDSNFile(cfg.DSNFile)
 	if err != nil {
 		return nil, err
+	}
+	return OpenApplicationDSN(ctx, dsn)
+}
+
+// OpenApplicationDSN opens an application connection from an already
+// protected and validated in-memory DSN. Diagnostic callers use this after a
+// deadline-isolated credential read.
+func OpenApplicationDSN(ctx context.Context, dsn string) (*Database, error) {
+	if strings.TrimSpace(dsn) == "" {
+		return nil, errors.New("PostgreSQL connection configuration is invalid")
 	}
 	db, err := open(ctx, dsn)
 	if err != nil {
@@ -237,6 +249,42 @@ func (d *Database) PostgreSQLMajor(ctx context.Context) (int, error) {
 		return 0, errors.New("PostgreSQL major version is unavailable")
 	}
 	return major, nil
+}
+
+// ListenerPrivate verifies the server's configured TCP listeners through the
+// application-role connection instead of inferring them from local files.
+func (d *Database) ListenerPrivate(ctx context.Context) (bool, error) {
+	return listenerPrivate(ctx, d.db)
+}
+
+// ListenerPrivate verifies the same server boundary through owner authority.
+func (a *Administration) ListenerPrivate(ctx context.Context) (bool, error) {
+	return listenerPrivate(ctx, a.db)
+}
+
+func listenerPrivate(ctx context.Context, q queryer) (bool, error) {
+	var addresses string
+	if err := q.QueryRowContext(ctx, "SELECT current_setting('listen_addresses')").Scan(&addresses); err != nil {
+		return false, errors.New("PostgreSQL listener configuration is unavailable")
+	}
+	return listenerAddressesPrivate(addresses), nil
+}
+
+func listenerAddressesPrivate(value string) bool {
+	if strings.TrimSpace(value) == "" {
+		return true
+	}
+	for _, address := range strings.Split(value, ",") {
+		address = strings.TrimSpace(address)
+		if strings.EqualFold(address, "localhost") {
+			continue
+		}
+		ip := net.ParseIP(address)
+		if ip == nil || !ip.IsLoopback() {
+			return false
+		}
+	}
+	return true
 }
 
 // Identity returns a content-free fingerprint of the exact target database

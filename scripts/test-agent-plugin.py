@@ -20,6 +20,7 @@ MCP_SCHEMA = "https://agent-plugins.org/schemas/1.0.0/mcp.schema.json"
 CLAUDE_SCHEMA = "https://json.schemastore.org/claude-code-plugin-manifest.json"
 REQUIRED_SKILLS = {"punaro-mailbox", "punaro-reply", "punaro-attachment"}
 SKILL_LAUNCHERS = {
+    "punaro-mailbox": "punaro-adapter",
     "punaro-reply": "punaro-adapter",
     "punaro-attachment": "punaro-trusted-attachment",
 }
@@ -128,6 +129,8 @@ def validate_skills() -> None:
             raise ValidationError(f"skill name does not match its directory: {skill_name}")
         if not re.search(r"(?m)^description:\s*\S", frontmatter):
             raise ValidationError(f"skill has no description: {skill_name}")
+        if "doctor" not in text or "without separate" not in text:
+            raise ValidationError(f"skill omits read-only doctor readiness boundary: {skill_name}")
 
     for skill_name, command in SKILL_LAUNCHERS.items():
         skill_root = skills_root / skill_name

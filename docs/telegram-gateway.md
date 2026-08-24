@@ -66,6 +66,14 @@ and start `punaro-telegram`; inspect `systemctl status` and redact logs before
 sharing them. Run `systemd-analyze security punaro-telegram.service` on the
 target OS and include the result in deployment evidence.
 
+On Windows, install the gateway at
+`%LOCALAPPDATA%\Punaro\bin\punaro-telegram.exe` and provision the `Punaro
+Telegram` scheduled task with exactly that executable as its sole action and no
+arguments. Doctor reads the task XML, verifies the exact native executable,
+queries its enabled/running/last-result/restart state, and executes `version`
+through that same validated path. A task bound to any other binary fails the
+service binding and running-release checks.
+
 Before starting long polling, inspect the bot's webhook status with the Bot
 API `getWebhookInfo`. Telegram does not allow `getUpdates` while an outgoing
 webhook is configured. Punaro never removes or changes a webhook automatically:
@@ -165,6 +173,18 @@ product path.
 Agents never choose Telegram topics, pass a thread or chat id, or call the Bot
 API. `telegram_thread_id` on a mailbox envelope is inbound diagnostic metadata
 only.
+
+## Read-only readiness
+
+Run `punaro-telegram doctor --timeout 15s` before release evidence and after a
+gateway service, polling, relay, Access, Bot API, route, topic, or retry failure.
+It uses `getMe` plus signed non-consuming relay/notification probes and a
+read-only bounded SQLite snapshot. It never polls an update, advances an
+offset, creates a topic, sends a message, leases or acknowledges relay mail, or
+prints provider responses. The complete SQLite open and inspection runs in a
+deadline-killable child helper, so stalled state storage cannot extend the
+advertised total timeout. See [doctor.md](doctor.md) for exit semantics and
+the stable Telegram check registry.
 
 ## Retire the Bot API side channel
 

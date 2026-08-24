@@ -3,6 +3,7 @@ package backup
 
 import (
 	"bytes"
+	"context"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
@@ -17,6 +18,7 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/rock3r/punaro/internal/incrementalfs"
 )
 
 const (
@@ -108,15 +110,28 @@ type Summary struct {
 // Verify strictly validates the manifest and every declared file without
 // following links. Undeclared regular files are rejected.
 func Verify(directory string) (Manifest, error) {
-	manifest, _, err := verify(directory)
+	return VerifyContext(context.Background(), directory)
+}
+
+// VerifyContext strictly validates one backup while honoring cancellation
+// between bounded filesystem reads.
+func VerifyContext(ctx context.Context, directory string) (Manifest, error) {
+	manifest, _, err := verifyContext(ctx, directory)
 	return manifest, err
 }
 
 func verify(directory string) (Manifest, string, error) {
+	return verifyContext(context.Background(), directory)
+}
+
+func verifyContext(ctx context.Context, directory string) (Manifest, string, error) {
+	if err := ctx.Err(); err != nil {
+		return Manifest{}, "", err
+	}
 	if err := trustedPrivateDirectory(directory); err != nil {
 		return Manifest{}, "", errors.New("backup directory is unavailable or unsafe")
 	}
-	manifest, manifestDigest, err := readManifest(filepath.Join(directory, manifestName))
+	manifest, manifestDigest, err := readManifestContext(ctx, filepath.Join(directory, manifestName))
 	if err != nil {
 		return Manifest{}, "", errors.New("backup manifest is unavailable or invalid")
 	}
@@ -125,11 +140,14 @@ func verify(directory string) (Manifest, string, error) {
 	}
 	declared := make(map[string]File, len(manifest.Files))
 	for _, entry := range manifest.Files {
+		if err := ctx.Err(); err != nil {
+			return Manifest{}, "", err
+		}
 		if _, exists := declared[entry.Path]; exists {
 			return Manifest{}, "", errors.New("backup manifest contains duplicate files")
 		}
 		declared[entry.Path] = entry
-		if err := verifyFile(directory, entry); err != nil {
+		if err := verifyFileContext(ctx, directory, entry); err != nil {
 			return Manifest{}, "", fmt.Errorf("backup file %q failed verification", entry.Path)
 		}
 	}
@@ -147,19 +165,15 @@ func verify(directory string) (Manifest, string, error) {
 			allowedDirectories[directory] = true
 		}
 	}
-	err = filepath.WalkDir(directory, func(path string, _ os.DirEntry, walkErr error) error {
-		if walkErr != nil {
-			return walkErr
+	maximumEntries := len(seen) + len(allowedDirectories)
+	err = incrementalfs.Walk(ctx, directory, maximumEntries, func(path, relative string, info os.FileInfo) error {
+		if err := ctx.Err(); err != nil {
+			return err
 		}
 		if path == directory {
 			return nil
 		}
-		relative, relErr := filepath.Rel(directory, path)
-		if relErr != nil || relative == "." || strings.HasPrefix(relative, ".."+string(filepath.Separator)) {
-			return errors.New("backup path escapes its directory")
-		}
-		info, infoErr := os.Lstat(path)
-		if infoErr != nil || info.Mode()&os.ModeSymlink != 0 {
+		if info.Mode()&os.ModeSymlink != 0 {
 			return errors.New("backup contains an unsafe filesystem entry")
 		}
 		if info.IsDir() {
@@ -219,24 +233,63 @@ func VerifyForUpdate(directory string, binding UpdateBinding) (Manifest, error) 
 
 // List returns only fully verified, non-symlink backup directories.
 func List(root string) ([]Summary, error) {
+	return ListContext(context.Background(), root)
+}
+
+// ListContext returns fully verified backups and stops verification promptly
+// when the caller's diagnostic deadline expires.
+func ListContext(ctx context.Context, root string) ([]Summary, error) {
+	return ListContextLimit(ctx, root, 0)
+}
+
+// ListContextLimit is ListContext with an optional bound on all root entries.
+// A zero limit permits any number and preserves the general listing API.
+func ListContextLimit(ctx context.Context, root string, maximumEntries int) ([]Summary, error) {
+	if maximumEntries < 0 {
+		return nil, errors.New("backup listing limit is invalid")
+	}
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
 	if err := trustedPrivateDirectory(root); err != nil {
 		return nil, errors.New("backup root is unavailable or unsafe")
 	}
-	entries, err := os.ReadDir(root)
+	directoryHandle, err := os.Open(root) // #nosec G304 -- explicit trusted private backup root.
 	if err != nil {
 		return nil, errors.New("backup root cannot be listed")
 	}
-	result := make([]Summary, 0, len(entries))
-	for _, entry := range entries {
-		if strings.HasPrefix(entry.Name(), ".") || entry.Type()&os.ModeSymlink != 0 || !entry.IsDir() {
-			continue
+	defer func() { _ = directoryHandle.Close() }()
+	result := []Summary{}
+	entryCount := 0
+	for {
+		entries, readErr := directoryHandle.ReadDir(32)
+		for _, entry := range entries {
+			entryCount++
+			if maximumEntries > 0 && entryCount > maximumEntries {
+				return nil, errors.New("backup root has too many entries")
+			}
+			if err := ctx.Err(); err != nil {
+				return nil, err
+			}
+			if strings.HasPrefix(entry.Name(), ".") || entry.Type()&os.ModeSymlink != 0 || !entry.IsDir() {
+				continue
+			}
+			directory := filepath.Join(root, entry.Name())
+			manifest, verifyErr := VerifyContext(ctx, directory)
+			if verifyErr != nil {
+				if err := ctx.Err(); err != nil {
+					return nil, err
+				}
+				continue
+			}
+			result = append(result, Summary{Directory: directory, BackupID: manifest.BackupID, CreatedAt: manifest.CreatedAt, SchemaVersion: manifest.SchemaVersion, State: manifest.State})
 		}
-		directory := filepath.Join(root, entry.Name())
-		manifest, verifyErr := Verify(directory)
-		if verifyErr != nil {
-			continue
+		if errors.Is(readErr, io.EOF) {
+			break
 		}
-		result = append(result, Summary{Directory: directory, BackupID: manifest.BackupID, CreatedAt: manifest.CreatedAt, SchemaVersion: manifest.SchemaVersion, State: manifest.State})
+		if readErr != nil {
+			return nil, errors.New("backup root cannot be listed")
+		}
 	}
 	sort.Slice(result, func(i, j int) bool {
 		if result[i].CreatedAt.Equal(result[j].CreatedAt) {
@@ -244,26 +297,22 @@ func List(root string) ([]Summary, error) {
 		}
 		return result[i].CreatedAt.Before(result[j].CreatedAt)
 	})
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
 	return result, nil
 }
 
-func readManifest(path string) (Manifest, string, error) {
+func readManifestContext(ctx context.Context, path string) (Manifest, string, error) {
+	if ctx == nil || ctx.Err() != nil {
+		return Manifest{}, "", errors.New("manifest read was canceled")
+	}
 	info, err := os.Lstat(path)
 	if err != nil || !info.Mode().IsRegular() || info.Size() > maximumManifest || (runtime.GOOS != "windows" && info.Mode().Perm()&0o077 != 0) || trustedProtectedFile(path, maximumManifest) != nil {
 		return Manifest{}, "", errors.New("manifest file is unsafe")
 	}
-	file, err := os.Open(path) // #nosec G304 -- child of an explicit private backup directory.
-	if err != nil {
-		return Manifest{}, "", err
-	}
-	opened, statErr := file.Stat()
-	if statErr != nil || !os.SameFile(info, opened) {
-		_ = file.Close()
-		return Manifest{}, "", errors.New("manifest changed during open")
-	}
-	defer func() { _ = file.Close() }()
-	body, err := io.ReadAll(io.LimitReader(file, maximumManifest+1))
-	if err != nil || len(body) > maximumManifest || rejectDuplicateJSONKeys(body) != nil {
+	body, err := incrementalfs.ReadFile(ctx, path, maximumManifest)
+	if err != nil || rejectDuplicateJSONKeys(body) != nil {
 		return Manifest{}, "", errors.New("manifest JSON is invalid")
 	}
 	decoder := json.NewDecoder(bytes.NewReader(body))
@@ -467,7 +516,11 @@ func validSnapshotID(value string) bool {
 }
 
 func verifyFile(directory string, entry File) error {
-	file, err := openVerifiedFile(directory, entry)
+	return verifyFileContext(context.Background(), directory, entry)
+}
+
+func verifyFileContext(ctx context.Context, directory string, entry File) error {
+	file, err := openVerifiedFileContext(ctx, directory, entry)
 	if err != nil {
 		return err
 	}
@@ -475,6 +528,13 @@ func verifyFile(directory string, entry File) error {
 }
 
 func openVerifiedFile(directory string, entry File) (*os.File, error) {
+	return openVerifiedFileContext(context.Background(), directory, entry)
+}
+
+func openVerifiedFileContext(ctx context.Context, directory string, entry File) (*os.File, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
 	path := filepath.Join(directory, filepath.FromSlash(entry.Path))
 	info, err := os.Lstat(path)
 	if err != nil || !info.Mode().IsRegular() || info.Size() != entry.Size || (runtime.GOOS != "windows" && info.Mode().Perm()&0o077 != 0) || trustedProtectedFile(path, entry.Size) != nil {
@@ -490,7 +550,7 @@ func openVerifiedFile(directory string, entry File) (*os.File, error) {
 		return nil, errors.New("file changed during open")
 	}
 	hash := sha256.New()
-	written, copyErr := io.Copy(hash, io.LimitReader(file, entry.Size+1))
+	written, copyErr := io.Copy(hash, io.LimitReader(contextReader{ctx: ctx, reader: file}, entry.Size+1))
 	if copyErr != nil || written != entry.Size || hex.EncodeToString(hash.Sum(nil)) != entry.SHA256 {
 		_ = file.Close()
 		return nil, errors.New("file content mismatch")
@@ -500,6 +560,18 @@ func openVerifiedFile(directory string, entry File) (*os.File, error) {
 		return nil, errors.New("file cannot be rewound")
 	}
 	return file, nil
+}
+
+type contextReader struct {
+	ctx    context.Context
+	reader io.Reader
+}
+
+func (reader contextReader) Read(buffer []byte) (int, error) {
+	if err := reader.ctx.Err(); err != nil {
+		return 0, err
+	}
+	return reader.reader.Read(buffer)
 }
 
 // ReadVerifiedFile returns bytes from the same inode whose digest was verified.

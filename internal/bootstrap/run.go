@@ -16,6 +16,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/rock3r/punaro/internal/incrementalfs"
 	punarorelease "github.com/rock3r/punaro/internal/release"
 )
 
@@ -396,6 +397,10 @@ func loadRunPID(directory string) (runPIDRecord, error) {
 	if err != nil {
 		return runPIDRecord{}, err
 	}
+	return parseRunPID(body)
+}
+
+func parseRunPID(body []byte) (runPIDRecord, error) {
 	var record runPIDRecord
 	if json.Unmarshal(body, &record) != nil || record.Schema != 1 {
 		return runPIDRecord{}, errors.New("bootstrap run is already active")
@@ -596,6 +601,9 @@ func waitHealth(ctx context.Context, request RunRequest, child Process, started 
 		}
 		select {
 		case <-child.Done():
+			if err := ctx.Err(); err != nil {
+				return err
+			}
 			return errChildExited
 		default:
 		}
@@ -609,6 +617,9 @@ func waitHealth(ctx context.Context, request RunRequest, child Process, started 
 		case <-ctx.Done():
 			return ctx.Err()
 		case <-child.Done():
+			if err := ctx.Err(); err != nil {
+				return err
+			}
 			return errChildExited
 		case <-ticker.C:
 		}
@@ -786,8 +797,14 @@ func waitHealthWindow(ctx context.Context, request RunRequest, child Process, st
 				return err
 			}
 		case <-timer.C:
+			if err := ctx.Err(); err != nil {
+				return err
+			}
 			select {
 			case <-child.Done():
+				if err := ctx.Err(); err != nil {
+					return err
+				}
 				return errChildExited
 			default:
 				return nil
@@ -898,17 +915,17 @@ func adapterBinary(slotDir, goos, goarch string) (string, error) {
 }
 
 func readReadyFile(path string) (string, error) {
-	info, err := os.Lstat(path) // #nosec G703 -- ready file is a fixed child of the bootstrap directory.
-	if err != nil {
+	if _, err := os.Lstat(path); err != nil { // #nosec G703 -- ready file is a fixed child of the bootstrap directory.
 		return "", err
 	}
-	if !info.Mode().IsRegular() || info.Size() > maxReadyBytes {
-		return "", errors.New("bootstrap ready file is invalid")
-	}
-	body, err := os.ReadFile(path) // #nosec G304 -- ready file is a fixed child of the bootstrap directory.
+	body, err := incrementalfs.ReadFile(context.Background(), path, maxReadyBytes)
 	if err != nil {
 		return "", errors.New("bootstrap ready file is invalid")
 	}
+	return parseReadyFile(body)
+}
+
+func parseReadyFile(body []byte) (string, error) {
 	if err := rejectDuplicateJSONFields(body); err != nil {
 		return "", errors.New("bootstrap ready file is invalid")
 	}
@@ -1004,6 +1021,10 @@ func loadRecovery(directory string) (recoveryState, error) {
 	if err != nil {
 		return recoveryState{}, errors.New("bootstrap recovery state is invalid")
 	}
+	return parseRecovery(body)
+}
+
+func parseRecovery(body []byte) (recoveryState, error) {
 	if err := rejectDuplicateJSONFields(body); err != nil {
 		return recoveryState{}, errors.New("bootstrap recovery state is invalid")
 	}

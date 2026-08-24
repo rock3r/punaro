@@ -2,8 +2,6 @@ package main
 
 import (
 	"context"
-	"crypto/sha256"
-	"encoding/hex"
 	"errors"
 	"os"
 	"path/filepath"
@@ -58,16 +56,11 @@ func TestUpdateResumeUsesLocallyVerifiedTargetWithoutRegistryPull(t *testing.T) 
 	request := testUpdateRequest()
 	request.SourceImage = installation.Image
 	stage := operator.UpdateStage{Directory: directory, UpdateID: request.UpdateID, PreviousRelease: request.SourceRelease, PreviousImage: request.SourceImage, TargetRelease: request.TargetRelease, TargetImage: request.TargetImage}
-	staged, err := operator.StageUpdate(stage)
+	_, err = operator.StageUpdate(stage)
 	if err != nil {
 		t.Fatal(err)
 	}
-	compose, err := os.ReadFile(operator.OverrideFile(staged.CandidateDirectory))
-	if err != nil {
-		t.Fatal(err)
-	}
-	digest := sha256.Sum256(compose)
-	executor := &commandUpdateExecutor{installation: installation, request: request, stage: stage, metadata: punarorelease.Metadata{ComposeSHA256: hex.EncodeToString(digest[:])}}
+	executor := &commandUpdateExecutor{installation: installation, request: request, stage: stage, metadata: punarorelease.Metadata{ComposeSHA256: operator.ComposeManifestSHA256()}}
 	originalDocker := runUpdateDocker
 	t.Cleanup(func() { runUpdateDocker = originalDocker })
 	pulled := false
