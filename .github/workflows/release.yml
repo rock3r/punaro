@@ -266,6 +266,7 @@ jobs:
           skill_sha256=$(printf '%s\n' "$facts" | jq -er .skill_set_sha256)
           plugin_runtime_sha256=$(printf '%s\n' "$facts" | jq -er .plugin_runtime_sha256)
           printf '%s' "$GHCR_TOKEN" | docker login ghcr.io --username "$GITHUB_ACTOR" --password-stdin
+          candidate_tag=$(./scripts/release-candidate-tag.sh "$GITHUB_SHA" "$GITHUB_RUN_ID" "$GITHUB_RUN_ATTEMPT")
           metadata="$RUNNER_TEMP/punaro-image-metadata.json"
           docker buildx build \
             --platform linux/amd64 \
@@ -282,7 +283,7 @@ jobs:
             --label "org.opencontainers.image.revision=$GITHUB_SHA" \
             --label "org.opencontainers.image.version=$RELEASE" \
             --metadata-file "$metadata" \
-            --tag "$repository:$RELEASE" \
+            --tag "$repository:$candidate_tag" \
             --push .
           digest=$(jq -er '."containerimage.digest"' "$metadata")
           case "$digest" in sha256:[0-9a-f][0-9a-f]*) ;; *) printf '%s\n' 'published image digest is invalid' >&2; exit 2 ;; esac

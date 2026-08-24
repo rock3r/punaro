@@ -51,10 +51,16 @@ fi
 script_dir=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
 repo_dir=$(CDPATH= cd -- "$script_dir/.." && pwd)
 [ -f "$repo_dir/go.mod" ] && [ -d "$repo_dir/cmd/punaro-adapter" ] || fail 'run this builder from a complete Punaro source checkout'
+plugin_root=$repo_dir
+host_os=$(env -u GOOS -u GOARCH -u CGO_ENABLED go env GOHOSTOS)
+if [ "$host_os" = windows ]; then
+	command -v cygpath >/dev/null 2>&1 || fail 'cygpath is required for Windows release builds'
+	plugin_root=$(cygpath -w "$repo_dir") || fail 'Windows plugin root is invalid'
+fi
 
 facts=$(
 	cd "$repo_dir"
-	env -u GOOS -u GOARCH -u CGO_ENABLED go run ./cmd/punaro-release build-facts --release "$release" --plugin-root "$repo_dir"
+	env -u GOOS -u GOARCH -u CGO_ENABLED go run ./cmd/punaro-release build-facts --release "$release" --plugin-root "$plugin_root"
 ) || fail 'release build identity is invalid'
 compose_sha256=$(printf '%s\n' "$facts" | sed -n 's/.*"compose_sha256":"\([0-9a-f]*\)".*/\1/p')
 migration_sha256=$(printf '%s\n' "$facts" | sed -n 's/.*"migration_manifest_sha256":"\([0-9a-f]*\)".*/\1/p')
