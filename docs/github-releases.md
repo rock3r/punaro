@@ -51,8 +51,10 @@ gh workflow run macos-notarize.yml --repo rock3r/punaro --ref <branch>
 
 ## What CI publishes
 
-The `release` workflow first validates every dispatch identity and policy input
-and proves the named GitHub Release does not already exist. Only after that
+The `release` workflow first validates every dispatch identity and policy input,
+proves the named GitHub Release does not already exist, downloads and verifies
+the signed live catalog when present, and proves both candidate sequences and
+retention policy advance it. Only after that
 read-only preflight passes does it publish the Linux/amd64 gateway image to GHCR
 with OCI SBOM and provenance attestations, capture its registry digest, and bind
 that exact `ghcr.io/rock3r/punaro@sha256:...` identity into the release manifest

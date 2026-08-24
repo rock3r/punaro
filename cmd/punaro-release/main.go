@@ -39,7 +39,7 @@ func main() {
 
 func run(args []string) error {
 	if len(args) == 0 {
-		return errors.New("usage: punaro-release assemble|build-facts|validate|verify-artifacts|publication-check|keygen|sign|verify")
+		return errors.New("usage: punaro-release assemble|build-facts|validate|validate-advancement|verify-artifacts|publication-check|keygen|sign|verify")
 	}
 	switch args[0] {
 	case "assemble":
@@ -52,6 +52,8 @@ func run(args []string) error {
 		return json.NewEncoder(os.Stdout).Encode(facts)
 	case "validate":
 		return runValidate(args[1:])
+	case "validate-advancement":
+		return runValidateAdvancement(args[1:])
 	case "verify-artifacts":
 		return runVerifyArtifacts(args[1:])
 	case "publication-check":
@@ -63,7 +65,7 @@ func run(args []string) error {
 	case "verify":
 		return runVerify(args[1:])
 	default:
-		return errors.New("usage: punaro-release assemble|build-facts|validate|verify-artifacts|publication-check|keygen|sign|verify")
+		return errors.New("usage: punaro-release assemble|build-facts|validate|validate-advancement|verify-artifacts|publication-check|keygen|sign|verify")
 	}
 }
 
@@ -222,6 +224,46 @@ func runValidate(args []string) error {
 	sum := sha256.Sum256(manifestBody)
 	if !catalog.Allows(manifest.Release, manifest.Sequence, hex.EncodeToString(sum[:])) {
 		return errors.New("catalog does not allow the assembled manifest")
+	}
+	return nil
+}
+
+func runValidateAdvancement(args []string) error {
+	flags := flag.NewFlagSet("punaro-release validate-advancement", flag.ContinueOnError)
+	flags.SetOutput(io.Discard)
+	previousCatalogFile := flags.String("previous-catalog", "", "verified live catalog")
+	releaseName := flags.String("release", "", "candidate product release name")
+	sequence := flags.Int64("sequence", 0, "candidate release sequence")
+	catalogSequence := flags.Int64("catalog-sequence", 0, "candidate catalog sequence")
+	minimumSafe := flags.Int64("minimum-safe-sequence", 0, "candidate safety floor")
+	criticalBlocks := []int64{}
+	flags.Func("critical-block", "release sequence to block; repeat at most 32 times", func(value string) error {
+		if len(criticalBlocks) >= maximumReleaseCriticalBlocks {
+			return errors.New("too many critical blocks")
+		}
+		parsed, err := strconv.ParseInt(value, 10, 64)
+		if err != nil || parsed < 1 {
+			return errors.New("critical block must be a positive integer")
+		}
+		criticalBlocks = append(criticalBlocks, parsed)
+		return nil
+	})
+	if flags.Parse(args) != nil || flags.NArg() != 0 || *previousCatalogFile == "" || *releaseName == "" || *sequence < 1 || *catalogSequence < 1 || *minimumSafe < 0 {
+		return errors.New("catalog advancement validation is invalid")
+	}
+	body, err := os.ReadFile(*previousCatalogFile) // #nosec G304 -- explicit verified live-catalog path.
+	if err != nil || len(body) > punarorelease.MaximumManifestBytes {
+		return errors.New("catalog advancement validation is invalid")
+	}
+	previous, err := punarorelease.ParseCatalog(body)
+	if err != nil {
+		return errors.New("catalog advancement validation is invalid")
+	}
+	if *minimumSafe == 0 {
+		*minimumSafe = previous.MinimumSafeSequence
+	}
+	if err := punarorelease.ValidateCatalogAdvancement(previous, *releaseName, *sequence, *catalogSequence, *minimumSafe, criticalBlocks); err != nil {
+		return errors.New("catalog advancement validation is invalid")
 	}
 	return nil
 }

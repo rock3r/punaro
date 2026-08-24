@@ -182,6 +182,14 @@ func replacementCatalogEntries(previous *Catalog, release string, sequence, cata
 	return blocks, releases, nil
 }
 
+// ValidateCatalogAdvancement applies the same live-catalog monotonicity and
+// retention policy as assembly without requiring release artifacts to exist.
+// Release workflows use it before any registry or GitHub mutation.
+func ValidateCatalogAdvancement(previous Catalog, release string, sequence, catalogSequence, minimumSafe int64, requestedBlocks []int64) error {
+	_, _, err := replacementCatalogEntries(&previous, release, sequence, catalogSequence, minimumSafe, requestedBlocks, 1, strings.Repeat("0", sha256.Size*2))
+	return err
+}
+
 func scanArtifacts(directory, release string) ([]Artifact, error) {
 	entries, err := os.ReadDir(directory)
 	if err != nil {

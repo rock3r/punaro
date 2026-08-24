@@ -116,6 +116,33 @@ func TestReleaseToolBoundsSupportedFromInputs(t *testing.T) {
 	}
 }
 
+func TestReleaseToolValidatesLiveCatalogAdvancementBeforeBuild(t *testing.T) {
+	directory := t.TempDir()
+	if err := os.WriteFile(filepath.Join(directory, "punaro-adapter-linux-amd64"), []byte("adapter"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := run([]string{
+		"assemble", "--dir", directory, "--release", "v0.1.0-alpha.1",
+		"--sequence", "1", "--catalog-sequence", "1",
+		"--published-at", "2026-08-16T12:00:00Z", "--expires-at", "2026-08-23T12:00:00Z",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	previous := filepath.Join(directory, punarorelease.CatalogFile)
+	base := []string{"validate-advancement", "--previous-catalog", previous, "--release", "v0.1.0-alpha.2", "--sequence", "2", "--catalog-sequence", "2"}
+	if err := run(base); err != nil {
+		t.Fatalf("advancing release rejected: %v", err)
+	}
+	for _, stale := range [][]string{
+		{"validate-advancement", "--previous-catalog", previous, "--release", "v0.1.0-alpha.2", "--sequence", "1", "--catalog-sequence", "2"},
+		{"validate-advancement", "--previous-catalog", previous, "--release", "v0.1.0-alpha.2", "--sequence", "2", "--catalog-sequence", "1"},
+	} {
+		if err := run(stale); err == nil {
+			t.Fatalf("stale live-catalog request accepted: %v", stale)
+		}
+	}
+}
+
 func TestBuildFactsBindsPluginSkillsGeneratedComposeAndMigrations(t *testing.T) {
 	root, err := filepath.Abs(filepath.Join("..", ".."))
 	if err != nil {
