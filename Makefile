@@ -92,6 +92,7 @@ lint: vet staticcheck golangci windows-build deployment-lint
 security: vuln gosec secrets
 
 release-gates:
+	./scripts/test-release-gates.sh
 	./scripts/verify-release-gates.sh
 
 fuzz:

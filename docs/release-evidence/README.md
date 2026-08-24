@@ -21,4 +21,6 @@ Required fields:
 
 A record may mark a gate checked only when every listed field is present.  An
 unchecked gate remains unavailable even if a source branch contains partial
-implementation.
+implementation. A core personal self-hosted release record may coexist with
+all attachment and public-relay gates unchecked; the record documents the
+released core artifacts but grants no authority to use a gated capability.
