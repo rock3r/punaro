@@ -58,12 +58,62 @@ type serverDoctorPathRequest struct {
 	Installation operator.Installation `json:"installation"`
 }
 
+type serverDoctorBackupState struct {
+	Available knownDoctorBool `json:"available"`
+	Fresh     knownDoctorBool `json:"fresh"`
+}
+
 var (
 	serverDoctorPathCheck         = isolatedServerDoctorPaths
 	serverDoctorPathExecutable    = os.Executable
 	serverDoctorStorageCheck      = isolatedServerDoctorStorage
 	serverDoctorStorageExecutable = os.Executable
+	serverDoctorBackupCheck       = isolatedServerDoctorBackups
+	serverDoctorBackupExecutable  = os.Executable
 )
+
+func isolatedServerDoctorBackups(ctx context.Context, root string, now time.Time) (knownDoctorBool, knownDoctorBool) {
+	executable, err := serverDoctorBackupExecutable()
+	if err != nil {
+		return knownDoctorBool{}, knownDoctorBool{}
+	}
+	output, ok := boundedCommandLimit(ctx, 512, executable, "doctor-backup-check", "--root", root, "--now", now.UTC().Format(time.RFC3339Nano))
+	if !ok {
+		return knownDoctorBool{}, knownDoctorBool{}
+	}
+	decoder := json.NewDecoder(strings.NewReader(output))
+	var state serverDoctorBackupState
+	if decoder.Decode(&state) != nil || decoder.Decode(&struct{}{}) != io.EOF || !state.Available.Known || !state.Fresh.Known {
+		return knownDoctorBool{}, knownDoctorBool{}
+	}
+	return state.Available, state.Fresh
+}
+
+func directServerDoctorBackups(ctx context.Context, root string, now time.Time) (knownDoctorBool, knownDoctorBool) {
+	return inspectServerBackups(ctx, root, now)
+}
+
+func runDoctorBackupCheck(args []string, stdout io.Writer) int {
+	flags := flag.NewFlagSet("punaro doctor-backup-check", flag.ContinueOnError)
+	flags.SetOutput(io.Discard)
+	root := flags.String("root", "", "installation backup directory")
+	rawNow := flags.String("now", "", "diagnostic observation time")
+	if flags.Parse(args) != nil || flags.NArg() != 0 || *root == "" || !filepath.IsAbs(*root) || filepath.Clean(*root) != *root || *rawNow == "" {
+		return 2
+	}
+	now, err := time.Parse(time.RFC3339Nano, *rawNow)
+	if err != nil {
+		return 2
+	}
+	available, fresh := inspectServerBackups(context.Background(), *root, now.UTC())
+	if !available.Known || !fresh.Known {
+		return 1
+	}
+	if json.NewEncoder(stdout).Encode(serverDoctorBackupState{Available: available, Fresh: fresh}) != nil {
+		return 1
+	}
+	return 0
+}
 
 func isolatedServerDoctorStorage(ctx context.Context, path string, minimum uint64) knownDoctorBool {
 	executable, err := serverDoctorStorageExecutable()
@@ -270,7 +320,7 @@ func inspectServerDoctorState(parent context.Context, installation operator.Inst
 	state.MigrationBinding = known(serverBuildMigrationSHA256 != "", serverBuildMigrationSHA256 == punaropostgres.MigrationManifestSHA256())
 	state.RunningImage = inspectRunningImage(ctx, installation)
 	state.Storage = serverDoctorStorageCheck(ctx, installation.DataDir, serverDoctorMinimumFree)
-	state.BackupAvailable, state.BackupFresh = inspectServerBackups(ctx, installation.BackupDir, time.Now().UTC())
+	state.BackupAvailable, state.BackupFresh = serverDoctorBackupCheck(ctx, installation.BackupDir, time.Now().UTC())
 	state.HealthPrivate = known(true, listener.IsLoopback(installation.HealthListenAddr))
 	state.BlobPrivate = known(true, serverBlobTopologyPrivate(installation))
 	state.TunnelRoute, state.TunnelOrigin, state.AccessAdmission, state.RelayEnrollment, state.RelayProtocol = inspectServerRelay(ctx, installation, relayProfile)

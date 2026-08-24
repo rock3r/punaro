@@ -1249,6 +1249,42 @@ func TestServerDoctorBackupInspectionBoundsRootEntries(t *testing.T) {
 	}
 }
 
+func TestDoctorBackupCommandAndIsolationStayInsideDeadline(t *testing.T) {
+	root := t.TempDir()
+	if err := os.Chmod(root, 0o700); err != nil { // #nosec G302 -- private backup diagnostic fixture.
+		t.Fatal(err)
+	}
+	directAvailable, directFresh := inspectServerBackups(t.Context(), root, time.Now().UTC())
+	if !directAvailable.Known || directAvailable.OK || !directFresh.Known || directFresh.OK {
+		t.Fatalf("direct backup state root=%q available=%#v fresh=%#v", root, directAvailable, directFresh)
+	}
+	var stdout bytes.Buffer
+	if code := runDoctorBackupCheck([]string{"--root", root, "--now", time.Now().UTC().Format(time.RFC3339Nano)}, &stdout); code != 0 {
+		t.Fatalf("backup helper code=%d", code)
+	}
+	var state serverDoctorBackupState
+	if json.Unmarshal(stdout.Bytes(), &state) != nil || !state.Available.Known || state.Available.OK || !state.Fresh.Known || state.Fresh.OK {
+		t.Fatalf("backup helper state=%#v output=%q", state, stdout.String())
+	}
+	if runtime.GOOS == "windows" {
+		return
+	}
+	blocker := filepath.Join(t.TempDir(), "blocked-backup-check")
+	if err := os.WriteFile(blocker, []byte("#!/bin/sh\nexec sleep 10\n"), 0o700); err != nil { // #nosec G306 -- private executable deadline fixture.
+		t.Fatal(err)
+	}
+	previous := serverDoctorBackupExecutable
+	serverDoctorBackupExecutable = func() (string, error) { return blocker, nil }
+	t.Cleanup(func() { serverDoctorBackupExecutable = previous })
+	ctx, cancel := context.WithTimeout(t.Context(), 20*time.Millisecond)
+	defer cancel()
+	started := time.Now()
+	available, fresh := isolatedServerDoctorBackups(ctx, root, time.Now().UTC())
+	if available.Known || fresh.Known || time.Since(started) > time.Second {
+		t.Fatalf("isolated backup available=%#v fresh=%#v elapsed=%s", available, fresh, time.Since(started))
+	}
+}
+
 func TestServerGatewayServiceDefinitionReadIsBoundedAndContextAware(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "punaro-telegram.service")
 	valid := []byte("[Service]\nExecStart=/usr/local/bin/punaro-telegram\n")

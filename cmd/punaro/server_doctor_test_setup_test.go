@@ -7,4 +7,5 @@ func init() {
 	serverDoctorDSNRead = directServerDoctorDSN
 	serverDoctorPathCheck = directServerDoctorPaths
 	serverDoctorStorageCheck = directServerDoctorStorage
+	serverDoctorBackupCheck = directServerDoctorBackups
 }
