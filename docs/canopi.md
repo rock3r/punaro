@@ -262,16 +262,21 @@ Copy the `hooks` object from
 `.claude/settings.local.json` or the desired Claude settings scope, then replace
 the absolute binary path. Run `prepare` before enabling those hooks; it creates
 and protects the spool before provider hooks can publish events. Hook stdout and
-stderr stay empty.
+stderr stay empty. The example uses Claude Code command hooks with `async: true`
+and a 30-second timeout. The current hook schema runs such hooks in the
+background, so agent work continues immediately while the adapter has enough
+time to finish parsing, normalizing, and syncing an event. A non-zero adapter
+exit is therefore a durability signal, not a control signal for Claude.
 
 `CANOPI_SPOOL_DIR` is optional; when omitted, `prepare` creates
 `canopi-claude-spool` beside the token file. On Unix, the directory must belong
 to the current user and is tightened to mode `0700`; on Windows, it must belong
 to the current user and is given a protected current-user-only DACL. Queued
 normalized events are owner-only. A collector outage never causes the
-hook-facing process to wait for network recovery. If a filesystem sync outlives
-Claude's hook timeout, the event target was already published and the persistent
-supervisor completes its durability barrier. The adapter applies the same current-user,
+hook-facing process to wait for network recovery. The hook reports success only
+after both spool durability barriers complete; if a filesystem sync fails, it
+exits non-zero after kicking the persistent supervisor, which re-syncs any
+published target before delivery. The adapter applies the same current-user,
 owner-only, regular-file, no-symlink token checks as the collector. Each
 serialized enqueue reclaims crash-left `.event-*.tmp` files while holding the
 cross-process kernel lock, keeping temporary storage bounded across restarts.

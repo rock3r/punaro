@@ -62,3 +62,28 @@ func TestPrepareCreatesSpoolBeforeHooksAreEnabled(t *testing.T) {
 		t.Fatalf("prepared spool pending = %d, %v", got, err)
 	}
 }
+
+func TestHookReturnsEnqueueFailureInsteadOfAcknowledgingIt(t *testing.T) {
+	raw := []byte(`{"session_id":"session-1","cwd":"/src/punaro","hook_event_name":"PermissionRequest"}`)
+	environment := map[string]string{
+		"CANOPI_ENDPOINT":   "http://canopi.test",
+		"CANOPI_TOKEN_FILE": "/private/token",
+		"CANOPI_MACHINE_ID": "studio-m2",
+		"CANOPI_SPOOL_DIR":  filepath.Join(t.TempDir(), "unprepared-spool"),
+	}
+	if err := runHook(bytes.NewReader(raw), func(key string) string { return environment[key] }, func() error { return nil }); err == nil {
+		t.Fatal("runHook() accepted an event that was not durably queued")
+	}
+}
+
+func TestHookReturnsMalformedPayloadFailure(t *testing.T) {
+	environment := map[string]string{
+		"CANOPI_ENDPOINT":   "http://canopi.test",
+		"CANOPI_TOKEN_FILE": "/private/token",
+		"CANOPI_MACHINE_ID": "studio-m2",
+		"CANOPI_SPOOL_DIR":  t.TempDir(),
+	}
+	if err := runHook(bytes.NewReader([]byte(`{"session_id":`)), func(key string) string { return environment[key] }, func() error { return nil }); err == nil {
+		t.Fatal("runHook() accepted malformed provider input")
+	}
+}

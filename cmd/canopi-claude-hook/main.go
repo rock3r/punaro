@@ -5,6 +5,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"io"
 	"net/http"
 	"os"
@@ -35,7 +36,13 @@ func main() {
 			return
 		}
 	}
-	_ = runHook(os.Stdin, os.Getenv, spawnDetached)
+	if err := runHook(os.Stdin, os.Getenv, spawnDetached); err != nil {
+		// The documented adapter configuration runs command hooks asynchronously,
+		// so an unavailable local spool can never control Claude's action. A
+		// non-zero result nevertheless ensures that only a fully synced queue
+		// entry is acknowledged as a successful hook execution.
+		os.Exit(1)
+	}
 }
 
 func runPrepare(getenv func(string) string) error {
@@ -52,7 +59,10 @@ func runHook(input io.Reader, getenv func(string) string, spawn func() error) er
 	}
 	raw, err := io.ReadAll(io.LimitReader(input, maxHookBytes+1))
 	if err != nil || len(raw) > maxHookBytes {
-		return nil //nolint:nilerr // Hook failures must never affect Claude Code.
+		if err != nil {
+			return err
+		}
+		return errors.New("claude hook payload exceeds Canopi limit")
 	}
 	event, emit, err := canopiadapter.MapClaudeHook(raw, canopiadapter.AdapterConfig{
 		MachineID:    getenv("CANOPI_MACHINE_ID"),
@@ -60,16 +70,24 @@ func runHook(input io.Reader, getenv func(string) string, spawn func() error) er
 		TaskTitle:    getenv("CANOPI_TASK_TITLE"),
 		Repository:   getenv("CANOPI_REPOSITORY"),
 	}, time.Now())
-	if err != nil || !emit {
-		return nil //nolint:nilerr // Invalid or irrelevant hooks are deliberately swallowed.
+	if err != nil {
+		return err
+	}
+	if !emit {
+		return nil // No lifecycle event is expected for this hook.
 	}
 	spool, err := deliverySpool(getenv)
 	if err != nil {
-		return nil //nolint:nilerr // Hook failures must never affect Claude Code.
+		return err
 	}
-	_ = spool.Enqueue(event)
-	// The supervisor is also kicked after an enqueue error: publish-before-sync
-	// can leave a complete recoverable target for it to re-sync and deliver.
+	if err := spool.Enqueue(event); err != nil {
+		// The published-before-sync path can leave a recoverable target. Kick the
+		// long-lived worker before reporting that the hook did not durably finish.
+		_ = spawn()
+		return err
+	}
+	// A launch error does not change the successful durable handoff; the service
+	// manager owns restart of the long-lived supervisor.
 	_ = spawn()
 	return nil
 }

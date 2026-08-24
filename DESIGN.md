@@ -1839,14 +1839,18 @@ before provider JSON decoding. Adapter delivery is detached, bounded, and
 incapable of controlling the coding agent. Derived machine labels and task
 titles are rune-safely bounded.
 
-The provider-facing Claude process normalizes raw input only in memory and
-writes each privacy-safe event to a bounded owner-only spool before launching a
-detached delivery process. Raw input is never placed in process arguments,
+The provider-facing Claude process is configured as a current-schema asynchronous
+Claude Code command hook (30-second timeout), so it cannot block or control the
+agent while it normalizes raw input only in memory and writes each privacy-safe
+event to a bounded owner-only spool before launching a detached delivery process.
+Raw input is never placed in process arguments,
 environment variables, durable files, or requests. The completed event inode is
 hard-linked into its final queue name before file or directory sync begins. If
 Claude terminates a hook during either uncancellable durability barrier, or the
-detached supervisor launch fails, the target remains recoverable. The persistent
-supervisor reopens and re-syncs the file and directory before any delivery.
+detached supervisor launch fails, the target remains recoverable. A hook reports
+success only after the file and directory barriers succeed; on a sync failure it
+kicks the persistent supervisor and exits non-zero. The persistent supervisor
+reopens and re-syncs the file and directory before any delivery.
 Unix
 spools must be current-user-owned and are tightened to mode `0700`; Windows
 spools must be current-user-owned and receive a protected DACL containing only
