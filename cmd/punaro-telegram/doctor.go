@@ -12,6 +12,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
@@ -271,7 +272,8 @@ func inspectTelegramService(ctx context.Context) telegramServiceDoctorResult {
 		}
 		installedPath := filepath.Join(home, "Library", "LaunchAgents", "org.punaro.telegram.plist")
 		result.Installed, result.Executable = inspectTelegramServiceDefinition(ctx, installedPath, executable, "darwin")
-		_, loaded := telegramServiceCommand(ctx, "launchctl", "print", "gui/"+strconv.Itoa(os.Getuid())+"/org.punaro.telegram")
+		effective, loaded := telegramServiceCommand(ctx, "launchctl", "print", "gui/"+strconv.Itoa(os.Getuid())+"/org.punaro.telegram")
+		result.Executable = result.Executable && loaded && telegramLaunchdEffectiveBound(effective)
 		result.Enabled = result.Installed
 		result.Running = loaded
 		result.ExitStatus = result.Running
@@ -396,12 +398,181 @@ func telegramServiceFileBound(goos, body string) bool {
 		}
 		return count == 1
 	case "darwin":
-		return strings.Count(body, "/usr/local/bin/punaro-telegram") == 1
+		return telegramLaunchdPlistBound(body)
 	case "windows":
 		return strings.Count(body, "punaro-telegram.exe") == 1
 	default:
 		return false
 	}
+}
+
+func telegramLaunchdPlistBound(body string) bool {
+	if len(body) > 64<<10 {
+		return false
+	}
+	decoder := xml.NewDecoder(strings.NewReader(body))
+	next := func() (xml.Token, error) {
+		for {
+			token, err := decoder.Token()
+			if err != nil {
+				return nil, err
+			}
+			switch value := token.(type) {
+			case xml.CharData:
+				if strings.TrimSpace(string(value)) == "" {
+					continue
+				}
+			case xml.ProcInst, xml.Directive, xml.Comment:
+				continue
+			}
+			return token, nil
+		}
+	}
+	token, err := next()
+	root, ok := token.(xml.StartElement)
+	if err != nil || !ok || root.Name.Local != "plist" {
+		return false
+	}
+	token, err = next()
+	dictionary, ok := token.(xml.StartElement)
+	if err != nil || !ok || dictionary.Name.Local != "dict" {
+		return false
+	}
+	seen := map[string]bool{}
+	labelOK, argumentsOK := false, false
+	for {
+		token, err = next()
+		if err != nil {
+			return false
+		}
+		if end, ok := token.(xml.EndElement); ok {
+			if end.Name.Local != "dict" {
+				return false
+			}
+			break
+		}
+		keyStart, ok := token.(xml.StartElement)
+		if !ok || keyStart.Name.Local != "key" {
+			return false
+		}
+		key, ok := decodeTelegramXMLString(decoder, keyStart)
+		if !ok || key == "" || seen[key] {
+			return false
+		}
+		seen[key] = true
+		token, err = next()
+		valueStart, ok := token.(xml.StartElement)
+		if err != nil || !ok {
+			return false
+		}
+		switch key {
+		case "Label":
+			value, valid := decodeTelegramXMLString(decoder, valueStart)
+			labelOK = valid && valueStart.Name.Local == "string" && value == "org.punaro.telegram"
+		case "ProgramArguments":
+			arguments, valid := decodeTelegramXMLStringArray(decoder, valueStart)
+			argumentsOK = valid && slices.Equal(arguments, telegramLaunchdArguments())
+		default:
+			if decoder.Skip() != nil {
+				return false
+			}
+		}
+	}
+	token, err = next()
+	endRoot, ok := token.(xml.EndElement)
+	if err != nil || !ok || endRoot.Name.Local != "plist" {
+		return false
+	}
+	_, err = next()
+	return errors.Is(err, io.EOF) && labelOK && argumentsOK
+}
+
+func decodeTelegramXMLString(decoder *xml.Decoder, start xml.StartElement) (string, bool) {
+	if start.Name.Local != "key" && start.Name.Local != "string" {
+		return "", false
+	}
+	var value strings.Builder
+	for {
+		token, err := decoder.Token()
+		if err != nil {
+			return "", false
+		}
+		switch token := token.(type) {
+		case xml.CharData:
+			_, _ = value.Write(token)
+		case xml.EndElement:
+			return value.String(), token.Name == start.Name
+		default:
+			return "", false
+		}
+	}
+}
+
+func decodeTelegramXMLStringArray(decoder *xml.Decoder, start xml.StartElement) ([]string, bool) {
+	if start.Name.Local != "array" {
+		return nil, false
+	}
+	var values []string
+	for {
+		token, err := decoder.Token()
+		if err != nil {
+			return nil, false
+		}
+		switch token := token.(type) {
+		case xml.CharData:
+			if strings.TrimSpace(string(token)) != "" {
+				return nil, false
+			}
+		case xml.StartElement:
+			value, ok := decodeTelegramXMLString(decoder, token)
+			if !ok || token.Name.Local != "string" {
+				return nil, false
+			}
+			values = append(values, value)
+		case xml.EndElement:
+			return values, token.Name == start.Name
+		default:
+			return nil, false
+		}
+	}
+}
+
+func telegramLaunchdArguments() []string {
+	return []string{"/usr/local/bin/punaro-telegram"}
+}
+
+func telegramLaunchdEffectiveBound(body string) bool {
+	if len(body) > 64<<10 {
+		return false
+	}
+	lines := strings.Split(body, "\n")
+	var arguments []string
+	inArguments, complete, programCount, argumentsCount := false, false, 0, 0
+	for _, line := range lines {
+		line = strings.TrimSpace(line)
+		if line == "program = /usr/local/bin/punaro-telegram" {
+			programCount++
+		}
+		if line == "arguments = {" {
+			argumentsCount++
+			if inArguments || complete {
+				return false
+			}
+			inArguments = true
+			continue
+		}
+		if inArguments {
+			if line == "}" {
+				inArguments, complete = false, true
+				continue
+			}
+			if line == "" {
+				return false
+			}
+			arguments = append(arguments, line)
+		}
+	}
+	return programCount == 1 && argumentsCount == 1 && complete && !inArguments && slices.Equal(arguments, telegramLaunchdArguments())
 }
 
 func telegramSystemdExecStartBound(body, executable string) bool {

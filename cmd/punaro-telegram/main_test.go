@@ -65,6 +65,39 @@ func TestTelegramSystemdExecStartRequiresExactEffectiveExecutable(t *testing.T) 
 	}
 }
 
+func TestTelegramLaunchdBindingRequiresStructuralInstalledAndEffectiveCommands(t *testing.T) {
+	const executable = "/usr/local/bin/punaro-telegram"
+	validPlist := `<plist><dict><key>Label</key><string>org.punaro.telegram</string><key>ProgramArguments</key><array><string>` + executable + `</string></array><key>Other</key><string>ignored</string></dict></plist>`
+	if !telegramLaunchdPlistBound(validPlist) {
+		t.Fatal("valid Telegram LaunchAgent plist rejected")
+	}
+	for _, stale := range []string{
+		`<plist><dict><key>Label</key><string>org.punaro.telegram</string><key>Unrelated</key><string>` + executable + `</string><key>ProgramArguments</key><array><string>/tmp/attacker</string></array></dict></plist>`,
+		strings.Replace(validPlist, "org.punaro.telegram", "org.attacker.telegram", 1),
+		strings.Replace(validPlist, `</array>`, `<string>doctor</string></array>`, 1),
+		validPlist + validPlist,
+	} {
+		if telegramLaunchdPlistBound(stale) {
+			t.Fatalf("stale Telegram LaunchAgent plist accepted: %s", stale)
+		}
+	}
+
+	validEffective := "path = /Users/seb/Library/LaunchAgents/org.punaro.telegram.plist\nstate = running\nprogram = " + executable + "\narguments = {\n\t" + executable + "\n}\nruns = 1\n"
+	if !telegramLaunchdEffectiveBound(validEffective) {
+		t.Fatal("valid effective Telegram launchd command rejected")
+	}
+	for _, stale := range []string{
+		strings.Replace(validEffective, "program = "+executable, "program = /tmp/attacker", 1),
+		strings.Replace(validEffective, "\t"+executable+"\n", "\t/tmp/attacker\n", 1),
+		strings.Replace(validEffective, "\t"+executable+"\n", "\t"+executable+"\n\tdoctor\n", 1),
+		validEffective + validEffective,
+	} {
+		if telegramLaunchdEffectiveBound(stale) {
+			t.Fatalf("stale effective Telegram launchd command accepted: %q", stale)
+		}
+	}
+}
+
 func TestTelegramWindowsTaskRequiresExactInstalledExecutable(t *testing.T) {
 	executable := filepath.Join(t.TempDir(), "Punaro", "bin", "punaro-telegram.exe")
 	valid := `<Task><Actions><Exec><Command>` + executable + `</Command></Exec></Actions></Task>` + "\r\n"

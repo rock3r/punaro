@@ -288,7 +288,10 @@ Configuration, service, and upstreams: `telegram_configuration`,
 `notification_access`, `notification_enrollment`, `notification_protocol`.
 On Linux, `gateway_service_executable` verifies both the installed unit and
 systemd's effective `ExecStart`, so a drop-in cannot redirect the running
-service while leaving the base unit apparently valid.
+service while leaving the base unit apparently valid. On macOS, it
+structurally decodes the installed LaunchAgent's exact `Label` and
+single-element `ProgramArguments`, then binds launchd's effective loaded
+program and arguments to the same fixed gateway executable.
 
 Durable state and liveness: `state_integrity`, `conversation_route_integrity`,
 `cycle_liveness`, `successful_cycle_liveness`, `polling_liveness`,
