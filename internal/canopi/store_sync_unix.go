@@ -20,8 +20,6 @@ func syncStateDirectory(path string) error {
 	return nil
 }
 
-func recoverStateReplacement(string) error { return nil }
-
 func replaceStateFile(temporary, target string) error {
 	if err := os.Rename(temporary, target); err != nil {
 		return err

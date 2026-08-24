@@ -8,7 +8,9 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"os"
+	"strings"
 
 	"golang.org/x/sys/unix"
 )
@@ -30,6 +32,9 @@ func persistStoreInPinnedDirectory(directory *os.File, targetName string, state 
 	fd, err := stateFileDescriptor(directory)
 	if err != nil {
 		return err
+	}
+	if err := reclaimPinnedStateTemporaries(directory, fd); err != nil {
+		return fmt.Errorf("reclaim Canopi state temporaries: %w", err)
 	}
 	for range 8 {
 		var suffix [12]byte
@@ -70,4 +75,47 @@ func persistStoreInPinnedDirectory(directory *os.File, targetName string, state 
 		return nil
 	}
 	return errors.New("cannot allocate Canopi state temporary")
+}
+
+func reclaimPinnedStateTemporaries(directory *os.File, fd int) error {
+	if _, err := directory.Seek(0, io.SeekStart); err != nil {
+		return err
+	}
+	for {
+		names, readErr := directory.Readdirnames(128)
+		for _, name := range names {
+			if !pinnedStateTemporaryName(name) {
+				continue
+			}
+			var info unix.Stat_t
+			if err := unix.Fstatat(fd, name, &info, unix.AT_SYMLINK_NOFOLLOW); errors.Is(err, unix.ENOENT) {
+				continue
+			} else if err != nil {
+				return err
+			}
+			if info.Mode&unix.S_IFMT != unix.S_IFREG {
+				continue
+			}
+			if err := unix.Unlinkat(fd, name, 0); err != nil && !errors.Is(err, unix.ENOENT) {
+				return err
+			}
+		}
+		if errors.Is(readErr, io.EOF) {
+			return nil
+		}
+		if readErr != nil {
+			return readErr
+		}
+	}
+}
+
+func pinnedStateTemporaryName(name string) bool {
+	const prefix = ".canopi-state-"
+	const suffix = ".tmp"
+	value := strings.TrimSuffix(strings.TrimPrefix(name, prefix), suffix)
+	if !strings.HasPrefix(name, prefix) || !strings.HasSuffix(name, suffix) || len(value) != 24 {
+		return false
+	}
+	_, err := hex.DecodeString(value)
+	return err == nil
 }

@@ -6,8 +6,6 @@ import (
 	"errors"
 	"os"
 	"syscall"
-
-	"golang.org/x/sys/unix"
 )
 
 func secureStateDirectory(path string, before os.FileInfo) error {
@@ -43,14 +41,6 @@ func privateStateFile(_ string, info os.FileInfo) bool {
 	return ok && info.Mode().IsRegular() && info.Mode()&os.ModeSymlink == 0 &&
 		info.Mode().Perm()&0o077 == 0 && info.Mode().Perm()&0o400 != 0 &&
 		stat.Uid == uint32(os.Geteuid()) && stat.Nlink == 1 // #nosec G115 -- effective UID is nonnegative and represented by uid_t.
-}
-
-func openStateFile(path string) (*os.File, error) {
-	descriptor, err := unix.Open(path, unix.O_RDONLY|unix.O_CLOEXEC|unix.O_NOFOLLOW, 0) // #nosec G304 -- absolute operator-selected path is validated before and after this no-follow open.
-	if err != nil {
-		return nil, err
-	}
-	return os.NewFile(uintptr(descriptor), path), nil // #nosec G115 -- successful descriptors are nonnegative.
 }
 
 func protectStateFile(_ string, file *os.File) error {

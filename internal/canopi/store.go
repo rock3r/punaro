@@ -182,7 +182,7 @@ func OpenStore(path string, config Config) (*Store, error) {
 	}()
 	openedDirectoryIdentity, err := pinnedDirectoryHandle.Stat()
 	if err != nil || !os.SameFile(directoryIdentity, openedDirectoryIdentity) {
-		return nil, errors.New("Canopi state directory changed while opening")
+		return nil, errors.New("canopi state directory changed while opening")
 	}
 	store := NewStore(normalized)
 	store.persist = func(state persistedStore) error {

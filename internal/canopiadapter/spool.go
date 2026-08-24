@@ -334,7 +334,7 @@ func queuedSpoolEventMatches(path, eventID string) (match, occupied bool, err er
 	return event.EventID == eventID, true, nil
 }
 
-func (s Spool) publishContentionEvent(ctx context.Context, target string, payload []byte) (created bool, err error) {
+func (s Spool) publishContentionEvent(_ context.Context, target string, payload []byte) (created bool, err error) {
 	// The pre-lock name is outside the ordinary cleanup namespace. Once the
 	// inode is locked, renaming it makes ownership visible to cleanup atomically.
 	temporary, err := os.CreateTemp(s.Directory, ".contention-publishing-*.tmp")
@@ -457,7 +457,7 @@ func (s Spool) Serve(ctx context.Context, deliver func(context.Context, protocol
 	defer release()
 	for {
 		if err := validateSpoolDirectoryIdentity(config.Directory, directoryIdentity); err != nil {
-			return fmt.Errorf("Canopi spool directory changed while supervisor was running: %w", err)
+			return fmt.Errorf("canopi spool directory changed while supervisor was running: %w", err)
 		}
 		if err := config.drainPrepared(ctx, deliver); err != nil {
 			return err
