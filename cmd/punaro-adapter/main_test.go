@@ -302,7 +302,7 @@ func TestAdapterDoctorEmitsStrictHealthyReport(t *testing.T) {
 	adapterDoctorRelayProbe = func(context.Context, adapterConfig) (adapter.DoctorProbeResult, error) { return healthy, nil }
 	adapterDoctorNotificationProbe = func(context.Context, adapterConfig) (adapter.DoctorProbeResult, error) { return healthy, nil }
 	adapterDoctorMailboxProbe = func(context.Context, adapterConfig) (mailboxDoctorResult, error) {
-		return mailboxDoctorResult{Attached: []string{"agent/a", "agent/b"}}, nil
+		return mailboxDoctorResult{Attached: []string{"agent/a", "agent/b"}, Configuration: true, Healthy: true}, nil
 	}
 	probedEndpoints := make([]string, 0, 2)
 	adapterDoctorEndpointProbe = func(_ context.Context, _ adapterConfig, endpoint string) (adapter.DoctorProbeResult, error) {
@@ -394,7 +394,7 @@ func TestAdapterDoctorReportsIndependentRelayFailures(t *testing.T) {
 		return adapter.DoctorProbeResult{Transport: true, Origin: true, Access: true, Enrolled: true, Protocol: true}, nil
 	}
 	adapterDoctorMailboxProbe = func(context.Context, adapterConfig) (mailboxDoctorResult, error) {
-		return mailboxDoctorResult{Attached: []string{"agent/a"}}, nil
+		return mailboxDoctorResult{Attached: []string{"agent/a"}, Configuration: true, Healthy: true}, nil
 	}
 	adapterDoctorEndpointProbe = func(context.Context, adapterConfig, string) (adapter.DoctorProbeResult, error) {
 		return adapter.DoctorProbeResult{Transport: true, Origin: true, Access: true, Enrolled: true, Protocol: true, Attached: true}, nil
@@ -428,7 +428,7 @@ func TestAdapterDoctorRejectsStaleMachineAttachmentForCurrentEndpoint(t *testing
 	adapterDoctorRelayProbe = func(context.Context, adapterConfig) (adapter.DoctorProbeResult, error) { return healthy, nil }
 	adapterDoctorNotificationProbe = func(context.Context, adapterConfig) (adapter.DoctorProbeResult, error) { return healthy, nil }
 	adapterDoctorMailboxProbe = func(context.Context, adapterConfig) (mailboxDoctorResult, error) {
-		return mailboxDoctorResult{Attached: []string{"agent/current"}}, nil
+		return mailboxDoctorResult{Attached: []string{"agent/current"}, Configuration: true, Healthy: true}, nil
 	}
 	adapterDoctorEndpointProbe = func(context.Context, adapterConfig, string) (adapter.DoctorProbeResult, error) {
 		return adapter.DoctorProbeResult{Transport: true, Origin: true, Access: true, Enrolled: true, Protocol: true}, nil
@@ -470,6 +470,26 @@ exit 0
 	defer cancel()
 	if err := probeMailboxMCP(ctx, adapterConfig{mailboxBinary: helper, mailboxState: state}); err != nil {
 		t.Fatal(err)
+	}
+}
+
+func TestMailboxDoctorIsolationHonorsDeadline(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("POSIX blocking executable fixture")
+	}
+	blocker := filepath.Join(t.TempDir(), "blocked-mailbox-doctor")
+	if err := os.WriteFile(blocker, []byte("#!/bin/sh\nexec sleep 10\n"), 0o700); err != nil { // #nosec G306 -- private executable deadline fixture.
+		t.Fatal(err)
+	}
+	previous := adapterDoctorMailboxExecutable
+	adapterDoctorMailboxExecutable = func() (string, error) { return blocker, nil }
+	t.Cleanup(func() { adapterDoctorMailboxExecutable = previous })
+	ctx, cancel := context.WithTimeout(t.Context(), 20*time.Millisecond)
+	defer cancel()
+	started := time.Now()
+	_, err := inspectAdapterMailboxIsolated(ctx, adapterConfig{mailboxBinary: blocker, mailboxState: t.TempDir(), attachedGroup: "group/punaro"})
+	if err == nil || time.Since(started) > time.Second {
+		t.Fatalf("isolated mailbox error=%v elapsed=%s", err, time.Since(started))
 	}
 }
 

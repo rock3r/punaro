@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"context"
 	"database/sql"
+	"encoding/base64"
 	"encoding/json"
 	"encoding/xml"
 	"errors"
@@ -57,7 +58,15 @@ type pluginDoctorResult struct {
 }
 
 type mailboxDoctorResult struct {
-	Attached []string
+	Attached      []string `json:"attached"`
+	Configuration bool     `json:"configuration"`
+	Healthy       bool     `json:"healthy"`
+}
+
+type mailboxDoctorRequest struct {
+	Binary string `json:"binary"`
+	State  string `json:"state"`
+	Group  string `json:"group"`
 }
 
 type boundedDoctorOutput struct {
@@ -106,7 +115,8 @@ var (
 		}
 		return client.DoctorEndpoint(ctx, endpoint)
 	}
-	adapterDoctorMailboxProbe          = probeAdapterMailbox
+	adapterDoctorMailboxProbe          = inspectAdapterMailboxIsolated
+	adapterDoctorMailboxExecutable     = os.Executable
 	adapterDoctorServiceProbe          = inspectAdapterService
 	adapterDoctorBootstrapReleaseProbe = func(ctx context.Context) string {
 		return inspectAdapterBootstrapRelease(ctx, defaultAdapterBootstrapExecutable())
@@ -184,7 +194,7 @@ func runAdapterDoctor(args []string, stdout, stderr io.Writer) int {
 	relayResult, _ := adapterDoctorRelayProbe(ctx, config)
 	checks = append(checks, relayDoctorChecks("relay", relayResult)...)
 	switch {
-	case mailboxErr != nil:
+	case mailboxErr != nil || !mailbox.Healthy:
 		checks = append(checks, punarodiagnostic.Unavailable("endpoint_attachment", "repair_mailbox_mcp"))
 	default:
 		checks = append(checks, boolDoctorCheck(adapterEndpointsAttached(ctx, config, mailbox.Attached), "endpoint_attachment", "restart_endpoint_attachment"))
@@ -203,15 +213,22 @@ func runAdapterDoctor(args []string, stdout, stderr io.Writer) int {
 	notificationResult, _ := adapterDoctorNotificationProbe(ctx, config)
 	checks = append(checks, relayDoctorChecks("notification", notificationResult)...)
 
-	if _, err := validateMailboxDoctorConfiguration(config); err != nil {
+	switch {
+	case mailboxErr != nil:
+		checks = append(checks,
+			punarodiagnostic.Unavailable("mailbox_executable", "repair_mailbox_configuration"),
+			punarodiagnostic.Unavailable("mailbox_state_directory", "repair_mailbox_configuration"),
+			punarodiagnostic.Unavailable("mailbox_mcp", "repair_mailbox_configuration"),
+		)
+	case !mailbox.Configuration:
 		checks = append(checks,
 			punarodiagnostic.Fail("mailbox_executable", "repair_mailbox_executable"),
 			punarodiagnostic.Fail("mailbox_state_directory", "repair_mailbox_state_directory"),
 			punarodiagnostic.Unavailable("mailbox_mcp", "repair_mailbox_configuration"),
 		)
-	} else if mailboxErr != nil {
+	case !mailbox.Healthy:
 		checks = append(checks, punarodiagnostic.Pass("mailbox_executable"), punarodiagnostic.Pass("mailbox_state_directory"), punarodiagnostic.Fail("mailbox_mcp", "repair_mailbox_mcp"))
-	} else {
+	default:
 		checks = append(checks, punarodiagnostic.Pass("mailbox_executable"), punarodiagnostic.Pass("mailbox_state_directory"), punarodiagnostic.Pass("mailbox_mcp"))
 	}
 
@@ -401,7 +418,66 @@ func probeAdapterMailbox(ctx context.Context, config adapterConfig) (mailboxDoct
 	if err != nil {
 		return mailboxDoctorResult{}, err
 	}
-	return mailboxDoctorResult{Attached: attached}, nil
+	return mailboxDoctorResult{Attached: attached, Configuration: true, Healthy: true}, nil
+}
+
+func inspectAdapterMailboxIsolated(ctx context.Context, config adapterConfig) (mailboxDoctorResult, error) {
+	if ctx == nil || ctx.Err() != nil {
+		return mailboxDoctorResult{}, errors.New("mailbox diagnostic is unavailable")
+	}
+	executable, err := adapterDoctorMailboxExecutable()
+	if err != nil {
+		return mailboxDoctorResult{}, errors.New("mailbox diagnostic is unavailable")
+	}
+	body, err := json.Marshal(mailboxDoctorRequest{Binary: config.mailboxBinary, State: config.mailboxState, Group: config.attachedGroup})
+	if err != nil || len(body) == 0 || len(body) > maximumMailboxDoctorOutput {
+		return mailboxDoctorResult{}, errors.New("mailbox diagnostic is unavailable")
+	}
+	command := exec.CommandContext(ctx, executable, "doctor-mailbox-inspect", "--request", base64.RawURLEncoding.EncodeToString(body)) // #nosec G204,G702 -- os.Executable self helper with one bounded encoded request.
+	command.Stdin = nil
+	command.Stderr = io.Discard
+	output := boundedDoctorOutput{maximum: maximumMailboxDoctorOutput}
+	command.Stdout = &output
+	if command.Run() != nil || ctx.Err() != nil || output.overflow {
+		return mailboxDoctorResult{}, errors.New("mailbox diagnostic is unavailable")
+	}
+	decoder := json.NewDecoder(strings.NewReader(output.buffer.String()))
+	var result mailboxDoctorResult
+	if decoder.Decode(&result) != nil || decoder.Decode(&struct{}{}) != io.EOF || result.Healthy && !result.Configuration || len(result.Attached) > maximumMailboxDoctorEndpoints {
+		return mailboxDoctorResult{}, errors.New("mailbox diagnostic is unavailable")
+	}
+	return result, nil
+}
+
+func runAdapterMailboxInspect(args []string, stdout io.Writer) int {
+	flags := flag.NewFlagSet("punaro-adapter doctor-mailbox-inspect", flag.ContinueOnError)
+	flags.SetOutput(io.Discard)
+	raw := flags.String("request", "", "bounded encoded mailbox diagnostic request")
+	if flags.Parse(args) != nil || flags.NArg() != 0 || *raw == "" || len(*raw) > base64.RawURLEncoding.EncodedLen(maximumMailboxDoctorOutput) {
+		return 2
+	}
+	body, err := base64.RawURLEncoding.DecodeString(*raw)
+	if err != nil || base64.RawURLEncoding.EncodeToString(body) != *raw || len(body) == 0 || len(body) > maximumMailboxDoctorOutput {
+		return 2
+	}
+	decoder := json.NewDecoder(strings.NewReader(string(body)))
+	decoder.DisallowUnknownFields()
+	var request mailboxDoctorRequest
+	if decoder.Decode(&request) != nil || decoder.Decode(&struct{}{}) != io.EOF {
+		return 2
+	}
+	config := adapterConfig{mailboxBinary: request.Binary, mailboxState: request.State, attachedGroup: request.Group}
+	result := mailboxDoctorResult{}
+	if _, err := validateMailboxDoctorConfiguration(config); err == nil {
+		result.Configuration = true
+		if inspected, inspectErr := probeAdapterMailbox(context.Background(), config); inspectErr == nil {
+			result = inspected
+		}
+	}
+	if json.NewEncoder(stdout).Encode(result) != nil {
+		return 1
+	}
+	return 0
 }
 
 func mailboxDoctorSnapshot(ctx context.Context, root string) (string, error) {

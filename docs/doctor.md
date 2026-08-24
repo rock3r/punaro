@@ -42,8 +42,9 @@ keys and bootstrap health state are read as bounded regular non-symlink files
 through the same diagnostic deadline and descriptor-identity checks.
 Server installation-path validation, storage-capacity inspection, complete
 backup listing and verification, PostgreSQL credential files, adapter plugin
-trees, and the complete bootstrap diagnostic are inspected in deadline-isolated
-child helpers. A stalled mount during `Lstat`, `Statfs`, open, walk, or read
+trees, the complete adapter mailbox snapshot/MCP inspection, and the complete
+bootstrap diagnostic are inspected in deadline-isolated child helpers. A
+stalled mount during `Lstat`, `Statfs`, open, walk, or read
 therefore yields unavailable checks (or no bootstrap report) instead of
 extending the advertised total deadline; DSN values remain in a private
 parent/child pipe and are never printed in the report or logs.
