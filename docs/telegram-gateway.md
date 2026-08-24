@@ -181,7 +181,9 @@ gateway service, polling, relay, Access, Bot API, route, topic, or retry failure
 It uses `getMe` plus signed non-consuming relay/notification probes and a
 read-only bounded SQLite snapshot. It never polls an update, advances an
 offset, creates a topic, sends a message, leases or acknowledges relay mail, or
-prints provider responses. See [doctor.md](doctor.md) for exit semantics and
+prints provider responses. The complete SQLite open and inspection runs in a
+deadline-killable child helper, so stalled state storage cannot extend the
+advertised total timeout. See [doctor.md](doctor.md) for exit semantics and
 the stable Telegram check registry.
 
 ## Retire the Bot API side channel

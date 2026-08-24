@@ -60,6 +60,9 @@ func main() {
 	if len(os.Args) > 1 && os.Args[1] == "doctor" {
 		os.Exit(runTelegramDoctor(os.Args[2:], os.Stdout, os.Stderr))
 	}
+	if len(os.Args) > 1 && os.Args[1] == "doctor-state-inspect" {
+		os.Exit(runTelegramStateInspect(os.Args[2:], os.Stdout))
+	}
 	if len(os.Args) > 1 && os.Args[1] == "route" {
 		if err := runRoute(os.Args[2:]); err != nil {
 			log.Printf("punaro-telegram stopped: %v", err)

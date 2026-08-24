@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"encoding/xml"
 	"errors"
@@ -29,6 +30,7 @@ const (
 	maximumTelegramDoctorTimeout = 30 * time.Second
 	maximumHealthyCycleAge       = 2 * time.Minute
 	maximumServiceVersionOutput  = 256
+	maximumTelegramStateOutput   = 16 << 10
 )
 
 // Telegram release identity is set from a verified release build with -X.
@@ -48,6 +50,16 @@ type telegramServiceDoctorResult struct {
 	Release      bool
 	ExitStatus   bool
 	RestartState bool
+}
+
+type telegramStateDoctorRequest struct {
+	Database string `json:"database"`
+	Now      string `json:"now"`
+}
+
+type telegramStateDoctorResponse struct {
+	Snapshot  telegram.GatewayStateSnapshot `json:"snapshot"`
+	Available bool                          `json:"available"`
 }
 
 type boundedTelegramOutput struct {
@@ -95,7 +107,9 @@ var (
 		}
 		return client.Doctor(ctx)
 	}
-	telegramDoctorServiceProbe = inspectTelegramService
+	telegramDoctorServiceProbe    = inspectTelegramService
+	telegramDoctorStateProbe      = inspectTelegramStateIsolated
+	telegramDoctorStateExecutable = os.Executable
 )
 
 func runTelegramDoctor(args []string, stdout, stderr io.Writer) int {
@@ -145,7 +159,7 @@ func runTelegramDoctor(args []string, stdout, stderr io.Writer) int {
 		checks = append(checks, punarodiagnostic.Pass("bot_api"))
 	}
 
-	snapshot, stateErr := telegram.InspectGatewayState(ctx, filepath.Join(cfg.stateDir, "telegram.db"), telegramDoctorNow().UTC())
+	snapshot, stateErr := telegramDoctorStateProbe(ctx, filepath.Join(cfg.stateDir, "telegram.db"), telegramDoctorNow().UTC())
 	if stateErr != nil {
 		checks = append(checks, telegramStateUnavailableChecks()...)
 	} else {
@@ -179,6 +193,67 @@ func runTelegramDoctor(args []string, stdout, stderr io.Writer) int {
 	identity := punarodiagnostic.Identity{MachineID: cfg.machineID, Release: telegramBuildRelease, ReleaseSequence: releaseSequence, CatalogSequence: catalogSequence, Protocol: relay.ProtocolVersion, Platform: runtime.GOOS + "-" + runtime.GOARCH}
 	report, reportErr := punarodiagnostic.New(punarodiagnostic.ComponentTelegram, identity, checks)
 	return writeTelegramDoctorReport(stdout, stderr, report, reportErr)
+}
+
+func inspectTelegramStateIsolated(ctx context.Context, database string, now time.Time) (telegram.GatewayStateSnapshot, error) {
+	if ctx == nil || ctx.Err() != nil || !filepath.IsAbs(database) || now.IsZero() {
+		return telegram.GatewayStateSnapshot{}, errors.New("telegram state diagnostic is unavailable")
+	}
+	executable, err := telegramDoctorStateExecutable()
+	if err != nil {
+		return telegram.GatewayStateSnapshot{}, errors.New("telegram state diagnostic is unavailable")
+	}
+	body, err := json.Marshal(telegramStateDoctorRequest{Database: database, Now: now.UTC().Format(time.RFC3339Nano)})
+	if err != nil || len(body) == 0 || len(body) > maximumTelegramStateOutput {
+		return telegram.GatewayStateSnapshot{}, errors.New("telegram state diagnostic is unavailable")
+	}
+	command := exec.CommandContext(ctx, executable, "doctor-state-inspect", "--request", base64.RawURLEncoding.EncodeToString(body)) // #nosec G204,G702 -- os.Executable self helper with one bounded encoded request.
+	command.Stdin = nil
+	command.Stderr = io.Discard
+	output := boundedTelegramOutput{maximum: maximumTelegramStateOutput}
+	command.Stdout = &output
+	if command.Run() != nil || ctx.Err() != nil || output.overflow {
+		return telegram.GatewayStateSnapshot{}, errors.New("telegram state diagnostic is unavailable")
+	}
+	decoder := json.NewDecoder(strings.NewReader(output.buffer.String()))
+	decoder.DisallowUnknownFields()
+	var response telegramStateDoctorResponse
+	if decoder.Decode(&response) != nil || decoder.Decode(&struct{}{}) != io.EOF || !response.Available {
+		return telegram.GatewayStateSnapshot{}, errors.New("telegram state diagnostic is unavailable")
+	}
+	return response.Snapshot, nil
+}
+
+func runTelegramStateInspect(args []string, stdout io.Writer) int {
+	flags := flag.NewFlagSet("punaro-telegram doctor-state-inspect", flag.ContinueOnError)
+	flags.SetOutput(io.Discard)
+	raw := flags.String("request", "", "bounded encoded state diagnostic request")
+	if flags.Parse(args) != nil || flags.NArg() != 0 || *raw == "" || len(*raw) > base64.RawURLEncoding.EncodedLen(maximumTelegramStateOutput) {
+		return 2
+	}
+	body, err := base64.RawURLEncoding.DecodeString(*raw)
+	if err != nil || base64.RawURLEncoding.EncodeToString(body) != *raw || len(body) == 0 || len(body) > maximumTelegramStateOutput {
+		return 2
+	}
+	decoder := json.NewDecoder(strings.NewReader(string(body)))
+	decoder.DisallowUnknownFields()
+	var request telegramStateDoctorRequest
+	if decoder.Decode(&request) != nil || decoder.Decode(&struct{}{}) != io.EOF || !filepath.IsAbs(request.Database) || filepath.Clean(request.Database) != request.Database {
+		return 2
+	}
+	now, err := time.Parse(time.RFC3339Nano, request.Now)
+	if err != nil || now.Location() != time.UTC || now.Format(time.RFC3339Nano) != request.Now {
+		return 2
+	}
+	response := telegramStateDoctorResponse{}
+	if snapshot, inspectErr := telegram.InspectGatewayState(context.Background(), request.Database, now); inspectErr == nil {
+		response.Snapshot = snapshot
+		response.Available = true
+	}
+	if json.NewEncoder(stdout).Encode(response) != nil {
+		return 1
+	}
+	return 0
 }
 
 func loadTelegramDoctorConfig(ctx context.Context) (config, error) {

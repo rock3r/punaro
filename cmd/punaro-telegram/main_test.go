@@ -6,6 +6,7 @@ import (
 	"crypto/ed25519"
 	"crypto/rand"
 	"encoding/base64"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
@@ -443,6 +444,53 @@ func TestTelegramDoctorConfigurationLoadHonorsDeadline(t *testing.T) {
 	}
 }
 
+func TestTelegramDoctorStateInspectionHonorsDeadline(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("POSIX blocking executable fixture")
+	}
+	blocker := filepath.Join(t.TempDir(), "blocked-telegram-state-doctor")
+	if err := os.WriteFile(blocker, []byte("#!/bin/sh\nexec sleep 10\n"), 0o700); err != nil { // #nosec G306 -- private executable deadline fixture.
+		t.Fatal(err)
+	}
+	previous := telegramDoctorStateExecutable
+	telegramDoctorStateExecutable = func() (string, error) { return blocker, nil }
+	t.Cleanup(func() { telegramDoctorStateExecutable = previous })
+	ctx, cancel := context.WithTimeout(t.Context(), 20*time.Millisecond)
+	defer cancel()
+	started := time.Now()
+	_, err := inspectTelegramStateIsolated(ctx, filepath.Join(t.TempDir(), "telegram.db"), time.Now().UTC())
+	if err == nil || time.Since(started) > time.Second {
+		t.Fatalf("isolated state error=%v elapsed=%s", err, time.Since(started))
+	}
+}
+
+func TestTelegramDoctorStateHelperReturnsBoundedSnapshot(t *testing.T) {
+	database := filepath.Join(t.TempDir(), "telegram.db")
+	now := time.Date(2026, 8, 23, 12, 0, 0, 0, time.UTC)
+	state, err := telegram.Open(database)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := state.RecordGatewayCycle(telegram.GatewayCycleRecord{At: now.Add(-time.Minute), Offset: 4, PollOK: true, RelayOK: true, TelegramOK: true}); err != nil {
+		t.Fatal(err)
+	}
+	if err := state.Close(); err != nil {
+		t.Fatal(err)
+	}
+	body, err := json.Marshal(telegramStateDoctorRequest{Database: database, Now: now.Format(time.RFC3339Nano)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var stdout bytes.Buffer
+	if code := runTelegramStateInspect([]string{"--request", base64.RawURLEncoding.EncodeToString(body)}, &stdout); code != 0 {
+		t.Fatalf("helper exit=%d output=%q", code, stdout.String())
+	}
+	var response telegramStateDoctorResponse
+	if err := json.NewDecoder(&stdout).Decode(&response); err != nil || !response.Available || !response.Snapshot.Integrity || !response.Snapshot.HasSuccess {
+		t.Fatalf("response=%#v err=%v", response, err)
+	}
+}
+
 func TestTelegramDoctorSeparatesRelayBotAndDurableFailureClasses(t *testing.T) {
 	directory := configureTelegramDoctorTest(t)
 	now := time.Date(2026, 8, 23, 12, 0, 0, 0, time.UTC)
@@ -561,6 +609,7 @@ func setTelegramDoctorFakes(t *testing.T, now time.Time, relayResult adapter.Doc
 	oldBot, oldService := telegramDoctorBotProbe, telegramDoctorServiceProbe
 	oldNow, oldRelease := telegramDoctorNow, telegramBuildRelease
 	oldSequence, oldCatalogSequence := telegramBuildSequence, telegramBuildCatalogSequence
+	oldState := telegramDoctorStateProbe
 	telegramDoctorRelayProbe = func(context.Context, config) (adapter.DoctorProbeResult, error) { return relayResult, nil }
 	telegramDoctorNotificationProbe = func(context.Context, config) (adapter.DoctorProbeResult, error) { return relayResult, nil }
 	telegramDoctorBotProbe = func(context.Context, config) error { return botErr }
@@ -568,6 +617,7 @@ func setTelegramDoctorFakes(t *testing.T, now time.Time, relayResult adapter.Doc
 		return telegramServiceDoctorResult{Installed: true, Enabled: true, Running: true, Executable: true, Release: true, ExitStatus: true, RestartState: true}
 	}
 	telegramDoctorNow = func() time.Time { return now }
+	telegramDoctorStateProbe = telegram.InspectGatewayState
 	telegramBuildRelease = "v0.1.0-alpha.1"
 	telegramBuildSequence = "1"
 	telegramBuildCatalogSequence = "1"
@@ -576,6 +626,7 @@ func setTelegramDoctorFakes(t *testing.T, now time.Time, relayResult adapter.Doc
 		telegramDoctorBotProbe, telegramDoctorServiceProbe = oldBot, oldService
 		telegramDoctorNow, telegramBuildRelease = oldNow, oldRelease
 		telegramBuildSequence, telegramBuildCatalogSequence = oldSequence, oldCatalogSequence
+		telegramDoctorStateProbe = oldState
 	})
 }
 

@@ -306,7 +306,10 @@ structurally decodes the installed LaunchAgent's exact `Label` and
 single-element `ProgramArguments`, then binds launchd's effective loaded
 program and arguments to the same fixed gateway executable.
 
-Durable state and liveness: `state_integrity`, `conversation_route_integrity`,
+Durable state opening, integrity queries, and liveness aggregation run in a
+deadline-isolated child helper; a stalled SQLite path becomes unavailable
+instead of extending the total doctor timeout. Durable state and liveness:
+`state_integrity`, `conversation_route_integrity`,
 `cycle_liveness`, `successful_cycle_liveness`, `polling_liveness`,
 `relay_cycle_liveness`, `telegram_cycle_liveness`, `retry_state`,
 `terminal_inbound_rejection`, `terminal_outbound_rejection`,
