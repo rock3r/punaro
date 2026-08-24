@@ -83,6 +83,9 @@ type Event struct {
 // UnmarshalJSON preserves strict object semantics for the optional metadata
 // field: omission is valid, while an explicit JSON null contradicts the schema.
 func (e *Event) UnmarshalJSON(payload []byte) error {
+	if err := ValidateJSONEncoding(payload); err != nil {
+		return err
+	}
 	var fields map[string]json.RawMessage
 	if err := json.Unmarshal(payload, &fields); err != nil {
 		return err
@@ -244,6 +247,69 @@ func ValidateJSONEncoding(payload []byte) error {
 	}
 	if !validJSONUnicodeEscapes(payload) {
 		return errors.New("event must use valid Unicode scalar escapes")
+	}
+	if err := validateUniqueJSONMembers(payload); err != nil {
+		return err
+	}
+	return nil
+}
+
+func validateUniqueJSONMembers(payload []byte) error {
+	decoder := json.NewDecoder(bytes.NewReader(payload))
+	if err := validateUniqueJSONValue(decoder); err != nil {
+		return fmt.Errorf("event must not contain duplicate JSON object members: %w", err)
+	}
+	if _, err := decoder.Token(); !errors.Is(err, io.EOF) {
+		return errors.New("event must contain exactly one JSON value")
+	}
+	return nil
+}
+
+func validateUniqueJSONValue(decoder *json.Decoder) error {
+	token, err := decoder.Token()
+	if err != nil {
+		return err
+	}
+	delimiter, isDelimiter := token.(json.Delim)
+	if !isDelimiter {
+		return nil
+	}
+	switch delimiter {
+	case '{':
+		seen := make(map[string]struct{})
+		for decoder.More() {
+			key, err := decoder.Token()
+			if err != nil {
+				return err
+			}
+			name, ok := key.(string)
+			if !ok {
+				return errors.New("JSON object member name is not a string")
+			}
+			if _, duplicate := seen[name]; duplicate {
+				return fmt.Errorf("duplicate member %q", name)
+			}
+			seen[name] = struct{}{}
+			if err := validateUniqueJSONValue(decoder); err != nil {
+				return err
+			}
+		}
+		end, err := decoder.Token()
+		if err != nil || end != json.Delim('}') {
+			return errors.New("unterminated JSON object")
+		}
+	case '[':
+		for decoder.More() {
+			if err := validateUniqueJSONValue(decoder); err != nil {
+				return err
+			}
+		}
+		end, err := decoder.Token()
+		if err != nil || end != json.Delim(']') {
+			return errors.New("unterminated JSON array")
+		}
+	default:
+		return errors.New("unexpected JSON delimiter")
 	}
 	return nil
 }

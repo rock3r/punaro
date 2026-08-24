@@ -4,6 +4,7 @@ package canopi
 
 import (
 	"crypto/rand"
+	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -33,7 +34,7 @@ func persistStoreInPinnedDirectory(directory *os.File, targetName string, state 
 	if err != nil {
 		return err
 	}
-	if err := reclaimPinnedStateTemporaries(directory, fd); err != nil {
+	if err := reclaimPinnedStateTemporaries(directory, fd, targetName); err != nil {
 		return fmt.Errorf("reclaim Canopi state temporaries: %w", err)
 	}
 	for range 8 {
@@ -41,7 +42,7 @@ func persistStoreInPinnedDirectory(directory *os.File, targetName string, state 
 		if _, err := rand.Read(suffix[:]); err != nil {
 			return fmt.Errorf("random Canopi state temporary name: %w", err)
 		}
-		temporaryName := ".canopi-state-" + hex.EncodeToString(suffix[:]) + ".tmp"
+		temporaryName := pinnedStateTemporaryPrefix(targetName) + hex.EncodeToString(suffix[:]) + ".tmp"
 		temporaryFD, err := unix.Openat(fd, temporaryName, unix.O_CREAT|unix.O_EXCL|unix.O_RDWR|unix.O_CLOEXEC, 0o600)
 		if errors.Is(err, unix.EEXIST) {
 			continue
@@ -77,14 +78,14 @@ func persistStoreInPinnedDirectory(directory *os.File, targetName string, state 
 	return errors.New("cannot allocate Canopi state temporary")
 }
 
-func reclaimPinnedStateTemporaries(directory *os.File, fd int) error {
+func reclaimPinnedStateTemporaries(directory *os.File, fd int, targetName string) error {
 	if _, err := directory.Seek(0, io.SeekStart); err != nil {
 		return err
 	}
 	for {
 		names, readErr := directory.Readdirnames(128)
 		for _, name := range names {
-			if !pinnedStateTemporaryName(name) {
+			if !pinnedStateTemporaryName(targetName, name) {
 				continue
 			}
 			var info unix.Stat_t
@@ -109,8 +110,8 @@ func reclaimPinnedStateTemporaries(directory *os.File, fd int) error {
 	}
 }
 
-func pinnedStateTemporaryName(name string) bool {
-	const prefix = ".canopi-state-"
+func pinnedStateTemporaryName(targetName, name string) bool {
+	prefix := pinnedStateTemporaryPrefix(targetName)
 	const suffix = ".tmp"
 	value := strings.TrimSuffix(strings.TrimPrefix(name, prefix), suffix)
 	if !strings.HasPrefix(name, prefix) || !strings.HasSuffix(name, suffix) || len(value) != 24 {
@@ -118,4 +119,9 @@ func pinnedStateTemporaryName(name string) bool {
 	}
 	_, err := hex.DecodeString(value)
 	return err == nil
+}
+
+func pinnedStateTemporaryPrefix(targetName string) string {
+	digest := sha256.Sum256([]byte(targetName))
+	return ".canopi-state-" + hex.EncodeToString(digest[:]) + "-"
 }

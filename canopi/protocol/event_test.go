@@ -78,6 +78,26 @@ func TestDecodeEventIsStrictAndBounded(t *testing.T) {
 	}
 }
 
+func TestDecodeEventRejectsDuplicateMembersAtEveryObjectLevel(t *testing.T) {
+	event := validEvent()
+	payload, err := json.Marshal(event)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for name, replacement := range map[string]struct{ from, to []byte }{
+		"event":    {[]byte(`"event_id":"claude:studio-m2:session-1:permission-1",`), []byte(`"event_id":"first","event_id":"second",`)},
+		"machine":  {[]byte(`"machine":{"id":"studio-m2","label":"studio-m2"},`), []byte(`"machine":{"id":"first","id":"second","label":"studio-m2"},`)},
+		"metadata": {[]byte(`"metadata":{"hook":"PermissionRequest"}`), []byte(`"metadata":{"hook":"first","hook":"second"}`)},
+	} {
+		t.Run(name, func(t *testing.T) {
+			malformed := bytes.Replace(payload, replacement.from, replacement.to, 1)
+			if _, err := DecodeEvent(bytes.NewReader(malformed), int64(len(malformed))); err == nil || !strings.Contains(err.Error(), "duplicate") {
+				t.Fatalf("DecodeEvent() duplicate %s error = %v, want rejection", name, err)
+			}
+		})
+	}
+}
+
 func TestDecodeEventRejectsInvalidUTF8BeforeJSONNormalization(t *testing.T) {
 	event := validEvent()
 	payload, err := json.Marshal(event)
