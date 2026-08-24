@@ -1724,7 +1724,7 @@ func TestAdapterServiceBindingRejectsStalePlatformDefinitions(t *testing.T) {
 	for goos, valid := range map[string]string{
 		"linux":   "[Service]\nExecStart=%h/.local/bin/punaro-bootstrap run --directory %h/.local/state/punaro-bootstrap\n",
 		"darwin":  `<plist><dict><key>Label</key><string>org.punaro.adapter</string><key>ProgramArguments</key><array><string>/bin/sh</string><string>-c</string><string>exec "$HOME/.local/bin/punaro-bootstrap" run --directory "$HOME/.local/state/punaro-bootstrap"</string></array></dict></plist>`,
-		"windows": "$root = $PSScriptRoot\r\n$bootstrap = Join-Path $root 'bootstrap'\r\n$bin = Join-Path $root 'bin\\punaro-bootstrap.exe'\r\n& $bin run --directory $bootstrap\r\n",
+		"windows": strings.ReplaceAll(adapterWindowsRunnerBody, "\n", "\r\n"),
 	} {
 		t.Run(goos, func(t *testing.T) {
 			if !adapterServiceFileBound(goos, valid) {
@@ -1741,6 +1741,26 @@ func TestAdapterServiceBindingRejectsStalePlatformDefinitions(t *testing.T) {
 				t.Fatal("commented expected Linux service binding was accepted")
 			}
 		})
+	}
+}
+
+func TestAdapterWindowsRunnerRequiresExactReleaseBoundContent(t *testing.T) {
+	template, err := os.ReadFile(filepath.Join("..", "..", "deploy", "windows", "Run-PunaroAdapter.ps1"))
+	if err != nil || string(template) != adapterWindowsRunnerBody {
+		t.Fatalf("release-bound Windows runner drifted: err=%v body=%q", err, template)
+	}
+	valid := strings.ReplaceAll(adapterWindowsRunnerBody, "\n", "\r\n")
+	if !adapterServiceFileBound("windows", valid) {
+		t.Fatal("exact Windows runner rejected")
+	}
+	for _, stale := range []string{
+		"# $bin = Join-Path $root 'bin\\punaro-bootstrap.exe'\r\n# & $bin run --directory $bootstrap\r\n& 'C:\\attacker.exe'\r\n",
+		strings.Replace(valid, "exit $LASTEXITCODE", "exit 0", 1),
+		valid + "& 'C:\\attacker.exe'\r\n",
+	} {
+		if adapterServiceFileBound("windows", stale) {
+			t.Fatalf("modified Windows runner accepted: %q", stale)
+		}
 	}
 }
 

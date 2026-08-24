@@ -811,10 +811,26 @@ func adapterServiceFileBound(goos, body string) bool {
 	case "darwin":
 		return adapterLaunchdPlistBound(body)
 	case "windows":
-		return strings.Count(body, "$bin = Join-Path $root 'bin\\punaro-bootstrap.exe'") == 1 && strings.Count(body, "& $bin run --directory $bootstrap") == 1
+		return adapterWindowsRunnerBound(body)
 	default:
 		return false
 	}
+}
+
+const adapterWindowsRunnerBody = "Set-StrictMode -Version Latest\n" +
+	"$ErrorActionPreference = 'Stop'\n\n" +
+	"$root = $PSScriptRoot\n" +
+	"$bootstrap = Join-Path $root 'bootstrap'\n" +
+	"$bin = Join-Path $root 'bin\\punaro-bootstrap.exe'\n" +
+	"& $bin run --directory $bootstrap\n" +
+	"exit $LASTEXITCODE\n"
+
+func adapterWindowsRunnerBound(body string) bool {
+	if len(body) > 64<<10 {
+		return false
+	}
+	normalized := strings.ReplaceAll(body, "\r\n", "\n")
+	return !strings.Contains(normalized, "\r") && normalized == adapterWindowsRunnerBody
 }
 
 func adapterLaunchdPlistBound(body string) bool {

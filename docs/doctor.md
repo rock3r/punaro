@@ -257,10 +257,13 @@ release identity for `minimum_bootstrap_release`. On Linux, the executable
 check also binds systemd's effective `ExecStart`, including drop-ins, to the
 exact bootstrap run command. On Windows, it structurally parses the scheduled
 task and requires one exact PowerShell action whose `-File` target is the
-protected installed runner. On macOS, it structurally decodes the installed
-plist's exact `Label` and three-element `ProgramArguments`, then also binds
-launchd's effective loaded program and arguments so a stale loaded job cannot
-pass from an unrelated matching string.
+protected installed runner, and the complete runner content must match the
+release-bound canonical script (LF and CRLF are equivalent). Comments, dead
+branches, extra commands, or altered exit handling therefore fail the executable
+check. On macOS, it structurally decodes the installed plist's exact `Label` and
+three-element `ProgramArguments`, then also binds launchd's effective loaded
+program and arguments so a stale loaded job cannot pass from an unrelated
+matching string.
 
 ### Bootstrap
 
