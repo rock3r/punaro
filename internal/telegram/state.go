@@ -135,6 +135,8 @@ type GatewayCycleRecord struct {
 	TelegramOK       bool
 	OutboundBlocked  bool
 	OutboundProgress bool
+	TerminalInbound  int
+	TerminalOutbound int
 	Failure          GatewayFailureClass
 }
 
@@ -173,7 +175,7 @@ func validGatewayFailure(class GatewayFailureClass) bool {
 // RecordGatewayCycle updates the content-free liveness ledger during normal
 // gateway operation. Doctor itself never calls this method.
 func (s *State) RecordGatewayCycle(record GatewayCycleRecord) error {
-	if record.At.IsZero() || record.Offset < 0 || record.OutboundProgress && !record.OutboundBlocked || !validGatewayFailure(record.Failure) {
+	if record.At.IsZero() || record.Offset < 0 || record.OutboundProgress && !record.OutboundBlocked || record.TerminalInbound < 0 || record.TerminalOutbound < 0 || record.Failure == GatewayFailureNone && (record.TerminalInbound > 0 || record.TerminalOutbound > 0) || !validGatewayFailure(record.Failure) {
 		return fmt.Errorf("invalid gateway cycle record")
 	}
 	now := record.At.UTC().UnixMilli()
@@ -219,11 +221,11 @@ func (s *State) RecordGatewayCycle(record GatewayCycleRecord) error {
 	if record.TelegramOK {
 		telegramAt = now
 	}
-	inboundDelta, outboundDelta := 0, 0
-	if record.Failure == GatewayFailureInboundRelayPermanent {
+	inboundDelta, outboundDelta := record.TerminalInbound, record.TerminalOutbound
+	if inboundDelta == 0 && record.Failure == GatewayFailureInboundRelayPermanent {
 		inboundDelta = 1
 	}
-	if record.Failure == GatewayFailureOutboundTelegramPermanent || record.Failure == GatewayFailureDeletedTopic {
+	if outboundDelta == 0 && (record.Failure == GatewayFailureOutboundTelegramPermanent || record.Failure == GatewayFailureDeletedTopic) {
 		outboundDelta = 1
 	}
 	_, err = s.db.ExecContext(context.Background(), `INSERT INTO gateway_health(

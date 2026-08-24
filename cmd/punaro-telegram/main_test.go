@@ -343,6 +343,20 @@ func TestFailedGatewayCycleRecordPreservesCompletedPhaseEvidence(t *testing.T) {
 	}
 }
 
+func TestFailedGatewayCycleRecordPreservesNonFatalTerminalDropCounts(t *testing.T) {
+	t.Parallel()
+	now := time.Date(2026, 8, 23, 12, 0, 0, 0, time.UTC)
+	err := &telegram.GatewayCycleError{
+		Phase: telegram.GatewayPhaseSend, NonFatal: true,
+		TerminalInbound: 2, TerminalOutbound: 3,
+		Err: telegram.BotAPIStatusError{Method: "sendRichMessage", Status: 403},
+	}
+	record := failedGatewayCycleRecord(now, 42, err)
+	if !isNonFatalGatewayCycle(err) || record.Failure != telegram.GatewayFailureOutboundTelegramPermanent || record.TerminalInbound != 2 || record.TerminalOutbound != 3 || !record.PollOK || !record.RelayOK {
+		t.Fatalf("record=%#v", record)
+	}
+}
+
 func TestLoadConfigReadsAccessPairFromPrivateCredentialFile(t *testing.T) {
 	_, private, err := ed25519.GenerateKey(rand.Reader)
 	if err != nil {

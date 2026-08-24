@@ -353,7 +353,10 @@ Inbound poll-offset progress and outbound delivery-head progress use separate
 durable clocks, so continuous new Telegram updates cannot hide a repeatedly
 failing outbound head. Once a head is blocked, failures in earlier advertise,
 poll, or lease phases preserve its age until a completed cycle or explicit
-outbound progress proves advancement. Endpoint-specific relay attachment probes
+outbound progress proves advancement. Terminal inbound and outbound drops are
+persisted even when the gateway safely continues the rest of the page or leased
+delivery batch, so poison-item progress cannot make either rejection check look
+healthy. Endpoint-specific relay attachment probes
 bind the exact asserted endpoint into the machine signature; changing that
 header invalidates the probe rather than exposing an endpoint-enumeration oracle.
 

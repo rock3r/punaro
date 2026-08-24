@@ -124,6 +124,33 @@ func TestGatewayHealthSeparatesTerminalFailureClassesAndStuckProgress(t *testing
 	}
 }
 
+func TestGatewayHealthRecordsBothTerminalPlanesFromOneCompletedCycle(t *testing.T) {
+	t.Parallel()
+	database := filepath.Join(t.TempDir(), "telegram.db")
+	state, err := Open(database)
+	if err != nil {
+		t.Fatal(err)
+	}
+	now := testCallbackNow
+	if err := state.RecordGatewayCycle(GatewayCycleRecord{
+		At: now, Offset: 12, PollOK: true, RelayOK: true,
+		Failure:         GatewayFailureOutboundTelegramPermanent,
+		TerminalInbound: 1, TerminalOutbound: 1,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := state.Close(); err != nil {
+		t.Fatal(err)
+	}
+	snapshot, err := InspectGatewayState(t.Context(), database, now.Add(time.Minute))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if snapshot.TerminalInbound != 1 || snapshot.TerminalOutbound != 1 || snapshot.LastFailure != GatewayFailureOutboundTelegramPermanent {
+		t.Fatalf("snapshot=%#v", snapshot)
+	}
+}
+
 func TestGatewayHealthOutboundStallIgnoresInboundOffsetProgress(t *testing.T) {
 	t.Parallel()
 	database := filepath.Join(t.TempDir(), "telegram.db")

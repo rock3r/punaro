@@ -292,7 +292,8 @@ and other retryable submission failures leave the update pending; a crash after
 submission is safely deduplicated by the relay. A relay 403 or 404 that echoes
 the signed request nonce is a terminal pre-append rejection, so the gateway
 records the update as processed, emits only a content-free
-`telegram_update_dropped` event, and continues the page. An intermediary 403 or
+`telegram_update_dropped` event, continues the page, and carries the terminal
+inbound outcome into the durable gateway-health record. An intermediary 403 or
 404 without that relay proof stays pending for retry. Unauthorized, unsupported
 or non-text, and unbound-topic updates are also
 durably skipped, including message-less update IDs returned by Telegram, so
@@ -309,7 +310,8 @@ state can recover it. A malformed delivery or completed Telegram 4xx response
 other than 401 and 429 is terminal: the bridge emits only a content-free
 `telegram_send_dropped` event, acknowledges that poison delivery, and continues
 later deliveries. A successful dropped acknowledgement advances the outbound
-liveness clock; an acknowledgement failure remains an explicit blocked
+liveness clock and carries the terminal outbound outcome into the durable
+gateway-health record; an acknowledgement failure remains an explicit blocked
 ack-phase cycle. A deleted Telegram thread therefore fails closed and is
 dropped; repair the explicit route rather than recreating a thread
 automatically. Telegram 401, 429, 5xx, and network failures leave the delivery

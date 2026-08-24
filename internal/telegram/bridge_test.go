@@ -111,8 +111,10 @@ func TestBridgeDropsMalformedDeliveryThenContinues(t *testing.T) {
 		Poller: fakePoller{}, Gateway: Gateway{AllowedUserID: 55, State: state, Submit: func(context.Context, Submission) error { return nil }},
 		Sender: sender, Log: func(format string, args ...any) { logs = append(logs, fmt.Sprintf(format, args...)) },
 	}
-	if _, err := bridge.SyncOnce(context.Background(), 1); err != nil {
-		t.Fatal(err)
+	_, err = bridge.SyncOnce(context.Background(), 1)
+	var cycleErr *GatewayCycleError
+	if !errors.As(err, &cycleErr) || !cycleErr.NonFatal || cycleErr.Phase != GatewayPhaseSend || cycleErr.TerminalOutbound != 1 || ClassifyGatewayCycleFailure(err) != GatewayFailureOutboundTelegramPermanent {
+		t.Fatalf("err=%#v", cycleErr)
 	}
 	if got := fmt.Sprint(relayClient.acked); got != "[malformed good]" || sender.calls != 1 {
 		t.Fatalf("acked=%v sender calls=%d", relayClient.acked, sender.calls)
@@ -179,11 +181,46 @@ func TestBridgeDropsPermanentTelegramRejectionThenContinues(t *testing.T) {
 		Poller: fakePoller{}, Gateway: Gateway{AllowedUserID: 55, State: state, Submit: func(context.Context, Submission) error { return nil }},
 		Sender: sender, Log: func(string, ...any) {},
 	}
-	if _, err := bridge.SyncOnce(context.Background(), 1); err != nil {
-		t.Fatal(err)
+	_, err = bridge.SyncOnce(context.Background(), 1)
+	var cycleErr *GatewayCycleError
+	if !errors.As(err, &cycleErr) || !cycleErr.NonFatal || cycleErr.Phase != GatewayPhaseSend || cycleErr.TerminalInbound != 0 || cycleErr.TerminalOutbound != 1 || ClassifyGatewayCycleFailure(err) != GatewayFailureOutboundTelegramPermanent {
+		t.Fatalf("err=%#v", cycleErr)
 	}
 	if got := fmt.Sprint(relayClient.acked); got != "[rejected good]" || sender.calls != 2 {
 		t.Fatalf("acked=%v sender calls=%d", relayClient.acked, sender.calls)
+	}
+}
+
+func TestBridgeReportsPermanentInboundDropAfterContinuingPage(t *testing.T) {
+	t.Parallel()
+	state, err := Open(filepath.Join(t.TempDir(), "telegram.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = state.Close() })
+	if err := state.SetRoute(55, 7, "conversation-1"); err != nil {
+		t.Fatal(err)
+	}
+	var submitted []string
+	bridge := Bridge{
+		Relay: &fakeBridgeRelay{}, Endpoint: relay.TelegramGatewayEndpoint, State: state,
+		Poller: fakePoller{updates: []Update{
+			{ID: 10, UserID: 55, ChatID: 55, ThreadID: 7, Text: "poison"},
+			{ID: 11, UserID: 55, ChatID: 55, ThreadID: 7, Text: "later"},
+		}},
+		Gateway: Gateway{AllowedUserID: 55, State: state, Submit: func(_ context.Context, submission Submission) error {
+			submitted = append(submitted, submission.Text)
+			if submission.Text == "poison" {
+				return permanentRelayFixtureError{}
+			}
+			return nil
+		}},
+		Sender: &scriptedRichSender{},
+	}
+	next, err := bridge.SyncOnce(t.Context(), 10)
+	var cycleErr *GatewayCycleError
+	if next != 12 || fmt.Sprint(submitted) != "[poison later]" || !errors.As(err, &cycleErr) || !cycleErr.NonFatal || cycleErr.Phase != GatewayPhaseInbound || cycleErr.TerminalInbound != 1 || cycleErr.TerminalOutbound != 0 || ClassifyGatewayCycleFailure(err) != GatewayFailureInboundRelayPermanent {
+		t.Fatalf("next=%d submitted=%v err=%#v", next, submitted, cycleErr)
 	}
 }
 
@@ -208,7 +245,7 @@ func TestBridgeReportsProgressAfterDroppedDeliveryBeforeLaterSendFailure(t *test
 	}
 	_, err = bridge.SyncOnce(t.Context(), 1)
 	var cycleErr *GatewayCycleError
-	if !errors.As(err, &cycleErr) || cycleErr.Phase != GatewayPhaseSend || !cycleErr.OutboundBlocked || !cycleErr.OutboundProgress || fmt.Sprint(relayClient.acked) != "[poison]" {
+	if !errors.As(err, &cycleErr) || cycleErr.Phase != GatewayPhaseSend || cycleErr.TerminalOutbound != 1 || !cycleErr.OutboundBlocked || !cycleErr.OutboundProgress || fmt.Sprint(relayClient.acked) != "[poison]" {
 		t.Fatalf("err=%#v acked=%v", cycleErr, relayClient.acked)
 	}
 }
@@ -231,7 +268,7 @@ func TestBridgeWrapsDroppedDeliveryAckFailureWithCycleMetadata(t *testing.T) {
 	}
 	_, err = bridge.SyncOnce(t.Context(), 1)
 	var cycleErr *GatewayCycleError
-	if !errors.As(err, &cycleErr) || cycleErr.Phase != GatewayPhaseAck || !cycleErr.OutboundBlocked || cycleErr.OutboundProgress || fmt.Sprint(relayClient.acked) != "[poison]" {
+	if !errors.As(err, &cycleErr) || cycleErr.Phase != GatewayPhaseAck || cycleErr.TerminalOutbound != 1 || !cycleErr.OutboundBlocked || cycleErr.OutboundProgress || fmt.Sprint(relayClient.acked) != "[poison]" {
 		t.Fatalf("err=%#v acked=%v", cycleErr, relayClient.acked)
 	}
 }

@@ -65,6 +65,7 @@ type Gateway struct {
 	Claims        *ClaimExecutor
 	Now           func() time.Time
 	Log           func(string, ...any)
+	terminalDrop  func(error)
 }
 
 // Handle never turns Telegram text into control input. Commands are accepted
@@ -116,6 +117,9 @@ func (g Gateway) Handle(ctx context.Context, update Update) error {
 			g.logEvent("telegram_update_dropped", "reason=relay_rejected")
 			if err := g.State.MarkProcessed(update.ID); err != nil {
 				return fmt.Errorf("record dropped telegram update: %w", err)
+			}
+			if g.terminalDrop != nil {
+				g.terminalDrop(err)
 			}
 			return nil
 		}
