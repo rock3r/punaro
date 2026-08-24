@@ -4,8 +4,7 @@ package canopiadapter
 import (
 	"bytes"
 	"context"
-	"crypto/hmac"
-	"crypto/sha256"
+	"crypto/rand"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -19,13 +18,12 @@ import (
 	"github.com/rock3r/punaro/internal/canopitransport"
 )
 
-// AdapterConfig supplies privacy-safe local identity and event-ID keying.
+// AdapterConfig supplies privacy-safe local identity and display context.
 type AdapterConfig struct {
 	MachineID    string
 	MachineLabel string
 	TaskTitle    string
 	Repository   string
-	EventIDKey   []byte
 }
 
 type claudeHook struct {
@@ -41,9 +39,6 @@ type claudeHook struct {
 func MapClaudeHook(raw []byte, config AdapterConfig, now time.Time) (protocol.Event, bool, error) {
 	if config.MachineID == "" {
 		return protocol.Event{}, false, errors.New("machine ID is required")
-	}
-	if len(config.EventIDKey) == 0 {
-		return protocol.Event{}, false, errors.New("secret event ID key is required")
 	}
 	var hook claudeHook
 	if err := json.Unmarshal(raw, &hook); err != nil {
@@ -76,15 +71,13 @@ func MapClaudeHook(raw []byte, config AdapterConfig, now time.Time) (protocol.Ev
 	} else {
 		parentID = hook.SessionID
 	}
-	digest := hmac.New(sha256.New, config.EventIDKey)
-	_, _ = digest.Write([]byte(config.MachineID))
-	_, _ = digest.Write([]byte{0})
-	_, _ = digest.Write(raw)
-	_, _ = digest.Write([]byte{0})
-	_, _ = digest.Write([]byte(now.UTC().Format(time.RFC3339Nano)))
+	eventID, err := newClaudeEventID()
+	if err != nil {
+		return protocol.Event{}, false, err
+	}
 	event := protocol.Event{
 		SpecVersion:           protocol.SpecVersion,
-		EventID:               "claude_code:" + hex.EncodeToString(digest.Sum(nil)),
+		EventID:               eventID,
 		Source:                protocol.SourceClaudeCode,
 		Machine:               protocol.Machine{ID: config.MachineID, Label: machineLabel},
 		SessionID:             hook.SessionID,
@@ -104,6 +97,14 @@ func MapClaudeHook(raw []byte, config AdapterConfig, now time.Time) (protocol.Ev
 		return protocol.Event{}, false, err
 	}
 	return event, true, nil
+}
+
+func newClaudeEventID() (string, error) {
+	var random [32]byte
+	if _, err := rand.Read(random[:]); err != nil {
+		return "", fmt.Errorf("generate Claude event ID: %w", err)
+	}
+	return "claude_code:" + hex.EncodeToString(random[:]), nil
 }
 
 func truncateRunes(value string, maximum int) string {

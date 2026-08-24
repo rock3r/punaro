@@ -26,11 +26,12 @@ pixel-for-pixel comparison and remaining P3 observation.
 ## Architecture and boundaries
 
 ```text
-provider command hook -> bounded durable local spool -> detached retry worker
-                                                     -> POST normalized event
-                                                     -> Canopi collector/state file
-                                                     -> deterministic 800x480 PNG
-                                                     -> XIAO conditional GET/panel
+provider command hook -> detached local capture -> bounded durable local spool
+                                                -> detached retry worker
+                                                -> POST normalized event
+                                                -> Canopi collector/state file
+                                                -> deterministic 800x480 PNG
+                                                -> XIAO conditional GET/panel
 ```
 
 - `canopi/protocol` is the versioned transport-neutral contract.
@@ -64,16 +65,23 @@ credentials, tool inputs, or tool outputs. Metadata is default-deny; the schema
 and Go validator accept only the privacy-safe `hook`, `simulated`, and
 `agent_type` keys, with the same per-key types as the published JSON Schema.
 The Claude adapter does not inspect assistant text to infer lifecycle state. It
-creates a fixed-length invocation identifier from a keyed HMAC over machine
-identity, provider payload, and local invocation time; neither the source text
-nor an unkeyed source digest is transmitted. Only task title,
+creates a random, fixed-length 256-bit invocation identifier that is independent
+of both the bearer credential and the provider payload. A collector or token
+holder therefore cannot use an event ID to test guesses about private hook
+content. Only task title,
 optional repository, stable IDs, state, timestamps, and primitive allowlisted
 metadata leave the machine. Metadata may be omitted, while explicit JSON `null`
 is rejected to match the schema's object contract.
 
-The hook-facing Claude process performs no network I/O. It normalizes the event,
-durably enqueues only that privacy-safe event, starts a detached delivery child,
-and returns. One cross-process worker drains the bounded 4,096-event spool and
+The hook-facing Claude process performs no parsing, storage, or network I/O. It
+passes its inherited stdin directly to a detached local capture child and
+returns after process creation. The child runs in an independent Unix session
+or detached Windows process group, normalizes only in memory, durably enqueues
+the privacy-safe event, and starts a detached delivery supervisor. A slow or
+uncancellable file sync can therefore finish after Claude's hook deadline
+without losing the event or delaying the coding agent. Raw provider input is
+never placed in an argument, environment variable, spool file, or network
+request. One cross-process worker drains the bounded 4,096-event spool and
 retries the queued event with its original ID until the collector acknowledges
 it. Separate identical provider invocations receive distinct IDs. Individual
 HTTP attempts are bounded, and a rejected event remains queued without starving
@@ -83,7 +91,7 @@ cannot be reclaimed from a live process by stale timestamps or wall-clock jumps.
 A concurrent enqueue waits for the live kernel lock and completes its bounded
 primary-lane publication for up to 250 ms. If contention outlives that bound, it
 atomically claims one of the capacity-reserved, fsynced contention slots instead
-of waiting past Claude's two-second hook deadline or dropping the event. Collector
+of remaining behind the primary lock or dropping the event. Collector
 network I/O remains detached and never occurs while the enqueue lock is held.
 Missing configuration, malformed provider input, spool or process-launch
 failure, token-file failure, network failure, and collector rejection all leave
@@ -253,15 +261,15 @@ Copy the `hooks` object from
 `canopi/providers/claude-code-hooks.example.json` into project-local
 `.claude/settings.local.json` or the desired Claude settings scope, then replace
 the absolute binary path. Run `prepare` before enabling those hooks; it creates
-and protects the spool outside Claude's two-second hook deadline. Hook stdout
+and protects the spool before detached captures can publish events. Hook stdout
 and stderr stay empty.
 
 `CANOPI_SPOOL_DIR` is optional; when omitted, `prepare` creates
 `canopi-claude-spool` beside the token file. On Unix, the directory must belong
 to the current user and is tightened to mode `0700`; on Windows, it must belong
 to the current user and is given a protected current-user-only DACL. Queued
-normalized events are owner-only. A collector outage never causes the hook-facing process
-to wait for network recovery. The adapter applies the same current-user,
+normalized events are owner-only. A collector outage or slow filesystem never
+causes the hook-facing process to wait for recovery. The adapter applies the same current-user,
 owner-only, regular-file, no-symlink token checks as the collector. Each
 serialized enqueue reclaims crash-left `.event-*.tmp` files while holding the
 cross-process kernel lock, keeping temporary storage bounded across restarts.
@@ -287,10 +295,10 @@ created atomically during `prepare`; an unsafe pre-existing coordinator makes
 preflight fail for explicit operator removal instead of repairing its own lock.
 The configured spool capacity includes a fixed contention reserve (one sixteenth,
 at least one and at most 256 slots). Normal and contention lanes therefore remain
-jointly bounded while concurrent hooks can publish without waiting past their
-provider deadline. Directory creation and ACL protection happen only during the
-explicit `prepare` preflight or supervisor startup, never in the hook-facing
-enqueue. The complete hook-facing enqueue is capped at 1.75 seconds.
+jointly bounded while concurrent detached captures can make progress independently.
+Directory creation and ACL protection happen only during the explicit `prepare`
+preflight or supervisor startup, never in provider-facing process launch. The
+provider-facing process performs no enqueue at all; only detached capture does.
 Each operation resolves the configured spool to a canonical real directory for
 its full lifetime. Current-user-owned Unix symlink ancestors and all Windows
 reparse ancestors are rejected, preventing a mutable alias from splitting hooks

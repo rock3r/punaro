@@ -1,6 +1,6 @@
 // canopi-claude-hook adapts Claude Code command hooks to Canopi events. The
-// hook-facing process only normalizes and starts a detached delivery child; all
-// network I/O happens after the hook-facing process has returned.
+// hook-facing process delegates stdin to a detached capture child and returns;
+// durable storage and network I/O therefore cannot extend the provider hook.
 package main
 
 import (
@@ -22,6 +22,9 @@ const maxHookBytes = 1 << 20
 func main() {
 	if len(os.Args) == 2 {
 		switch os.Args[1] {
+		case "capture":
+			_ = runCapture(os.Stdin, os.Getenv, spawnSupervisor)
+			return
 		case "deliver":
 			_ = runDelivery(os.Getenv)
 			return
@@ -35,7 +38,7 @@ func main() {
 			return
 		}
 	}
-	_ = runHook(os.Stdin, os.Getenv, readProtectedToken, spawnDetached)
+	_ = runHook(func() error { return spawnCapture(os.Stdin) })
 }
 
 func runPrepare(getenv func(string) string) error {
@@ -46,44 +49,54 @@ func runPrepare(getenv func(string) string) error {
 	return spool.Prepare()
 }
 
-func runHook(input io.Reader, getenv func(string) string, readFile func(string) ([]byte, error), spawn func() error) error {
+func runHook(spawn func() error) error {
+	_ = spawn()
+	return nil
+}
+
+func runCapture(input io.Reader, getenv func(string) string, spawn func() error) error {
 	if getenv("CANOPI_ENDPOINT") == "" || getenv("CANOPI_TOKEN_FILE") == "" || getenv("CANOPI_MACHINE_ID") == "" {
 		return nil
 	}
 	raw, err := io.ReadAll(io.LimitReader(input, maxHookBytes+1))
 	if err != nil || len(raw) > maxHookBytes {
-		return nil //nolint:nilerr // Hook failures must never affect Claude Code.
-	}
-	eventIDKey, err := readFile(getenv("CANOPI_TOKEN_FILE"))
-	if err != nil || len(strings.TrimSpace(string(eventIDKey))) == 0 {
-		return nil //nolint:nilerr // Hook failures must never affect Claude Code.
+		return nil //nolint:nilerr // Detached capture failures have no provider-visible channel.
 	}
 	event, emit, err := canopiadapter.MapClaudeHook(raw, canopiadapter.AdapterConfig{
 		MachineID:    getenv("CANOPI_MACHINE_ID"),
 		MachineLabel: getenv("CANOPI_MACHINE_LABEL"),
 		TaskTitle:    getenv("CANOPI_TASK_TITLE"),
 		Repository:   getenv("CANOPI_REPOSITORY"),
-		EventIDKey:   []byte(strings.TrimSpace(string(eventIDKey))),
 	}, time.Now())
 	if err != nil || !emit {
-		return nil //nolint:nilerr // Invalid or irrelevant hooks are deliberately swallowed.
+		return nil //nolint:nilerr // Invalid or irrelevant hooks have no provider-visible channel.
 	}
 	spool, err := deliverySpool(getenv)
 	if err != nil || spool.Enqueue(event) != nil {
-		return nil //nolint:nilerr // Hook failures must never affect Claude Code.
+		return nil //nolint:nilerr // Detached capture failures have no provider-visible channel.
 	}
 	_ = spawn()
 	return nil
 }
 
-func spawnDetached() error {
+func spawnCapture(input *os.File) error {
+	return spawnDetached("capture", input)
+}
+
+func spawnSupervisor() error {
+	return spawnDetached("supervise", nil)
+}
+
+func spawnDetached(mode string, input *os.File) error {
 	executable, err := os.Executable()
 	if err != nil {
 		return err
 	}
-	command := exec.CommandContext(context.Background(), executable, "supervise") // #nosec G204 -- os.Executable returns this already-running adapter binary; arguments are fixed.
+	command := exec.CommandContext(context.Background(), executable, mode) // #nosec G204 -- os.Executable returns this already-running adapter binary; arguments are fixed.
+	command.Stdin = input
 	command.Stdout = io.Discard
 	command.Stderr = io.Discard
+	configureDetachedProcess(command)
 	if err := command.Start(); err != nil {
 		return err
 	}

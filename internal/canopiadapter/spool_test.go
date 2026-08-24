@@ -540,12 +540,9 @@ func TestEnqueueLockedStopsBeforeMaintenanceWhenPrimaryBudgetExpires(t *testing.
 	}
 }
 
-func TestProviderEnqueueBudgetsStayBelowClaudeHookDeadline(t *testing.T) {
-	if providerEnqueueBudget >= 2*time.Second {
-		t.Fatalf("provider enqueue budget = %s, must remain below Claude's two-second hook deadline", providerEnqueueBudget)
-	}
-	if maxPrimaryLaneBudget >= providerEnqueueBudget {
-		t.Fatalf("primary budget = %s, must leave time for the durable contention lane", maxPrimaryLaneBudget)
+func TestPrimaryEnqueueLockBudgetRemainsBounded(t *testing.T) {
+	if maxPrimaryLaneBudget > time.Second {
+		t.Fatalf("primary lock budget = %s, want <= 1s before contention fallback", maxPrimaryLaneBudget)
 	}
 }
 

@@ -23,7 +23,6 @@ const (
 	defaultMaxSpoolEvents = 4_096
 	maxSpoolEventBytes    = 64 << 10
 	defaultEnqueueWait    = 250 * time.Millisecond
-	providerEnqueueBudget = 1750 * time.Millisecond
 	maxPrimaryLaneBudget  = 750 * time.Millisecond
 	enqueueLockPoll       = 5 * time.Millisecond
 	supervisorPoll        = 250 * time.Millisecond
@@ -39,14 +38,13 @@ type Spool struct {
 	MaxEvents int
 	RetryMin  time.Duration
 	RetryMax  time.Duration
-	// EnqueueLockTimeout bounds the primary lane below the provider hook deadline.
+	// EnqueueLockTimeout bounds the primary lane before contention fallback.
 	EnqueueLockTimeout time.Duration
 }
 
 // Enqueue durably records an event. Re-enqueueing the same event ID is harmless.
 func (s Spool) Enqueue(event protocol.Event) error {
-	operationCtx, cancelOperation := context.WithTimeout(context.Background(), providerEnqueueBudget)
-	defer cancelOperation()
+	operationCtx := context.Background()
 	if err := event.Validate(); err != nil {
 		return err
 	}
