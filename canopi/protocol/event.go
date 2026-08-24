@@ -256,6 +256,7 @@ func ValidateJSONEncoding(payload []byte) error {
 
 func validateUniqueJSONMembers(payload []byte) error {
 	decoder := json.NewDecoder(bytes.NewReader(payload))
+	decoder.UseNumber()
 	if err := validateUniqueJSONValue(decoder); err != nil {
 		return fmt.Errorf("event must not contain duplicate JSON object members: %w", err)
 	}

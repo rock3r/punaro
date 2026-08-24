@@ -633,6 +633,27 @@ func TestEnqueueLeavesPublishedEventWhenFileSyncFails(t *testing.T) {
 	}
 }
 
+func TestEnqueueRetryResyncsPublishedEventBeforeAcknowledging(t *testing.T) {
+	syncs := 0
+	spool := preparedTestSpool(t, Spool{Directory: t.TempDir(), MaxEvents: 4, syncFile: func(*os.File) error {
+		syncs++
+		if syncs == 1 {
+			return errors.New("simulated sync failure")
+		}
+		return nil
+	}})
+	input := spoolEvent("retry-resync")
+	if err := spool.Enqueue(input); err == nil {
+		t.Fatal("first Enqueue() accepted failed sync")
+	}
+	if err := spool.Enqueue(input); err != nil {
+		t.Fatalf("retry Enqueue() = %v", err)
+	}
+	if syncs < 2 {
+		t.Fatalf("retry completed after %d syncs, want a fresh durability barrier", syncs)
+	}
+}
+
 func TestDrainResyncsPublishedEventBeforeDelivery(t *testing.T) {
 	syncs := 0
 	spool := preparedTestSpool(t, Spool{

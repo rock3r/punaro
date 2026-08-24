@@ -109,7 +109,7 @@ func (s Spool) enqueueLocked(ctx context.Context, event protocol.Event, payload 
 	target := s.eventPath(event.EventID)
 	match, occupied, err := queuedSpoolEventMatches(target, event.EventID)
 	if err == nil && match {
-		return nil
+		return s.syncQueuedSpoolEvent(target)
 	}
 	if err != nil && occupied {
 		if err := s.removeInvalidQueuedSpoolFile(ctx, target); err != nil {
@@ -117,7 +117,7 @@ func (s Spool) enqueueLocked(ctx context.Context, event protocol.Event, payload 
 		}
 		match, occupied, err = queuedSpoolEventMatches(target, event.EventID)
 		if err == nil && match {
-			return nil
+			return s.syncQueuedSpoolEvent(target)
 		}
 		if err != nil {
 			return err
@@ -134,7 +134,7 @@ func (s Spool) enqueueLocked(ctx context.Context, event protocol.Event, payload 
 	if match, err := s.contentionEventExists(ctx, event.EventID); err != nil {
 		return err
 	} else if match {
-		return nil
+		return s.syncQueuedSpoolEvent(target)
 	}
 	files, err := s.eventFiles(ctx)
 	if err != nil {
@@ -186,7 +186,7 @@ func (s Spool) enqueueContention(ctx context.Context, event protocol.Event, payl
 	}
 	match, occupied, err := queuedSpoolEventMatches(s.eventPath(event.EventID), event.EventID)
 	if err == nil && match {
-		return nil
+		return s.syncQueuedSpoolEvent(s.eventPath(event.EventID))
 	}
 	if err != nil && occupied {
 		if removeErr := s.removeInvalidQueuedSpoolFile(ctx, s.eventPath(event.EventID)); removeErr != nil {
@@ -194,7 +194,7 @@ func (s Spool) enqueueContention(ctx context.Context, event protocol.Event, payl
 		}
 		match, occupied, err = queuedSpoolEventMatches(s.eventPath(event.EventID), event.EventID)
 		if err == nil && match {
-			return nil
+			return s.syncQueuedSpoolEvent(s.eventPath(event.EventID))
 		}
 		if err != nil {
 			return err
@@ -222,6 +222,9 @@ func (s Spool) enqueueContention(ctx context.Context, event protocol.Event, payl
 			return err
 		}
 		if matched || created {
+			if matched {
+				return s.syncQueuedSpoolEvent(path)
+			}
 			return nil
 		}
 		if occupied {
@@ -229,10 +232,17 @@ func (s Spool) enqueueContention(ctx context.Context, event protocol.Event, payl
 		}
 		match, _, err := queuedSpoolEventMatches(path, event.EventID)
 		if err == nil && match {
-			return nil
+			return s.syncQueuedSpoolEvent(path)
 		}
 	}
 	return ErrSpoolFull
+}
+
+func (s Spool) syncQueuedSpoolEvent(path string) error {
+	if err := syncPrivateSpoolFile(path, s.syncSpoolFile); err != nil {
+		return err
+	}
+	return syncDirectory(s.Directory)
 }
 
 func (s Spool) publishIntoContentionSlot(ctx context.Context, path, eventID string, payload []byte) (matched, created, occupied bool, err error) {

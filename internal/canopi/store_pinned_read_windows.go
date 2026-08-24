@@ -6,6 +6,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"unsafe"
 
 	"golang.org/x/sys/windows"
 )
@@ -29,9 +30,24 @@ func recoverPinnedStateReplacement(directory *os.File, targetName string) error 
 }
 
 func openPrivateStateFileInPinnedDirectory(directory *os.File, targetName string) (*os.File, error) {
-	path, err := pinnedWindowsStateDirectoryPath(directory)
+	objectName, err := windows.NewNTUnicodeString(targetName)
 	if err != nil {
 		return nil, err
 	}
-	return openPrivateStateFile(filepath.Join(path, targetName))
+	oa := &windows.OBJECT_ATTRIBUTES{Length: uint32(unsafe.Sizeof(windows.OBJECT_ATTRIBUTES{})), RootDirectory: windows.Handle(directory.Fd()), ObjectName: objectName, Attributes: windows.OBJ_DONT_REPARSE}
+	var iosb windows.IO_STATUS_BLOCK
+	var handle windows.Handle
+	if err := windows.NtCreateFile(&handle, windows.FILE_GENERIC_READ, oa, &iosb, nil, windows.FILE_ATTRIBUTE_NORMAL, windows.FILE_SHARE_READ, windows.FILE_OPEN, windows.FILE_NON_DIRECTORY_FILE|windows.FILE_SYNCHRONOUS_IO_NONALERT, 0, 0); err != nil {
+		return nil, err
+	}
+	file := os.NewFile(uintptr(handle), targetName) // #nosec G115 -- successful Win32 handles are nonnegative.
+	var details windows.ByHandleFileInformation
+	if err := windows.GetFileInformationByHandle(handle, &details); err != nil || details.FileAttributes&windows.FILE_ATTRIBUTE_REPARSE_POINT != 0 || details.FileAttributes&windows.FILE_ATTRIBUTE_DIRECTORY != 0 || !privateStateWindowsACLHandle(file) {
+		_ = file.Close()
+		if err != nil {
+			return nil, err
+		}
+		return nil, os.ErrInvalid
+	}
+	return file, nil
 }

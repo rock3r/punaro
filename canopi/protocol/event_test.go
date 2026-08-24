@@ -162,6 +162,22 @@ func TestDecodeEventPreservesLargeIntegerMetadataExactly(t *testing.T) {
 	}
 }
 
+func TestDecodeEventPreservesOutOfRangeJSONNumberDuringMemberValidation(t *testing.T) {
+	event := validEvent()
+	payload, err := json.Marshal(event)
+	if err != nil {
+		t.Fatal(err)
+	}
+	payload = bytes.Replace(payload, []byte(`"hook":"PermissionRequest"`), []byte(`"hook":1e1000`), 1)
+	decoded, err := DecodeEvent(bytes.NewReader(payload), int64(len(payload)))
+	if err != nil {
+		t.Fatalf("DecodeEvent() error = %v", err)
+	}
+	if value, ok := decoded.Metadata["hook"].(json.Number); !ok || value.String() != "1e1000" {
+		t.Fatalf("metadata hook = %#v, want json.Number(1e1000)", decoded.Metadata["hook"])
+	}
+}
+
 func TestDecodeEventRejectsExplicitNullMetadata(t *testing.T) {
 	event := validEvent()
 	event.Metadata = nil
