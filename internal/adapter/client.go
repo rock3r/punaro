@@ -85,12 +85,13 @@ func OpenAccessSessionWithPolicy(_ context.Context, rawURL string, client *http.
 
 // HTTPRelayClient is the signed HTTPS client used by one enrolled adapter.
 type HTTPRelayClient struct {
-	baseURL     *url.URL
-	machineID   string
-	privateKey  ed25519.PrivateKey
-	httpClient  *http.Client
-	consumerID  string
-	accessToken AccessServiceToken
+	baseURL       *url.URL
+	machineID     string
+	privateKey    ed25519.PrivateKey
+	httpClient    *http.Client
+	consumerID    string
+	accessToken   AccessServiceToken
+	requireAccess bool
 }
 
 type relayHTTPStatusError struct {
@@ -172,8 +173,12 @@ func NewHTTPRelayClientWithPolicy(rawURL, machineID string, privateKey ed25519.P
 	if accessToken.ClientID != "" {
 		clientCopy.Jar = nil
 	}
-	result := &HTTPRelayClient{baseURL: baseURL, machineID: machineID, privateKey: append(ed25519.PrivateKey(nil), privateKey...), httpClient: &clientCopy, consumerID: consumerID, accessToken: accessToken}
+	result := &HTTPRelayClient{baseURL: baseURL, machineID: machineID, privateKey: append(ed25519.PrivateKey(nil), privateKey...), httpClient: &clientCopy, consumerID: consumerID, accessToken: accessToken, requireAccess: requiresAccessAdmission(baseURL)}
 	return result, nil
+}
+
+func requiresAccessAdmission(baseURL *url.URL) bool {
+	return baseURL != nil && baseURL.Scheme == "https" && !loopbackHost(baseURL.Hostname())
 }
 
 // Doctor performs the signed, non-mutating relay reachability probe. A nonce
@@ -234,7 +239,7 @@ func (c *HTTPRelayClient) doctor(ctx context.Context, endpoint string) (DoctorPr
 		return result, errors.New("relay doctor origin was not confirmed")
 	}
 	result.Origin = true
-	if c.accessToken.ClientID != "" && !c.doctorAccessIsEnforced(ctx, endpoint) {
+	if (c.requireAccess || c.accessToken.ClientID != "") && (c.accessToken.ClientID == "" || !c.doctorAccessIsEnforced(ctx, endpoint)) {
 		return result, errors.New("relay doctor Access admission was not enforced")
 	}
 	result.Access = true
@@ -334,7 +339,7 @@ func (c *HTTPRelayClient) DoctorNotifications(ctx context.Context) (DoctorProbeR
 		return result, errors.New("relay notification doctor origin was not confirmed")
 	}
 	result.Origin = true
-	if c.accessToken.ClientID != "" && !c.doctorNotificationAccessIsEnforced(ctx) {
+	if (c.requireAccess || c.accessToken.ClientID != "") && (c.accessToken.ClientID == "" || !c.doctorNotificationAccessIsEnforced(ctx)) {
 		if connection != nil {
 			_ = connection.CloseNow()
 		}

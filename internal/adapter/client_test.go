@@ -196,6 +196,35 @@ func TestHTTPRelayClientDoctorProbeVerifiesAccessEnforcement(t *testing.T) {
 	}
 }
 
+func TestHTTPRelayClientDoctorRejectsPublicHTTPSWithoutAccessCredential(t *testing.T) {
+	_, private, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	client, err := NewHTTPRelayClient("https://relay.example", "machine-a", private, &http.Client{Transport: roundTripperFunc(func(request *http.Request) (*http.Response, error) {
+		return testHTTPResponse(request, http.StatusNoContent, http.Header{
+			relay.ResponseNonceHeader: {request.Header.Get("X-Punaro-Nonce")},
+			relay.ProtocolHeader:      {strconv.Itoa(relay.ProtocolVersion)},
+		}), nil
+	})}, AccessServiceToken{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	result, probeErr := client.Doctor(t.Context())
+	if probeErr == nil || result != (DoctorProbeResult{Transport: true, Origin: true}) {
+		t.Fatalf("result=%#v err=%v", result, probeErr)
+	}
+	if !requiresAccessAdmission(client.baseURL) {
+		t.Fatal("public HTTPS origin did not require Access admission")
+	}
+	if requiresAccessAdmission(&url.URL{Scheme: "https", Host: "127.0.0.1"}) {
+		t.Fatal("loopback HTTPS origin unexpectedly required Access admission")
+	}
+	if requiresAccessAdmission(&url.URL{Scheme: "http", Host: "192.0.2.10"}) {
+		t.Fatal("trusted-LAN HTTP origin unexpectedly required Access admission")
+	}
+}
+
 func TestHTTPRelayClientDoctorNotificationProbeIsContentFree(t *testing.T) {
 	_, private, err := ed25519.GenerateKey(rand.Reader)
 	if err != nil {

@@ -69,7 +69,10 @@ Access admission passes only after a credentialed request reaches the expected
 Punaro route and a fresh equivalent request without the Access credential is
 rejected before Punaro can echo its nonce or origin signature. This negative
 probe is also required by adapter and Telegram relay and notification checks;
-an origin that remains reachable without Access fails the Access check.
+an origin that remains reachable without Access fails the Access check. A
+non-loopback HTTPS client with no Access pair also fails admission; only
+loopback or explicitly declared trusted-LAN HTTP transport treats Access as not
+applicable.
 When relay is intentionally disabled, those two relay-only checks are optional
 and unavailable; the public-edge checks use the content-free non-relay root
 route instead. The profile writer refuses replacement, creates mode
