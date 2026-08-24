@@ -29,6 +29,37 @@ func TestWindowsPersistedStateGetsExclusiveCurrentUserACL(t *testing.T) {
 	}
 }
 
+func TestWindowsPinnedWriterStaysInRenamedStateDirectory(t *testing.T) {
+	root := t.TempDir()
+	directory := filepath.Join(root, "state")
+	if err := os.Mkdir(directory, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(directory, "state.json")
+	store, err := OpenStore(path, DefaultConfig())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = store.Close() }()
+	renamed := filepath.Join(root, "renamed-state")
+	if err := os.Rename(directory, renamed); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Mkdir(directory, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	now := time.Date(2026, 8, 23, 12, 0, 0, 0, time.UTC)
+	if _, err := store.Apply(event("event", "agent", protocol.StateWorking, now)); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(filepath.Join(renamed, "state.json")); err != nil {
+		t.Fatalf("persisted state was not written through the retained directory: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(directory, "state.json")); !os.IsNotExist(err) {
+		t.Fatalf("replacement directory received persisted state: %v", err)
+	}
+}
+
 func TestWindowsOpenStoreRejectsSharedStateACL(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "state.json")
 	if err := os.WriteFile(path, []byte(emptyWindowsPersistedState), 0o600); err != nil {

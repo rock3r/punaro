@@ -169,7 +169,7 @@ func OpenStore(path string, config Config) (*Store, error) {
 	if err != nil {
 		return nil, fmt.Errorf("identify Canopi state directory: %w", err)
 	}
-	pinnedDirectoryHandle, err := os.Open(pinnedDirectory) // #nosec G304 -- this is the validated, canonical state directory retained for the store lifetime.
+	pinnedDirectoryHandle, err := openPinnedStateDirectory(pinnedDirectory) // #nosec G304 -- this is the validated, canonical state directory retained for the store lifetime.
 	if err != nil {
 		return nil, fmt.Errorf("open pinned Canopi state directory: %w", err)
 	}
@@ -260,6 +260,9 @@ func OpenStore(path string, config Config) (*Store, error) {
 	for _, event := range persisted.Records {
 		if err := event.Validate(); err != nil {
 			return nil, fmt.Errorf("invalid persisted event %q: %w", event.EventID, err)
+		}
+		if _, duplicate := store.records[event.Key()]; duplicate {
+			return nil, fmt.Errorf("duplicate persisted Canopi agent %q", event.Key())
 		}
 		store.records[event.Key()] = event
 	}

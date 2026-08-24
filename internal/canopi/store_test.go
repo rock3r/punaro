@@ -202,6 +202,25 @@ func TestOpenStoreRejectsMalformedUnicodeBeforeDecoding(t *testing.T) {
 	}
 }
 
+func TestOpenStoreRejectsDuplicatePersistedAgentIdentity(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "state.json")
+	now := time.Now().UTC()
+	persisted := persistedStore{Records: []protocol.Event{
+		event("first", "agent", protocol.StateWorking, now),
+		event("second", "agent", protocol.StateDone, now.Add(time.Second)),
+	}}
+	payload, err := json.Marshal(persisted)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, payload, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := OpenStore(path, DefaultConfig()); err == nil || !strings.Contains(err.Error(), "duplicate persisted") {
+		t.Fatalf("OpenStore() duplicate state error = %v, want identity rejection", err)
+	}
+}
+
 func TestApplyRejectsAggregateStateBeyondByteBudgetWithoutMutation(t *testing.T) {
 	now := time.Date(2026, 8, 23, 12, 0, 0, 0, time.UTC)
 	config := DefaultConfig()
