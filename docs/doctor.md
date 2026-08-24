@@ -164,6 +164,14 @@ Installation and provenance: `installation_configuration`,
 `image_digest_binding`, `installed_release`, `running_image`,
 `machine_identity`.
 
+For native release artifacts, `installed_release` compares the exact
+digest-pinned image embedded after publication. For the operator binary inside
+the image itself, whose own digest cannot be known before that image exists,
+it binds the release-tagged repository identity known at build time and
+requires the installation to use a digest-pinned image from that exact
+repository. Compose manifest hashing runs in a deadline-isolated helper, so a
+stalled mounted file cannot extend the total doctor timeout.
+
 Database, storage, and update recovery: `database_connection`,
 `database_listener_private`, `administration_listener_private`,
 `database_owner`, `database_pair`,
@@ -225,6 +233,10 @@ Service, release, and plugin state: `adapter_service_installed`,
 `portable_plugin_registration`, `codex_plugin_registration`,
 `claude_plugin_registration`, `plugin_launcher`, `plugin_version`,
 `skill_set_parity`.
+
+`plugin_launcher` requires the platform launcher to be a safe executable and
+requires the exact bytes of both POSIX/Windows launchers and both MCP
+registration files to match the digest embedded by the release builder.
 
 The adapter runs `version` on the fixed installer-owned `punaro-bootstrap`
 executable under the shared diagnostic deadline and passes that identity into

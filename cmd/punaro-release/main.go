@@ -72,6 +72,7 @@ type releaseBuildFacts struct {
 	ComposeSHA256           string `json:"compose_sha256"`
 	MigrationManifestSHA256 string `json:"migration_manifest_sha256"`
 	SkillSetSHA256          string `json:"skill_set_sha256"`
+	PluginRuntimeSHA256     string `json:"plugin_runtime_sha256"`
 }
 
 func buildFacts(args []string) (releaseBuildFacts, error) {
@@ -90,7 +91,11 @@ func buildFacts(args []string) (releaseBuildFacts, error) {
 	if err != nil {
 		return releaseBuildFacts{}, errors.New("release build facts are invalid")
 	}
-	return releaseBuildFacts{Release: *releaseName, ComposeSHA256: operator.ComposeManifestSHA256(), MigrationManifestSHA256: punaropostgres.MigrationManifestSHA256(), SkillSetSHA256: skillDigest}, nil
+	runtimeDigest, err := plugindiagnostic.RuntimeDigest(*pluginRoot)
+	if err != nil {
+		return releaseBuildFacts{}, errors.New("release build facts are invalid")
+	}
+	return releaseBuildFacts{Release: *releaseName, ComposeSHA256: operator.ComposeManifestSHA256(), MigrationManifestSHA256: punaropostgres.MigrationManifestSHA256(), SkillSetSHA256: skillDigest, PluginRuntimeSHA256: runtimeDigest}, nil
 }
 
 func runAssemble(args []string) error {

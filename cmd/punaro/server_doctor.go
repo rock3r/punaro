@@ -7,6 +7,8 @@ import (
 	"encoding/base64"
 	"encoding/hex"
 	"errors"
+	"flag"
+	"fmt"
 	"io"
 	"net/http"
 	"os"
@@ -64,7 +66,7 @@ func inspectServerDoctorState(parent context.Context, installation operator.Inst
 	state := serverDoctorState{MachineID: validServerMachineID(machineID), Release: serverBuildRelease, Protocol: relay.ProtocolVersion, ExpectedPostgresMajor: punarorelease.ProductionPostgreSQLMajor}
 	state.ReleaseSequence, _ = strconv.ParseInt(serverBuildSequence, 10, 64)
 	state.CatalogSequence, _ = strconv.ParseInt(serverBuildCatalogSequence, 10, 64)
-	state.InstalledRelease = known(serverBuildRelease != "" && serverBuildImage != "", serverBuildRelease != "" && serverBuildImage == installation.Image)
+	state.InstalledRelease = inspectInstalledRelease(installation.Image)
 	state.ComposeBinding = fileDigestMatches(ctx, operator.OverrideFile(installation.Directory), serverBuildComposeSHA256)
 	state.MigrationBinding = known(serverBuildMigrationSHA256 != "", serverBuildMigrationSHA256 == punaropostgres.MigrationManifestSHA256())
 	state.RunningImage = inspectRunningImage(ctx, installation)
@@ -123,20 +125,93 @@ func fileDigestMatches(ctx context.Context, path, expected string) knownDoctorBo
 	if err != nil || !info.Mode().IsRegular() || info.Mode()&os.ModeSymlink != 0 {
 		return known(true, false)
 	}
-	file, err := os.Open(path) // #nosec G304 -- fixed generated file below the validated installation root.
-	if err != nil {
-		return known(true, false)
-	}
-	defer func() { _ = file.Close() }()
-	hash := sha256.New()
-	written, err := io.CopyN(hash, serverDoctorContextReader{ctx: ctx, reader: file}, (1<<20)+1)
-	if ctx.Err() != nil || err != nil && !errors.Is(err, io.EOF) {
+	digest, ok := serverDoctorFileDigest(ctx, path)
+	if ctx.Err() != nil || !ok {
 		return knownDoctorBool{}
 	}
-	if written > 1<<20 {
-		return known(true, false)
+	return known(true, digest == expected)
+}
+
+var serverDoctorFileDigest = isolatedServerDoctorFileDigest
+
+func isolatedServerDoctorFileDigest(ctx context.Context, path string) (string, bool) {
+	executable, err := os.Executable()
+	if err != nil {
+		return "", false
 	}
-	return known(true, hex.EncodeToString(hash.Sum(nil)) == expected)
+	output, ok := boundedCommand(ctx, executable, "doctor-file-digest", "--path", path)
+	digest := strings.TrimSpace(output)
+	if !ok || len(digest) != 64 {
+		return "", false
+	}
+	if _, err := hex.DecodeString(digest); err != nil {
+		return "", false
+	}
+	return digest, true
+}
+
+func directServerDoctorFileDigest(_ context.Context, path string) (string, bool) {
+	var output strings.Builder
+	if runDoctorFileDigest([]string{"--path", path}, &output) != 0 {
+		return "", false
+	}
+	return strings.TrimSpace(output.String()), true
+}
+
+func runDoctorFileDigest(args []string, stdout io.Writer) int {
+	flags := flag.NewFlagSet("punaro doctor-file-digest", flag.ContinueOnError)
+	flags.SetOutput(io.Discard)
+	path := flags.String("path", "", "generated Compose file")
+	if flags.Parse(args) != nil || flags.NArg() != 0 || *path == "" || !filepath.IsAbs(*path) || filepath.Clean(*path) != *path {
+		return 2
+	}
+	expected, err := os.Lstat(*path) // #nosec G703 -- explicit fixed doctor input.
+	if err != nil || !expected.Mode().IsRegular() || expected.Mode()&os.ModeSymlink != 0 || expected.Size() < 1 || expected.Size() > 1<<20 {
+		return 1
+	}
+	file, err := os.Open(*path) // #nosec G304,G703 -- child-isolated validated doctor input.
+	if err != nil {
+		return 1
+	}
+	defer func() { _ = file.Close() }()
+	opened, err := file.Stat()
+	if err != nil || !opened.Mode().IsRegular() || !os.SameFile(expected, opened) || opened.Size() != expected.Size() {
+		return 1
+	}
+	hash := sha256.New()
+	written, err := io.CopyN(hash, file, (1<<20)+1)
+	if err != nil && !errors.Is(err, io.EOF) || written != opened.Size() {
+		return 1
+	}
+	_, _ = fmt.Fprintln(stdout, hex.EncodeToString(hash.Sum(nil)))
+	return 0
+}
+
+func inspectInstalledRelease(image string) knownDoctorBool {
+	if serverBuildRelease == "" {
+		return knownDoctorBool{}
+	}
+	if serverBuildImage == "" {
+		return knownDoctorBool{}
+	}
+	return known(true, installedReleaseMatchesBuildIdentity(serverBuildImage, image, serverBuildRelease))
+}
+
+func installedReleaseMatchesBuildIdentity(expected, installed, release string) bool {
+	if expected == installed {
+		return strings.Contains(expected, "@sha256:")
+	}
+	tag := ":" + release
+	if release == "" || !strings.HasSuffix(expected, tag) {
+		return false
+	}
+	repository := strings.TrimSuffix(expected, tag)
+	prefix := repository + "@sha256:"
+	if repository == "" || !strings.HasPrefix(installed, prefix) || len(installed) != len(prefix)+64 {
+		return false
+	}
+	_, err := hex.DecodeString(strings.TrimPrefix(installed, prefix))
+	return err == nil
 }
 
 type serverDoctorContextReader struct {

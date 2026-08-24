@@ -140,7 +140,8 @@ build_facts=$(
 	env -u GOOS -u GOARCH -u CGO_ENABLED go run ./cmd/punaro-release build-facts --release "$source_release" --plugin-root "$repo_dir"
 ) || fail 'source release build identity is invalid'
 skill_sha256=$(printf '%s\n' "$build_facts" | sed -n 's/.*"skill_set_sha256":"\([0-9a-f]*\)".*/\1/p')
-[ "${#skill_sha256}" -eq 64 ] || fail 'source skill identity is invalid'
+plugin_runtime_sha256=$(printf '%s\n' "$build_facts" | sed -n 's/.*"plugin_runtime_sha256":"\([0-9a-f]*\)".*/\1/p')
+[ "${#skill_sha256}" -eq 64 ] && [ "${#plugin_runtime_sha256}" -eq 64 ] || fail 'source plugin identity is invalid'
 if [ "$allow_lan_http" = true ]; then
 	(
 		cd "$repo_dir"
@@ -248,7 +249,7 @@ fi
 
 (
 	cd "$repo_dir"
-	go build -trimpath -buildvcs=true -ldflags "-X main.adapterBuildRelease=$source_release -X main.adapterExpectedSkillSetDigest=$skill_sha256" -o "$build_dir/punaro-adapter" ./cmd/punaro-adapter
+	go build -trimpath -buildvcs=true -ldflags "-X main.adapterBuildRelease=$source_release -X main.adapterExpectedSkillSetDigest=$skill_sha256 -X main.adapterExpectedPluginRuntimeDigest=$plugin_runtime_sha256" -o "$build_dir/punaro-adapter" ./cmd/punaro-adapter
 	go build -trimpath -buildvcs=true -ldflags "-X main.bootstrapBuildRelease=$source_release" -o "$build_dir/punaro-bootstrap" ./cmd/punaro-bootstrap
 	go build -trimpath -buildvcs=true -o "$build_dir/punaro-trusted-attachment" ./cmd/punaro-trusted-attachment
 	go build -trimpath -buildvcs=true -o "$build_dir/punaro-memory" ./cmd/punaro-memory

@@ -54,7 +54,10 @@ gh workflow run macos-notarize.yml --repo rock3r/punaro --ref <branch>
 The `release` workflow first publishes the Linux/amd64 gateway image to GHCR
 with OCI SBOM and provenance attestations, captures its registry digest, and
 binds that exact `ghcr.io/rock3r/punaro@sha256:...` identity into the release
-manifest and native build provenance. It then builds:
+manifest and native build provenance. The image carries the release name as
+`org.opencontainers.image.version`; its pre-digest operator binary is bound to
+the release-tagged GHCR repository identity known at build time and requires a
+digest-pinned installation from that repository. It then builds:
 
 - `punaro-adapter`, `punaro-trusted-attachment`, `punaro-memory`,
   `punaro-enroll`, and `punaro-bootstrap` for `darwin/arm64`, `linux/amd64`,

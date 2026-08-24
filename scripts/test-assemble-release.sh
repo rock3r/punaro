@@ -44,6 +44,9 @@ if ! grep -Fq -- '--provenance mode=max' "$repo_dir/.github/workflows/release.ym
 fi
 if ! grep -Fq 'ARG PUNARO_RELEASE' "$repo_dir/Dockerfile" ||
 	! grep -Fq 'main.serverBuildRelease=${PUNARO_RELEASE}' "$repo_dir/Dockerfile" ||
+	! grep -Fq -- '--build-arg "PUNARO_IMAGE=$repository:$RELEASE"' "$repo_dir/.github/workflows/release.yml" ||
+	! grep -Fq 'org.opencontainers.image.version="${PUNARO_RELEASE}"' "$repo_dir/Dockerfile" ||
+	! grep -Fq 'main.adapterExpectedPluginRuntimeDigest=${PUNARO_PLUGIN_RUNTIME_SHA256}' "$repo_dir/Dockerfile" ||
 	! grep -Fq 'main.telegramBuildSequence=${PUNARO_SEQUENCE}' "$repo_dir/Dockerfile" ||
 	! grep -Fq 'main.telegramBuildCatalogSequence=${PUNARO_CATALOG_SEQUENCE}' "$repo_dir/Dockerfile"; then
 	printf '%s\n' 'release image does not embed its build identity' >&2

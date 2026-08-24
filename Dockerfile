@@ -8,6 +8,7 @@ ARG PUNARO_IMAGE
 ARG PUNARO_COMPOSE_SHA256
 ARG PUNARO_MIGRATION_SHA256
 ARG PUNARO_SKILL_SET_SHA256
+ARG PUNARO_PLUGIN_RUNTIME_SHA256
 COPY go.mod go.sum ./
 RUN go mod download
 COPY cmd ./cmd
@@ -27,12 +28,14 @@ RUN CGO_ENABLED=0 go build -trimpath -ldflags="-s -w -X main.serverBuildRelease=
  && CGO_ENABLED=0 go build -trimpath -ldflags='-s -w' -o /out/punarod ./cmd/punarod \
  && CGO_ENABLED=0 go build -trimpath -ldflags='-s -w' -o /out/punaro-migrate ./cmd/punaro-migrate \
  && CGO_ENABLED=0 go build -trimpath -ldflags='-s -w' -o /out/punaro-admin ./cmd/punaro-admin \
- && CGO_ENABLED=0 go build -trimpath -ldflags="-s -w -X main.adapterBuildRelease=${PUNARO_RELEASE} -X main.adapterExpectedSkillSetDigest=${PUNARO_SKILL_SET_SHA256}" -o /out/punaro-adapter ./cmd/punaro-adapter \
+ && CGO_ENABLED=0 go build -trimpath -ldflags="-s -w -X main.adapterBuildRelease=${PUNARO_RELEASE} -X main.adapterExpectedSkillSetDigest=${PUNARO_SKILL_SET_SHA256} -X main.adapterExpectedPluginRuntimeDigest=${PUNARO_PLUGIN_RUNTIME_SHA256}" -o /out/punaro-adapter ./cmd/punaro-adapter \
  && CGO_ENABLED=0 go build -trimpath -ldflags="-s -w -X main.telegramBuildRelease=${PUNARO_RELEASE} -X main.telegramBuildSequence=${PUNARO_SEQUENCE} -X main.telegramBuildCatalogSequence=${PUNARO_CATALOG_SEQUENCE}" -o /out/punaro-telegram ./cmd/punaro-telegram \
  && CGO_ENABLED=0 go build -trimpath -ldflags='-s -w' -o /out/punaro-trusted-attachment ./cmd/punaro-trusted-attachment \
  && CGO_ENABLED=0 go build -trimpath -ldflags='-s -w' -o /out/punaro-relay-adopt-prepare ./cmd/punaro-relay-adopt-prepare
 
 FROM gcr.io/distroless/static-debian12:nonroot@sha256:b7bb25d9f7c31d2bdd1982feb4dafcaf137703c7075dbe2febb41c24212b946f
+ARG PUNARO_RELEASE
+LABEL org.opencontainers.image.version="${PUNARO_RELEASE}"
 COPY --from=build /out/punaro /usr/local/bin/punaro
 COPY --from=build /out/punarod /usr/local/bin/punarod
 COPY --from=build /out/punaro-migrate /usr/local/bin/punaro-migrate

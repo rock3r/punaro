@@ -59,7 +59,8 @@ facts=$(
 compose_sha256=$(printf '%s\n' "$facts" | sed -n 's/.*"compose_sha256":"\([0-9a-f]*\)".*/\1/p')
 migration_sha256=$(printf '%s\n' "$facts" | sed -n 's/.*"migration_manifest_sha256":"\([0-9a-f]*\)".*/\1/p')
 skill_sha256=$(printf '%s\n' "$facts" | sed -n 's/.*"skill_set_sha256":"\([0-9a-f]*\)".*/\1/p')
-[ "${#compose_sha256}" -eq 64 ] && [ "${#migration_sha256}" -eq 64 ] && [ "${#skill_sha256}" -eq 64 ] || fail 'release build identity is invalid'
+plugin_runtime_sha256=$(printf '%s\n' "$facts" | sed -n 's/.*"plugin_runtime_sha256":"\([0-9a-f]*\)".*/\1/p')
+[ "${#compose_sha256}" -eq 64 ] && [ "${#migration_sha256}" -eq 64 ] && [ "${#skill_sha256}" -eq 64 ] && [ "${#plugin_runtime_sha256}" -eq 64 ] || fail 'release build identity is invalid'
 
 goos=${GOOS:-$(go env GOOS)}
 goarch=${GOARCH:-$(go env GOARCH)}
@@ -92,7 +93,7 @@ build() {
 	output="$output_dir/${component}-${goos}-${goarch}${suffix}"
 	ldflags=
 	case "$component" in
-		punaro-adapter) ldflags="-X main.adapterBuildRelease=$release -X main.adapterExpectedSkillSetDigest=$skill_sha256" ;;
+		punaro-adapter) ldflags="-X main.adapterBuildRelease=$release -X main.adapterExpectedSkillSetDigest=$skill_sha256 -X main.adapterExpectedPluginRuntimeDigest=$plugin_runtime_sha256" ;;
 		punaro-bootstrap) ldflags="-X main.bootstrapBuildRelease=$release" ;;
 		punaro) ldflags="-X main.serverBuildRelease=$release -X main.serverBuildSequence=$sequence -X main.serverBuildCatalogSequence=$catalog_sequence -X main.serverBuildImage=$image -X main.serverBuildComposeSHA256=$compose_sha256 -X main.serverBuildMigrationSHA256=$migration_sha256" ;;
 		punaro-telegram) ldflags="-X main.telegramBuildRelease=$release -X main.telegramBuildSequence=$sequence -X main.telegramBuildCatalogSequence=$catalog_sequence" ;;

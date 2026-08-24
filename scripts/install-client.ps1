@@ -284,7 +284,8 @@ try {
 if ($factsResult.ExitCode -ne 0) { Stop-Install 'source release build identity is invalid' }
 try { $buildFacts = (($factsResult.Output | ForEach-Object { [string]$_ }) -join "`n") | ConvertFrom-Json } catch { Stop-Install 'source release build identity is invalid' }
 $skillSha256 = [string]$buildFacts.skill_set_sha256
-if ($skillSha256 -notmatch '^[0-9a-f]{64}$') { Stop-Install 'source skill identity is invalid' }
+$pluginRuntimeSha256 = [string]$buildFacts.plugin_runtime_sha256
+if ($skillSha256 -notmatch '^[0-9a-f]{64}$' -or $pluginRuntimeSha256 -notmatch '^[0-9a-f]{64}$') { Stop-Install 'source plugin identity is invalid' }
 $validationArguments = @('run', './cmd/punaro-adapter', 'validate-relay-transport', '--relay-url', $RelayUrl)
 if ($AllowLanHttp) { $validationArguments += @('--allow-lan-http', '--trusted-lan-cidr', $TrustedLanCidr) }
 Push-Location -LiteralPath $repoDir
@@ -350,7 +351,7 @@ try {
 Stop-PunaroOrphanAdapter -BootstrapDirectory $bootstrapDir
 Wait-PunaroReplaceableBinary -Path (Join-Path $binDir 'punaro-adapter.exe')
 Wait-PunaroReplaceableBinary -Path (Join-Path $binDir 'punaro-bootstrap.exe')
-Build-PunaroBinary -Package (Join-Path $repoDir 'cmd\punaro-adapter') -Output (Join-Path $binDir 'punaro-adapter.exe') -LdFlags "-X main.adapterBuildRelease=$sourceRelease -X main.adapterExpectedSkillSetDigest=$skillSha256"
+Build-PunaroBinary -Package (Join-Path $repoDir 'cmd\punaro-adapter') -Output (Join-Path $binDir 'punaro-adapter.exe') -LdFlags "-X main.adapterBuildRelease=$sourceRelease -X main.adapterExpectedSkillSetDigest=$skillSha256 -X main.adapterExpectedPluginRuntimeDigest=$pluginRuntimeSha256"
 Build-PunaroBinary -Package (Join-Path $repoDir 'cmd\punaro-bootstrap') -Output (Join-Path $binDir 'punaro-bootstrap.exe') -LdFlags "-X main.bootstrapBuildRelease=$sourceRelease"
 Build-PunaroBinary -Package (Join-Path $repoDir 'cmd\punaro-trusted-attachment') -Output (Join-Path $binDir 'punaro-trusted-attachment.exe')
 Build-PunaroBinary -Package (Join-Path $repoDir 'cmd\punaro-memory') -Output (Join-Path $binDir 'punaro-memory.exe')

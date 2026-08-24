@@ -33,6 +33,53 @@ func TestRepositoryPluginHasOneVersionAndDeterministicSkillDigest(t *testing.T) 
 	if err != nil || second != first {
 		t.Fatalf("digest changed: %q %q %v", first, second, err)
 	}
+	runtimeFirst, err := RuntimeDigest(root)
+	if err != nil || len(runtimeFirst) != 64 {
+		t.Fatalf("runtime digest unavailable: %v", err)
+	}
+	runtimeSecond, err := RuntimeDigest(root)
+	if err != nil || runtimeSecond != runtimeFirst {
+		t.Fatalf("runtime digest changed: %q %q %v", runtimeFirst, runtimeSecond, err)
+	}
+}
+
+func TestRuntimeDigestBindsLaunchersAndMCPRegistrations(t *testing.T) {
+	root := t.TempDir()
+	for path, body := range map[string]string{
+		".mcp.json":                     "claude-registration",
+		"mcp.json":                      "portable-registration",
+		"scripts/punaro-plugin-mcp":     "posix-launcher",
+		"scripts/punaro-plugin-mcp.cmd": "windows-launcher",
+	} {
+		full := filepath.Join(root, filepath.FromSlash(path))
+		if err := os.MkdirAll(filepath.Dir(full), 0o700); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(full, []byte(body), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	baseline, err := RuntimeDigest(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, path := range runtimePaths {
+		full := filepath.Join(root, filepath.FromSlash(path))
+		original, err := os.ReadFile(full) // #nosec G304 -- fixed test-owned runtime path.
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(full, append(original, '!'), 0o600); err != nil { // #nosec G703 -- fixed test-owned runtime path.
+			t.Fatal(err)
+		}
+		changed, err := RuntimeDigest(root)
+		if err != nil || changed == baseline {
+			t.Fatalf("runtime path %s was not bound: digest=%q err=%v", path, changed, err)
+		}
+		if err := os.WriteFile(full, original, 0o600); err != nil { // #nosec G703 -- fixed test-owned runtime path.
+			t.Fatal(err)
+		}
+	}
 }
 
 func TestSkillSetDigestFramesNULContainingFilesUnambiguously(t *testing.T) {

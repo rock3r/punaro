@@ -34,7 +34,10 @@ report stable failed check/remediation identifiers, but doctor does not grant
 repair, restart, enrollment, update, credential, routing, or Telegram-topic
 authority. Pass the installed plugin root to `punaro-adapter doctor` so
 portable/Codex/Claude registration, launcher, version, and skill-set digest
-parity are included. See [the doctor guide](doctor.md).
+parity are included. The launcher check is release-bound: it hashes both
+package-relative launchers and both MCP registration files, so replacing an
+executable launcher or changing its registered command fails doctor even when
+the skill trees are unchanged. See [the doctor guide](doctor.md).
 
 ## Load the portable plugin
 

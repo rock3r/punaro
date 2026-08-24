@@ -674,9 +674,15 @@ func TestPluginDoctorValidatesAllAdaptersLauncherAndExactSkillTree(t *testing.T)
 	if err != nil {
 		t.Fatal(err)
 	}
-	oldRelease, oldDigest := adapterBuildRelease, adapterExpectedSkillSetDigest
-	adapterBuildRelease, adapterExpectedSkillSetDigest = "v0.1.0-alpha.1", digest
-	t.Cleanup(func() { adapterBuildRelease, adapterExpectedSkillSetDigest = oldRelease, oldDigest })
+	runtimeDigest, err := plugindiagnostic.RuntimeDigest(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	oldRelease, oldDigest, oldRuntimeDigest := adapterBuildRelease, adapterExpectedSkillSetDigest, adapterExpectedPluginRuntimeDigest
+	adapterBuildRelease, adapterExpectedSkillSetDigest, adapterExpectedPluginRuntimeDigest = "v0.1.0-alpha.1", digest, runtimeDigest
+	t.Cleanup(func() {
+		adapterBuildRelease, adapterExpectedSkillSetDigest, adapterExpectedPluginRuntimeDigest = oldRelease, oldDigest, oldRuntimeDigest
+	})
 	result := inspectAdapterPlugin(t.Context(), root)
 	if !result.Portable || !result.Codex || !result.Claude || !result.Launcher || result.Version != "v0.1.0-alpha.1" || result.SkillDigest != "sha256:"+digest {
 		t.Fatalf("plugin=%#v", result)
@@ -684,6 +690,11 @@ func TestPluginDoctorValidatesAllAdaptersLauncherAndExactSkillTree(t *testing.T)
 	adapterExpectedSkillSetDigest = strings.Repeat("f", 64)
 	if tampered := inspectAdapterPlugin(t.Context(), root); tampered.SkillDigest != "" {
 		t.Fatalf("skill drift passed: %#v", tampered)
+	}
+	adapterExpectedSkillSetDigest = digest
+	adapterExpectedPluginRuntimeDigest = strings.Repeat("f", 64)
+	if tampered := inspectAdapterPlugin(t.Context(), root); tampered.Launcher {
+		t.Fatalf("launcher or MCP registration drift passed: %#v", tampered)
 	}
 }
 

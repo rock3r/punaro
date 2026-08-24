@@ -27,6 +27,8 @@ const (
 
 var manifestPaths = []string{"plugin.json", ".codex-plugin/plugin.json", ".claude-plugin/plugin.json"}
 
+var runtimePaths = []string{".mcp.json", "mcp.json", "scripts/punaro-plugin-mcp", "scripts/punaro-plugin-mcp.cmd"}
+
 // Version returns the exact shared version from all three plugin manifests.
 func Version(root string) (string, error) {
 	if !trustedDirectory(root) {
@@ -57,6 +59,37 @@ func Version(root string) (string, error) {
 // SkillSetDigest hashes the exact sorted path and bytes of the three skills.
 func SkillSetDigest(root string) (string, error) {
 	return SkillSetDigestContext(context.Background(), root)
+}
+
+// RuntimeDigest hashes the exact portable MCP registrations and launchers that
+// execute the installed adapter. It is embedded into release adapters so
+// doctor detects changes outside the independently bound skill trees.
+func RuntimeDigest(root string) (string, error) {
+	return RuntimeDigestContext(context.Background(), root)
+}
+
+// RuntimeDigestContext computes RuntimeDigest while honoring a doctor deadline
+// between bounded reads of the fixed release files.
+func RuntimeDigestContext(ctx context.Context, root string) (string, error) {
+	if ctx == nil || ctx.Err() != nil || !trustedDirectory(root) {
+		return "", errors.New("plugin runtime is invalid")
+	}
+	hash := sha256.New()
+	writeField := func(value []byte) {
+		var length [8]byte
+		binary.BigEndian.PutUint64(length[:], uint64(len(value)))
+		_, _ = hash.Write(length[:])
+		_, _ = hash.Write(value)
+	}
+	for _, relative := range runtimePaths {
+		body, err := readFileContext(ctx, filepath.Join(root, filepath.FromSlash(relative)), maximumManifestBytes)
+		if err != nil {
+			return "", errors.New("plugin runtime is invalid")
+		}
+		writeField([]byte(relative))
+		writeField(body)
+	}
+	return hex.EncodeToString(hash.Sum(nil)), nil
 }
 
 // SkillSetDigestContext hashes the skill set while honoring a diagnostic

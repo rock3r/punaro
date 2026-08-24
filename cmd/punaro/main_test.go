@@ -4,8 +4,10 @@ import (
 	"bytes"
 	"context"
 	"crypto/ed25519"
+	"crypto/sha256"
 	"database/sql"
 	"encoding/base64"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -511,9 +513,49 @@ func healthyServerDoctorState() serverDoctorState {
 
 func TestServerDoctorComposeBindingAcceptsGeneratedReleaseArtifact(t *testing.T) {
 	directory := testInstallation(t)
+	previous := serverDoctorFileDigest
+	serverDoctorFileDigest = directServerDoctorFileDigest
+	t.Cleanup(func() { serverDoctorFileDigest = previous })
 	binding := fileDigestMatches(t.Context(), operator.OverrideFile(directory), operator.ComposeManifestSHA256())
 	if !binding.Known || !binding.OK {
 		t.Fatalf("generated release Compose binding=%#v", binding)
+	}
+}
+
+func TestInstalledReleaseUsesTaggedRepositoryIdentityWhenDigestIsNotKnownAtBuildTime(t *testing.T) {
+	digest := strings.Repeat("a", 64)
+	installed := "ghcr.io/rock3r/punaro@sha256:" + digest
+	if !installedReleaseMatchesBuildIdentity("ghcr.io/rock3r/punaro:v0.1.0-alpha.1", installed, "v0.1.0-alpha.1") {
+		t.Fatal("release-tagged build identity did not accept the repository's digest-pinned installation")
+	}
+	if !installedReleaseMatchesBuildIdentity(installed, installed, "v0.1.0-alpha.1") {
+		t.Fatal("native exact-digest build identity did not match")
+	}
+	for _, expected := range []string{
+		"",
+		"ghcr.io/other/punaro:v0.1.0-alpha.1",
+		"ghcr.io/rock3r/punaro:v0.1.0-alpha.2",
+		"ghcr.io/rock3r/punaro:latest",
+	} {
+		if installedReleaseMatchesBuildIdentity(expected, installed, "v0.1.0-alpha.1") {
+			t.Fatalf("invalid build identity %q matched", expected)
+		}
+	}
+}
+
+func TestDoctorFileDigestCommandValidatesAndHashesRegularFile(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "compose.operator.yaml")
+	body := []byte("services: {}\n")
+	if err := os.WriteFile(path, body, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	var stdout bytes.Buffer
+	if code := runDoctorFileDigest([]string{"--path", path}, &stdout); code != 0 {
+		t.Fatalf("digest command code=%d", code)
+	}
+	want := sha256.Sum256(body)
+	if got := strings.TrimSpace(stdout.String()); got != hex.EncodeToString(want[:]) {
+		t.Fatalf("digest=%q want=%x", got, want)
 	}
 }
 

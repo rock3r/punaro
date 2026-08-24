@@ -20,6 +20,10 @@ const maximumPluginManifestBytes = 64 << 10
 // exact three skill trees. Development builds intentionally fail parity.
 var adapterExpectedSkillSetDigest string
 
+// adapterExpectedPluginRuntimeDigest binds the portable MCP registrations and
+// launcher scripts shipped with the same release.
+var adapterExpectedPluginRuntimeDigest string
+
 func inspectAdapterPlugin(ctx context.Context, root string) pluginDoctorResult {
 	if ctx == nil || ctx.Err() != nil || root == "" || !filepath.IsAbs(root) || filepath.Clean(root) != root {
 		return pluginDoctorResult{}
@@ -40,7 +44,8 @@ func inspectAdapterPlugin(ctx context.Context, root string) pluginDoctorResult {
 		launcher += ".cmd"
 	}
 	launcherInfo, launcherErr := os.Lstat(filepath.Join(root, "scripts", launcher)) // #nosec G703 -- fixed plugin child.
-	result.Launcher = launcherErr == nil && launcherInfo.Mode().IsRegular() && launcherInfo.Mode()&os.ModeSymlink == 0 && (runtime.GOOS == "windows" || launcherInfo.Mode().Perm()&0o111 != 0)
+	runtimeDigest, runtimeErr := plugindiagnostic.RuntimeDigestContext(ctx, root)
+	result.Launcher = launcherErr == nil && launcherInfo.Mode().IsRegular() && launcherInfo.Mode()&os.ModeSymlink == 0 && (runtime.GOOS == "windows" || launcherInfo.Mode().Perm()&0o111 != 0) && runtimeErr == nil && adapterExpectedPluginRuntimeDigest != "" && runtimeDigest == adapterExpectedPluginRuntimeDigest
 	digest, digestErr := plugindiagnostic.SkillSetDigestContext(ctx, filepath.Join(root, "skills"))
 	if digestErr == nil && adapterExpectedSkillSetDigest != "" && digest == adapterExpectedSkillSetDigest {
 		result.SkillDigest = "sha256:" + digest

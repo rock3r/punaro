@@ -407,6 +407,8 @@ func run(args []string, stdout, stderr io.Writer) int {
 		return runStatus(args[1:], stdout, stderr, true)
 	case "doctor-profile":
 		return runDoctorProfile(args[1:], stdout, stderr)
+	case "doctor-file-digest":
+		return runDoctorFileDigest(args[1:], stdout)
 	case "client":
 		if len(args) > 1 && (args[1] == "invite" || args[1] == "add") {
 			return runClientAdd(args[2:], stdout, stderr)

@@ -72,6 +72,7 @@ jobs:
           compose_sha256=$(printf '%s\n' "$facts" | jq -er .compose_sha256)
           migration_sha256=$(printf '%s\n' "$facts" | jq -er .migration_manifest_sha256)
           skill_sha256=$(printf '%s\n' "$facts" | jq -er .skill_set_sha256)
+          plugin_runtime_sha256=$(printf '%s\n' "$facts" | jq -er .plugin_runtime_sha256)
           printf '%s' "$GHCR_TOKEN" | docker login ghcr.io --username "$GITHUB_ACTOR" --password-stdin
           metadata="$RUNNER_TEMP/punaro-image-metadata.json"
           docker buildx build \
@@ -81,9 +82,11 @@ jobs:
             --build-arg "PUNARO_RELEASE=$RELEASE" \
             --build-arg "PUNARO_SEQUENCE=$SEQUENCE" \
             --build-arg "PUNARO_CATALOG_SEQUENCE=$CATALOG_SEQUENCE" \
+            --build-arg "PUNARO_IMAGE=$repository:$RELEASE" \
             --build-arg "PUNARO_COMPOSE_SHA256=$compose_sha256" \
             --build-arg "PUNARO_MIGRATION_SHA256=$migration_sha256" \
             --build-arg "PUNARO_SKILL_SET_SHA256=$skill_sha256" \
+            --build-arg "PUNARO_PLUGIN_RUNTIME_SHA256=$plugin_runtime_sha256" \
             --label "org.opencontainers.image.revision=$GITHUB_SHA" \
             --label "org.opencontainers.image.version=$RELEASE" \
             --metadata-file "$metadata" \
