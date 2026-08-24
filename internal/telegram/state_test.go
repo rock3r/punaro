@@ -585,6 +585,48 @@ func TestStageTerminalOutboundIsIdempotentByDelivery(t *testing.T) {
 	}
 }
 
+func TestStageTerminalOutboundReconcilesRetryClassWithoutIncrementing(t *testing.T) {
+	t.Parallel()
+	database := filepath.Join(t.TempDir(), "telegram.db")
+	state, err := Open(database)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := state.StageTerminalOutbound("delivery-1", "conversation-1", GatewayFailureOutboundTelegramPermanent); err != nil {
+		t.Fatal(err)
+	}
+	if err := state.StageTerminalOutbound("delivery-1", "conversation-1", GatewayFailureDeletedTopic); err != nil {
+		t.Fatalf("changed retry class was rejected: %v", err)
+	}
+	if err := state.Close(); err != nil {
+		t.Fatal(err)
+	}
+	snapshot, err := InspectGatewayState(t.Context(), database, testCallbackNow)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if snapshot.TerminalOutbound != 1 || snapshot.DeletedTopicTargets != 1 {
+		t.Fatalf("retry class was not reconciled without double counting: %#v", snapshot)
+	}
+	state, err = Open(database)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := state.StageTerminalOutbound("delivery-1", "conversation-1", GatewayFailureOutboundTelegramPermanent); err != nil {
+		t.Fatalf("changed retry class was rejected: %v", err)
+	}
+	if err := state.Close(); err != nil {
+		t.Fatal(err)
+	}
+	snapshot, err = InspectGatewayState(t.Context(), database, testCallbackNow)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if snapshot.TerminalOutbound != 1 || snapshot.DeletedTopicTargets != 0 {
+		t.Fatalf("reverse retry class was not reconciled without double counting: %#v", snapshot)
+	}
+}
+
 func TestInspectGatewayStateRejectsFutureHealthTimestamps(t *testing.T) {
 	t.Parallel()
 	database := filepath.Join(t.TempDir(), "telegram.db")
@@ -797,7 +839,6 @@ func TestStateOpenAddsClaimExecutionChatID(t *testing.T) {
 }
 
 func TestStateEvictsOldestOutboundAtCap(t *testing.T) {
-	t.Parallel()
 	state, err := Open(filepath.Join(t.TempDir(), "telegram.db"))
 	if err != nil {
 		t.Fatal(err)

@@ -806,8 +806,28 @@ func (s *State) StageTerminalOutbound(deliveryID, conversationID string, class G
 		}
 	} else {
 		var existingConversation, existingClass string
-		if err := tx.QueryRowContext(context.Background(), `SELECT conversation_id,failure_class FROM gateway_terminal_outbound_events WHERE delivery_id=?`, deliveryID).Scan(&existingConversation, &existingClass); err != nil || existingConversation != conversationID || GatewayFailureClass(existingClass) != class {
+		if err := tx.QueryRowContext(context.Background(), `SELECT conversation_id,failure_class FROM gateway_terminal_outbound_events WHERE delivery_id=?`, deliveryID).Scan(&existingConversation, &existingClass); err != nil || existingConversation != conversationID {
 			return fmt.Errorf("terminal outbound delivery identity conflict")
+		}
+		if GatewayFailureClass(existingClass) != class {
+			if _, err := tx.ExecContext(context.Background(), `UPDATE gateway_terminal_outbound_events SET failure_class=? WHERE delivery_id=?`, string(class), deliveryID); err != nil {
+				return err
+			}
+			var failures, stagedEvents, deletedEvents int
+			var targetClass string
+			if err := tx.QueryRowContext(context.Background(), `SELECT failures,failure_class FROM gateway_terminal_outbound_targets WHERE conversation_id=?`, conversationID).Scan(&failures, &targetClass); err != nil {
+				return err
+			}
+			if err := tx.QueryRowContext(context.Background(), `SELECT COUNT(*),COALESCE(SUM(CASE WHEN failure_class=? THEN 1 ELSE 0 END),0) FROM gateway_terminal_outbound_events WHERE conversation_id=?`, string(GatewayFailureDeletedTopic), conversationID).Scan(&stagedEvents, &deletedEvents); err != nil {
+				return err
+			}
+			reconciledClass := GatewayFailureOutboundTelegramPermanent
+			if deletedEvents > 0 || (failures > stagedEvents && GatewayFailureClass(targetClass) == GatewayFailureDeletedTopic) {
+				reconciledClass = GatewayFailureDeletedTopic
+			}
+			if _, err := tx.ExecContext(context.Background(), `UPDATE gateway_terminal_outbound_targets SET failure_class=? WHERE conversation_id=?`, string(reconciledClass), conversationID); err != nil {
+				return err
+			}
 		}
 	}
 	return tx.Commit()
