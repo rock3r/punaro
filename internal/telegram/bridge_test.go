@@ -114,7 +114,7 @@ func TestBridgeDropsMalformedDeliveryThenContinues(t *testing.T) {
 	}
 	_, err = bridge.SyncOnce(context.Background(), 1)
 	var cycleErr *GatewayCycleError
-	if !errors.As(err, &cycleErr) || !cycleErr.NonFatal || cycleErr.Phase != GatewayPhaseSend || cycleErr.TerminalOutbound != 1 || ClassifyGatewayCycleFailure(err) != GatewayFailureOutboundTelegramPermanent {
+	if !errors.As(err, &cycleErr) || !cycleErr.NonFatal || cycleErr.Phase != GatewayPhaseSend || cycleErr.TerminalOutbound != 1 || len(cycleErr.OutboundTargetEvents) != 2 || !cycleErr.OutboundTargetEvents[0].Terminal || cycleErr.OutboundTargetEvents[0].Failure != GatewayFailureOutboundTelegramPermanent || cycleErr.OutboundTargetEvents[1].Terminal || ClassifyGatewayCycleFailure(err) != GatewayFailureOutboundTelegramPermanent {
 		t.Fatalf("err=%#v", cycleErr)
 	}
 	if got := fmt.Sprint(relayClient.acked); got != "[malformed good]" || sender.calls != 1 {
@@ -202,12 +202,15 @@ func TestBridgeReportsPermanentInboundDropAfterContinuingPage(t *testing.T) {
 	if err := state.SetRoute(55, 7, "conversation-1"); err != nil {
 		t.Fatal(err)
 	}
+	if err := state.SetRoute(55, 8, "conversation-2"); err != nil {
+		t.Fatal(err)
+	}
 	var submitted []string
 	bridge := Bridge{
 		Relay: &fakeBridgeRelay{}, Endpoint: relay.TelegramGatewayEndpoint, State: state,
 		Poller: fakePoller{updates: []Update{
 			{ID: 10, UserID: 55, ChatID: 55, ThreadID: 7, Text: "poison"},
-			{ID: 11, UserID: 55, ChatID: 55, ThreadID: 7, Text: "later"},
+			{ID: 11, UserID: 55, ChatID: 55, ThreadID: 8, Text: "later"},
 		}},
 		Gateway: Gateway{AllowedUserID: 55, State: state, Submit: func(_ context.Context, submission Submission) error {
 			submitted = append(submitted, submission.Text)
@@ -220,7 +223,7 @@ func TestBridgeReportsPermanentInboundDropAfterContinuingPage(t *testing.T) {
 	}
 	next, err := bridge.SyncOnce(t.Context(), 10)
 	var cycleErr *GatewayCycleError
-	if next != 12 || fmt.Sprint(submitted) != "[poison later]" || !errors.As(err, &cycleErr) || !cycleErr.NonFatal || cycleErr.Phase != GatewayPhaseInbound || cycleErr.TerminalInbound != 1 || cycleErr.TerminalOutbound != 0 || ClassifyGatewayCycleFailure(err) != GatewayFailureInboundRelayPermanent {
+	if next != 12 || fmt.Sprint(submitted) != "[poison later]" || !errors.As(err, &cycleErr) || !cycleErr.NonFatal || cycleErr.Phase != GatewayPhaseInbound || cycleErr.TerminalInbound != 1 || cycleErr.TerminalOutbound != 0 || len(cycleErr.InboundTargetEvents) != 2 || cycleErr.InboundTargetEvents[0].ConversationID != "conversation-1" || !cycleErr.InboundTargetEvents[0].Terminal || cycleErr.InboundTargetEvents[1].ConversationID != "conversation-2" || cycleErr.InboundTargetEvents[1].Terminal || ClassifyGatewayCycleFailure(err) != GatewayFailureInboundRelayPermanent {
 		t.Fatalf("next=%d submitted=%v err=%#v", next, submitted, cycleErr)
 	}
 }

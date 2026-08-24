@@ -340,7 +340,7 @@ func TestGatewayHealthClearsTerminalFailuresAfterPlaneRecovery(t *testing.T) {
 		}
 	}
 	now = now.Add(3 * time.Minute)
-	if err := state.RecordGatewayCycle(GatewayCycleRecord{At: now, Offset: 9, PollOK: true, RelayOK: true, TelegramOK: true, InboundRecovery: true}); err != nil {
+	if err := state.RecordGatewayCycle(GatewayCycleRecord{At: now, Offset: 9, PollOK: true, RelayOK: true, TelegramOK: true, InboundTargetEvents: []GatewayInboundTargetEvent{{ConversationID: "conversation-1"}}}); err != nil {
 		t.Fatal(err)
 	}
 	var terminalInbound, terminalOutbound int
@@ -410,6 +410,151 @@ func TestGatewayHealthRequiresTargetSpecificOutboundRecovery(t *testing.T) {
 	}
 	if snapshot.TerminalOutbound != 0 || snapshot.LastFailure != GatewayFailureNone {
 		t.Fatalf("matching target did not recover: %#v", snapshot)
+	}
+}
+
+func TestGatewayHealthRequiresTargetSpecificInboundRecovery(t *testing.T) {
+	t.Parallel()
+	database := filepath.Join(t.TempDir(), "telegram.db")
+	state, err := Open(database)
+	if err != nil {
+		t.Fatal(err)
+	}
+	now := testCallbackNow
+	if err := state.RecordGatewayCycle(GatewayCycleRecord{
+		At: now, Offset: 8, Failure: GatewayFailureInboundRelayPermanent, TerminalInbound: 1,
+		InboundTargetEvents: []GatewayInboundTargetEvent{{ConversationID: "broken", Terminal: true}},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := state.RecordGatewayCycle(GatewayCycleRecord{
+		At: now.Add(time.Minute), Offset: 9, PollOK: true, RelayOK: true, TelegramOK: true,
+		InboundTargetEvents: []GatewayInboundTargetEvent{{ConversationID: "healthy"}},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	var terminalInbound int
+	if err := state.db.QueryRowContext(t.Context(), `SELECT terminal_inbound FROM gateway_health WHERE id=1`).Scan(&terminalInbound); err != nil || terminalInbound != 1 {
+		t.Fatalf("healthy conversation cleared broken conversation: terminal=%d err=%v", terminalInbound, err)
+	}
+	if err := state.RecordGatewayCycle(GatewayCycleRecord{
+		At: now.Add(2 * time.Minute), Offset: 10, PollOK: true, RelayOK: true, TelegramOK: true,
+		InboundTargetEvents: []GatewayInboundTargetEvent{{ConversationID: "broken"}},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := state.Close(); err != nil {
+		t.Fatal(err)
+	}
+	snapshot, err := InspectGatewayState(t.Context(), database, now.Add(3*time.Minute))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if snapshot.TerminalInbound != 0 || snapshot.LastFailure != GatewayFailureNone {
+		t.Fatalf("matching conversation did not recover: %#v", snapshot)
+	}
+}
+
+func TestOpenMigratesLegacyTerminalCountsIntoRecoverableTargets(t *testing.T) {
+	t.Parallel()
+	database := filepath.Join(t.TempDir(), "telegram.db")
+	state, err := Open(database)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := state.SetRoute(55, 7, "conversation-1"); err != nil {
+		t.Fatal(err)
+	}
+	if err := state.SetRoute(55, 8, "conversation-2"); err != nil {
+		t.Fatal(err)
+	}
+	if err := state.RecordGatewayCycle(GatewayCycleRecord{At: testCallbackNow, Offset: 8, Failure: GatewayFailureDeletedTopic}); err != nil {
+		t.Fatal(err)
+	}
+	if err := state.Close(); err != nil {
+		t.Fatal(err)
+	}
+	state, err = Open(database)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := state.RecordGatewayCycle(GatewayCycleRecord{At: testCallbackNow.Add(time.Minute), Offset: 9, PollOK: true, RelayOK: true, TelegramOK: true, OutboundTargetEvents: []GatewayOutboundTargetEvent{{ConversationID: "conversation-1"}}}); err != nil {
+		t.Fatal(err)
+	}
+	var terminalOutbound int
+	if err := state.db.QueryRowContext(t.Context(), `SELECT terminal_outbound FROM gateway_health WHERE id=1`).Scan(&terminalOutbound); err != nil || terminalOutbound != 1 {
+		t.Fatalf("first migrated target recovery terminal=%d err=%v", terminalOutbound, err)
+	}
+	if err := state.RecordGatewayCycle(GatewayCycleRecord{At: testCallbackNow.Add(2 * time.Minute), Offset: 10, PollOK: true, RelayOK: true, TelegramOK: true, OutboundTargetEvents: []GatewayOutboundTargetEvent{{ConversationID: "conversation-2"}}}); err != nil {
+		t.Fatal(err)
+	}
+	if err := state.Close(); err != nil {
+		t.Fatal(err)
+	}
+	snapshot, err := InspectGatewayState(t.Context(), database, testCallbackNow.Add(3*time.Minute))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if snapshot.TerminalOutbound != 0 || snapshot.DeletedTopicTargets != 0 {
+		t.Fatalf("migrated targets did not recover: %#v", snapshot)
+	}
+}
+
+func TestGatewayHealthRetainsFailureClassPerOutboundTarget(t *testing.T) {
+	t.Parallel()
+	database := filepath.Join(t.TempDir(), "telegram.db")
+	state, err := Open(database)
+	if err != nil {
+		t.Fatal(err)
+	}
+	now := testCallbackNow
+	if err := state.RecordGatewayCycle(GatewayCycleRecord{At: now, Offset: 8, Failure: GatewayFailureOutboundTelegramPermanent, TerminalOutbound: 1, OutboundTargetEvents: []GatewayOutboundTargetEvent{{ConversationID: "generic", Terminal: true}}}); err != nil {
+		t.Fatal(err)
+	}
+	if err := state.RecordGatewayCycle(GatewayCycleRecord{At: now.Add(time.Minute), Offset: 9, Failure: GatewayFailureDeletedTopic, TerminalOutbound: 1, OutboundTargetEvents: []GatewayOutboundTargetEvent{{ConversationID: "deleted", Terminal: true}}}); err != nil {
+		t.Fatal(err)
+	}
+	if err := state.RecordGatewayCycle(GatewayCycleRecord{At: now.Add(2 * time.Minute), Offset: 10, PollOK: true, RelayOK: true, TelegramOK: true, OutboundTargetEvents: []GatewayOutboundTargetEvent{{ConversationID: "deleted"}}}); err != nil {
+		t.Fatal(err)
+	}
+	if err := state.Close(); err != nil {
+		t.Fatal(err)
+	}
+	snapshot, err := InspectGatewayState(t.Context(), database, now.Add(3*time.Minute))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if snapshot.TerminalOutbound != 1 || snapshot.DeletedTopicTargets != 0 || snapshot.LastFailure != GatewayFailureOutboundTelegramPermanent {
+		t.Fatalf("remaining target class was not retained: %#v", snapshot)
+	}
+}
+
+func TestGatewayHealthRetainsDeletedClassWhenGenericTargetRecovers(t *testing.T) {
+	t.Parallel()
+	database := filepath.Join(t.TempDir(), "telegram.db")
+	state, err := Open(database)
+	if err != nil {
+		t.Fatal(err)
+	}
+	now := testCallbackNow
+	for _, record := range []GatewayCycleRecord{
+		{At: now, Offset: 8, Failure: GatewayFailureDeletedTopic, TerminalOutbound: 1, OutboundTargetEvents: []GatewayOutboundTargetEvent{{ConversationID: "deleted", Terminal: true, Failure: GatewayFailureDeletedTopic}}},
+		{At: now.Add(time.Minute), Offset: 9, Failure: GatewayFailureOutboundTelegramPermanent, TerminalOutbound: 1, OutboundTargetEvents: []GatewayOutboundTargetEvent{{ConversationID: "generic", Terminal: true, Failure: GatewayFailureOutboundTelegramPermanent}}},
+		{At: now.Add(2 * time.Minute), Offset: 10, PollOK: true, RelayOK: true, TelegramOK: true, OutboundTargetEvents: []GatewayOutboundTargetEvent{{ConversationID: "generic"}}},
+	} {
+		if err := state.RecordGatewayCycle(record); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := state.Close(); err != nil {
+		t.Fatal(err)
+	}
+	snapshot, err := InspectGatewayState(t.Context(), database, now.Add(3*time.Minute))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if snapshot.TerminalOutbound != 1 || snapshot.DeletedTopicTargets != 1 || snapshot.LastFailure != GatewayFailureDeletedTopic {
+		t.Fatalf("deleted target class was hidden: %#v", snapshot)
 	}
 }
 

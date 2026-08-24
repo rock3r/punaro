@@ -65,8 +65,8 @@ type Gateway struct {
 	Claims          *ClaimExecutor
 	Now             func() time.Time
 	Log             func(string, ...any)
-	terminalDrop    func(error)
-	inboundRecovery func()
+	terminalDrop    func(string, error)
+	inboundRecovery func(string)
 }
 
 // Handle never turns Telegram text into control input. Commands are accepted
@@ -120,14 +120,14 @@ func (g Gateway) Handle(ctx context.Context, update Update) error {
 				return fmt.Errorf("record dropped telegram update: %w", err)
 			}
 			if g.terminalDrop != nil {
-				g.terminalDrop(err)
+				g.terminalDrop(conversation, err)
 			}
 			return nil
 		}
 		return fmt.Errorf("submit telegram message: %w", err)
 	}
 	if g.inboundRecovery != nil {
-		g.inboundRecovery()
+		g.inboundRecovery(conversation)
 	}
 	if err := g.State.MarkProcessed(update.ID); err != nil {
 		return fmt.Errorf("record telegram update: %w", err)

@@ -349,10 +349,12 @@ func TestFailedGatewayCycleRecordPreservesNonFatalTerminalDropCounts(t *testing.
 	err := &telegram.GatewayCycleError{
 		Phase: telegram.GatewayPhaseSend, NonFatal: true,
 		TerminalInbound: 2, TerminalOutbound: 3,
-		Err: telegram.BotAPIStatusError{Method: "sendRichMessage", Status: 403},
+		InboundTargetEvents:  []telegram.GatewayInboundTargetEvent{{ConversationID: "conversation-inbound", Terminal: true, Failure: telegram.GatewayFailureInboundRelayPermanent}},
+		OutboundTargetEvents: []telegram.GatewayOutboundTargetEvent{{ConversationID: "conversation-outbound", Terminal: true, Failure: telegram.GatewayFailureOutboundTelegramPermanent}},
+		Err:                  telegram.BotAPIStatusError{Method: "sendRichMessage", Status: 403},
 	}
 	record := failedGatewayCycleRecord(now, 42, err)
-	if !isNonFatalGatewayCycle(err) || record.Failure != telegram.GatewayFailureOutboundTelegramPermanent || record.TerminalInbound != 2 || record.TerminalOutbound != 3 || !record.PollOK || !record.RelayOK {
+	if !isNonFatalGatewayCycle(err) || record.Failure != telegram.GatewayFailureOutboundTelegramPermanent || record.TerminalInbound != 2 || record.TerminalOutbound != 3 || len(record.InboundTargetEvents) != 1 || len(record.OutboundTargetEvents) != 1 || !record.PollOK || !record.RelayOK {
 		t.Fatalf("record=%#v", record)
 	}
 }
@@ -362,10 +364,11 @@ func TestFailedGatewayCycleRecordPreservesPlaneRecoveryEvidence(t *testing.T) {
 	now := time.Date(2026, 8, 23, 12, 0, 0, 0, time.UTC)
 	err := &telegram.GatewayCycleError{
 		Phase: telegram.GatewayPhaseSend, NonFatal: true, InboundRecovery: true, OutboundRecovery: true,
+		InboundTargetEvents:  []telegram.GatewayInboundTargetEvent{{ConversationID: "conversation-1"}},
 		OutboundTargetEvents: []telegram.GatewayOutboundTargetEvent{{ConversationID: "conversation-1"}},
 	}
 	record := failedGatewayCycleRecord(now, 42, err)
-	if !isNonFatalGatewayCycle(err) || record.Failure != telegram.GatewayFailureNone || !record.InboundRecovery || len(record.OutboundTargetEvents) != 1 || record.OutboundTargetEvents[0].ConversationID != "conversation-1" || !record.PollOK || !record.RelayOK || !record.TelegramOK {
+	if !isNonFatalGatewayCycle(err) || record.Failure != telegram.GatewayFailureNone || len(record.InboundTargetEvents) != 1 || record.InboundTargetEvents[0].ConversationID != "conversation-1" || len(record.OutboundTargetEvents) != 1 || record.OutboundTargetEvents[0].ConversationID != "conversation-1" || !record.PollOK || !record.RelayOK || !record.TelegramOK {
 		t.Fatalf("record=%#v", record)
 	}
 }

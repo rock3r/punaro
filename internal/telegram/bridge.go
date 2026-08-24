@@ -58,6 +58,7 @@ type GatewayCycleError struct {
 	TerminalOutbound     int
 	InboundRecovery      bool
 	OutboundRecovery     bool
+	InboundTargetEvents  []GatewayInboundTargetEvent
 	OutboundTargetEvents []GatewayOutboundTargetEvent
 	OutboundBlocked      bool
 	OutboundProgress     bool
@@ -122,23 +123,26 @@ func (b Bridge) SyncOnce(ctx context.Context, offset int64) (int64, error) {
 	}
 	terminalInbound := 0
 	inboundRecovery := false
+	var inboundTargetEvents []GatewayInboundTargetEvent
 	var terminalInboundErr error
 	gateway := b.Gateway
 	previousTerminalDrop := gateway.terminalDrop
 	previousInboundRecovery := gateway.inboundRecovery
-	gateway.terminalDrop = func(err error) {
+	gateway.terminalDrop = func(conversationID string, err error) {
 		terminalInbound++
+		inboundTargetEvents = append(inboundTargetEvents, GatewayInboundTargetEvent{ConversationID: conversationID, Terminal: true, Failure: GatewayFailureInboundRelayPermanent})
 		if terminalInboundErr == nil {
 			terminalInboundErr = err
 		}
 		if previousTerminalDrop != nil {
-			previousTerminalDrop(err)
+			previousTerminalDrop(conversationID, err)
 		}
 	}
-	gateway.inboundRecovery = func() {
+	gateway.inboundRecovery = func(conversationID string) {
 		inboundRecovery = true
+		inboundTargetEvents = append(inboundTargetEvents, GatewayInboundTargetEvent{ConversationID: conversationID})
 		if previousInboundRecovery != nil {
-			previousInboundRecovery()
+			previousInboundRecovery(conversationID)
 		}
 	}
 	next, err := (Runner{Poller: b.Poller, Gateway: gateway}).RunOnce(ctx, offset)
@@ -148,11 +152,11 @@ func (b Bridge) SyncOnce(ctx context.Context, offset int64) (int64, error) {
 		if errors.As(err, &status) && status.Method == "getUpdates" {
 			phase = GatewayPhasePoll
 		}
-		return offset, &GatewayCycleError{Phase: phase, TerminalInbound: terminalInbound, InboundRecovery: inboundRecovery, Err: err}
+		return offset, &GatewayCycleError{Phase: phase, TerminalInbound: terminalInbound, InboundRecovery: inboundRecovery, InboundTargetEvents: inboundTargetEvents, Err: err}
 	}
 	deliveries, err := b.Relay.Lease(ctx, b.Endpoint)
 	if err != nil {
-		return next, &GatewayCycleError{Phase: GatewayPhaseLease, TerminalInbound: terminalInbound, InboundRecovery: inboundRecovery, Err: err}
+		return next, &GatewayCycleError{Phase: GatewayPhaseLease, TerminalInbound: terminalInbound, InboundRecovery: inboundRecovery, InboundTargetEvents: inboundTargetEvents, Err: err}
 	}
 	outboundProgress := false
 	outboundRecovery := false
@@ -164,24 +168,28 @@ func (b Bridge) SyncOnce(ctx context.Context, offset int64) (int64, error) {
 			if isPermanentTelegramFailure(err) {
 				b.logEvent("telegram_send_dropped", "delivery_id="+delivery.ID, "reason=permanent_rejection")
 				terminalOutbound++
-				outboundTargetEvents = append(outboundTargetEvents, GatewayOutboundTargetEvent{ConversationID: delivery.Message.ConversationID, Terminal: true})
+				failureClass := GatewayFailureOutboundTelegramPermanent
+				if DeletedTopicFailure(err) {
+					failureClass = GatewayFailureDeletedTopic
+				}
+				outboundTargetEvents = append(outboundTargetEvents, GatewayOutboundTargetEvent{ConversationID: delivery.Message.ConversationID, Terminal: true, Failure: failureClass})
 				if terminalOutboundErr == nil || DeletedTopicFailure(err) {
 					terminalOutboundErr = err
 				}
 				if err := b.Relay.Ack(ctx, delivery); err != nil {
-					return next, &GatewayCycleError{Phase: GatewayPhaseAck, TerminalInbound: terminalInbound, TerminalOutbound: terminalOutbound, InboundRecovery: inboundRecovery, OutboundRecovery: outboundRecovery, OutboundTargetEvents: outboundTargetEvents, OutboundBlocked: true, OutboundProgress: outboundProgress, Err: err}
+					return next, &GatewayCycleError{Phase: GatewayPhaseAck, TerminalInbound: terminalInbound, TerminalOutbound: terminalOutbound, InboundRecovery: inboundRecovery, OutboundRecovery: outboundRecovery, InboundTargetEvents: inboundTargetEvents, OutboundTargetEvents: outboundTargetEvents, OutboundBlocked: true, OutboundProgress: outboundProgress, Err: err}
 				}
 				outboundProgress = true
 				continue
 			}
 			b.logEvent("telegram_send_err", "delivery_id="+delivery.ID)
-			return next, &GatewayCycleError{Phase: GatewayPhaseSend, TerminalInbound: terminalInbound, TerminalOutbound: terminalOutbound, InboundRecovery: inboundRecovery, OutboundRecovery: outboundRecovery, OutboundTargetEvents: outboundTargetEvents, OutboundBlocked: true, OutboundProgress: outboundProgress, Err: err}
+			return next, &GatewayCycleError{Phase: GatewayPhaseSend, TerminalInbound: terminalInbound, TerminalOutbound: terminalOutbound, InboundRecovery: inboundRecovery, OutboundRecovery: outboundRecovery, InboundTargetEvents: inboundTargetEvents, OutboundTargetEvents: outboundTargetEvents, OutboundBlocked: true, OutboundProgress: outboundProgress, Err: err}
 		}
 		outboundRecovery = true
 		outboundTargetEvents = append(outboundTargetEvents, GatewayOutboundTargetEvent{ConversationID: delivery.Message.ConversationID})
 		b.logEvent("telegram_send_ok", "delivery_id="+delivery.ID)
 		if err := b.Relay.Ack(ctx, delivery); err != nil {
-			return next, &GatewayCycleError{Phase: GatewayPhaseAck, TerminalInbound: terminalInbound, TerminalOutbound: terminalOutbound, InboundRecovery: inboundRecovery, OutboundRecovery: outboundRecovery, OutboundTargetEvents: outboundTargetEvents, OutboundBlocked: true, OutboundProgress: outboundProgress, Err: err}
+			return next, &GatewayCycleError{Phase: GatewayPhaseAck, TerminalInbound: terminalInbound, TerminalOutbound: terminalOutbound, InboundRecovery: inboundRecovery, OutboundRecovery: outboundRecovery, InboundTargetEvents: inboundTargetEvents, OutboundTargetEvents: outboundTargetEvents, OutboundBlocked: true, OutboundProgress: outboundProgress, Err: err}
 		}
 		outboundProgress = true
 	}
@@ -194,6 +202,7 @@ func (b Bridge) SyncOnce(ctx context.Context, offset int64) (int64, error) {
 			Phase: phase, NonFatal: true,
 			TerminalInbound: terminalInbound, TerminalOutbound: terminalOutbound,
 			InboundRecovery: inboundRecovery, OutboundRecovery: outboundRecovery,
+			InboundTargetEvents:  inboundTargetEvents,
 			OutboundTargetEvents: outboundTargetEvents,
 			Err:                  terminalErr,
 		}
