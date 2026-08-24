@@ -15,7 +15,7 @@ func TestPinnedStateStoreReclaimsCrashTemporary(t *testing.T) {
 	if err := os.WriteFile(temporary, []byte("partial"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	handle, err := os.Open(directory)
+	handle, err := os.Open(directory) // #nosec G304 -- test directory is created by t.TempDir.
 	if err != nil {
 		t.Fatal(err)
 	}
