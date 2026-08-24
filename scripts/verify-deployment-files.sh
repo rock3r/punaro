@@ -125,6 +125,10 @@ if ! grep -Fq 'https://github.com/rock3r/punaro/releases/download' .github/workf
 	printf '%s\n' 'release workflow must name the fixed GitHub Releases origin' >&2
 	exit 1
 fi
+if ! grep -Fq 'docker/setup-buildx-action@37fe631027851001ddb9b187196cc803df7f5f0e # v4.3.0' .github/workflows/release.yml; then
+	printf '%s\n' 'release workflow must configure an attestation-capable pinned Buildx builder' >&2
+	exit 1
+fi
 "$release_assemble_test"
 "$release_publish_test"
 "$macos_sign_test"
