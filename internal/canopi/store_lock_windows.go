@@ -51,16 +51,7 @@ func openStateRepairCoordinator(path string) (*os.File, error) {
 			return nil, err
 		}
 		if !privateStateFile(path, before) {
-			removed, err := removeStateLockIfSame(path, before)
-			if err != nil {
-				return nil, err
-			}
-			if removed {
-				if err := syncStateDirectory(filepath.Dir(path)); err != nil {
-					return nil, err
-				}
-			}
-			continue
+			return nil, errors.New("canopi state repair coordinator is unsafe; remove it before startup")
 		}
 		file, err = openExistingStateLockFile(path)
 		if errors.Is(err, os.ErrNotExist) {

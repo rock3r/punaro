@@ -194,6 +194,19 @@ func TestWindowsSpoolLocksUseExclusiveNoReparseOpens(t *testing.T) {
 			t.Fatalf("Windows spool lock open is missing %q", required)
 		}
 	}
+	if strings.Contains(source, "removeSpoolFileIfSame(path, before)") {
+		t.Fatal("Windows spool repair coordinator recursively repairs its own unsafe pathname")
+	}
+	privacyPayload, err := os.ReadFile("spool_privacy_windows.go")
+	if err != nil {
+		t.Fatal(err)
+	}
+	privacySource := string(privacyPayload)
+	for _, required := range []string{"GetFileAttributes", "FILE_ATTRIBUTE_REPARSE_POINT", "canonicalSpoolDirectory"} {
+		if !strings.Contains(privacySource, required) {
+			t.Fatalf("Windows spool path validation is missing %q", required)
+		}
+	}
 }
 
 func TestSpoolQueuedEventReadsAreBoundedBeforeAllocation(t *testing.T) {

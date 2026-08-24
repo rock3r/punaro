@@ -379,6 +379,9 @@ func TestWindowsStateLockUsesExclusiveNoReparseOpens(t *testing.T) {
 			t.Fatalf("Windows state lock open is missing %q", required)
 		}
 	}
+	if strings.Contains(source, "removeStateLockIfSame(path, before)") {
+		t.Fatal("Windows state repair coordinator recursively repairs its own unsafe pathname")
+	}
 }
 
 func TestApplyPersistenceFailureDoesNotAcknowledgeOrMutate(t *testing.T) {

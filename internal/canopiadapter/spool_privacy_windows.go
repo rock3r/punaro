@@ -5,10 +5,51 @@ package canopiadapter
 import (
 	"errors"
 	"os"
+	"path/filepath"
+	"strings"
 	"unsafe"
 
 	"golang.org/x/sys/windows"
 )
+
+func canonicalSpoolDirectory(path string) (string, error) {
+	return finalWindowsSpoolPath(path)
+}
+
+func validateSpoolDirectoryAncestors(path string) error {
+	volume := filepath.VolumeName(path)
+	current := volume + string(filepath.Separator)
+	remainder := strings.TrimPrefix(filepath.Clean(path), current)
+	for _, component := range strings.Split(remainder, string(filepath.Separator)) {
+		if component == "" {
+			continue
+		}
+		current = filepath.Join(current, component)
+		name, err := windows.UTF16PtrFromString(current)
+		if err != nil {
+			return err
+		}
+		attributes, err := windows.GetFileAttributes(name)
+		if errors.Is(err, windows.ERROR_FILE_NOT_FOUND) || errors.Is(err, windows.ERROR_PATH_NOT_FOUND) {
+			return nil
+		}
+		if err != nil {
+			return err
+		}
+		if attributes&windows.FILE_ATTRIBUTE_REPARSE_POINT != 0 {
+			return errors.New("canopi spool path must not traverse a Windows reparse point")
+		}
+	}
+	return nil
+}
+
+func prepareSpoolRepairCoordinator(directory string) error {
+	file, err := openSpoolRepairCoordinator(filepath.Join(directory, ".canopi-spool-repair.lock"))
+	if err != nil {
+		return err
+	}
+	return file.Close()
+}
 
 func secureSpoolDirectory(path string, before os.FileInfo) error {
 	user, err := windows.GetCurrentProcessToken().GetTokenUser()

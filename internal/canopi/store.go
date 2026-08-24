@@ -157,6 +157,9 @@ func OpenStore(path string, config Config) (*Store, error) {
 	if err := prepareStateDirectory(filepath.Dir(path)); err != nil {
 		return nil, fmt.Errorf("protect Canopi state directory: %w", err)
 	}
+	if err := prepareStateRepairCoordinator(filepath.Dir(path)); err != nil {
+		return nil, fmt.Errorf("prepare Canopi state repair coordinator: %w", err)
+	}
 	pinnedPath, err := canonicalStatePath(path)
 	if err != nil {
 		return nil, fmt.Errorf("pin Canopi state path: %w", err)

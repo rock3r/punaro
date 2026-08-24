@@ -68,16 +68,7 @@ func openSpoolRepairCoordinator(path string) (*os.File, error) {
 			return nil, err
 		}
 		if !privateSpoolFile(path, before) {
-			removed, err := removeSpoolFileIfSame(path, before)
-			if err != nil {
-				return nil, err
-			}
-			if removed {
-				if err := syncDirectory(filepath.Dir(path)); err != nil {
-					return nil, err
-				}
-			}
-			continue
+			return nil, errors.New("canopi spool repair coordinator is unsafe; remove it during preflight")
 		}
 		file, err = openExistingSpoolLockFile(path)
 		if errors.Is(err, os.ErrNotExist) {
@@ -96,6 +87,28 @@ func openSpoolRepairCoordinator(path string) (*os.File, error) {
 		}
 	}
 	return nil, errors.New("cannot replace unprotected Canopi spool repair coordinator")
+}
+
+func finalWindowsSpoolPath(path string) (string, error) {
+	name, err := windows.UTF16PtrFromString(path)
+	if err != nil {
+		return "", err
+	}
+	handle, err := windows.CreateFile(name, windows.FILE_READ_ATTRIBUTES, windows.FILE_SHARE_READ|windows.FILE_SHARE_WRITE|windows.FILE_SHARE_DELETE, nil, windows.OPEN_EXISTING, windows.FILE_FLAG_BACKUP_SEMANTICS|windows.FILE_FLAG_OPEN_REPARSE_POINT, 0)
+	if err != nil {
+		return "", err
+	}
+	defer func() { _ = windows.CloseHandle(handle) }()
+	const maxFinalPathCharacters = 32_768
+	buffer := make([]uint16, maxFinalPathCharacters)
+	length, err := windows.GetFinalPathNameByHandle(handle, &buffer[0], maxFinalPathCharacters, 0)
+	if err != nil {
+		return "", err
+	}
+	if length >= maxFinalPathCharacters {
+		return "", errors.New("canonical Windows spool path exceeds limit")
+	}
+	return windows.UTF16ToString(buffer[:length]), nil
 }
 
 func tryLockSpoolFile(file *os.File) (bool, error) {

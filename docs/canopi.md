@@ -171,7 +171,9 @@ recreated with current-user-only protection. Cross-process repair is serialized
 by the parent-directory kernel lock on Unix and a no-reparse, current-user-only
 coordinator file inside the protected state directory on Windows before the
 entry is rechecked and unlinked. Its byte-range lock crosses Windows sessions
-without exposing a publicly claimable named mutex.
+without exposing a publicly claimable named mutex. That coordinator is created
+with its private DACL atomically; an unsafe pre-existing coordinator fails
+startup for explicit operator removal instead of recursively repairing itself.
 Every server exit, including a signal or unexpected listener failure, waits for
 `http.Server.Shutdown` to finish draining active handlers before `Store.Close`
 releases that lifetime lock, fencing rolling restarts until every acknowledged
@@ -280,13 +282,19 @@ the parent-directory kernel lock on Unix and a no-reparse, current-user-only
 coordinator file inside the protected spool on Windows. Its byte-range lock
 crosses Windows sessions without exposing a publicly claimable named mutex, so
 concurrent hooks cannot unlink each other's replacement locks even when a
-service and interactive agent run in different sessions.
+service and interactive agent run in different sessions. The coordinator is
+created atomically during `prepare`; an unsafe pre-existing coordinator makes
+preflight fail for explicit operator removal instead of repairing its own lock.
 The configured spool capacity includes a fixed contention reserve (one sixteenth,
 at least one and at most 256 slots). Normal and contention lanes therefore remain
 jointly bounded while concurrent hooks can publish without waiting past their
 provider deadline. Directory creation and ACL protection happen only during the
 explicit `prepare` preflight or supervisor startup, never in the hook-facing
 enqueue. The complete hook-facing enqueue is capped at 1.75 seconds.
+Each operation resolves the configured spool to a canonical real directory for
+its full lifetime. Current-user-owned Unix symlink ancestors and all Windows
+reparse ancestors are rejected, preventing a mutable alias from splitting hooks
+and the persistent supervisor across different queues.
 The primary phase defaults to 250 ms and is capped at 750 ms; cleanup and capacity
 scans use cancellable 128-entry batches, and an
 exhausted primary budget immediately falls through to the contention reserve.

@@ -77,6 +77,22 @@ func TestSpoolRepairLockSerializesConcurrentRepair(t *testing.T) {
 	}
 }
 
+func TestPrepareRejectsCurrentUserSymlinkAncestor(t *testing.T) {
+	root := t.TempDir()
+	realRoot := filepath.Join(root, "real")
+	if err := os.MkdirAll(filepath.Join(realRoot, "spool"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	alias := filepath.Join(root, "alias")
+	if err := os.Symlink(realRoot, alias); err != nil {
+		t.Fatal(err)
+	}
+	spool := Spool{Directory: filepath.Join(alias, "spool")}
+	if err := spool.Prepare(); err == nil {
+		t.Fatal("Prepare() accepted a current-user symlink ancestor")
+	}
+}
+
 func TestSpoolRepairLockHonorsProviderDeadline(t *testing.T) {
 	path := filepath.Join(t.TempDir(), ".enqueue.lock")
 	firstEntered := make(chan struct{})

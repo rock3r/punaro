@@ -5,10 +5,41 @@ package canopiadapter
 import (
 	"errors"
 	"os"
+	"path/filepath"
+	"strings"
 	"syscall"
 
 	"golang.org/x/sys/unix"
 )
+
+func canonicalSpoolDirectory(path string) (string, error) {
+	return filepath.EvalSymlinks(path)
+}
+
+func validateSpoolDirectoryAncestors(path string) error {
+	current := string(filepath.Separator)
+	for _, component := range strings.Split(strings.TrimPrefix(filepath.Clean(path), current), current) {
+		if component == "" {
+			continue
+		}
+		current = filepath.Join(current, component)
+		info, err := os.Lstat(current)
+		if errors.Is(err, os.ErrNotExist) {
+			return nil
+		}
+		if err != nil {
+			return err
+		}
+		if info.Mode()&os.ModeSymlink != 0 && ownedSpoolDirectory(info) {
+			return errors.New("canopi spool path must not traverse a current-user symlink")
+		}
+	}
+	return nil
+}
+
+func prepareSpoolRepairCoordinator(string) error {
+	return nil
+}
 
 func ownedSpoolDirectory(info os.FileInfo) bool {
 	stat, ok := info.Sys().(*syscall.Stat_t)

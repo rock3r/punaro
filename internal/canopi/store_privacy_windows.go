@@ -5,6 +5,7 @@ package canopi
 import (
 	"errors"
 	"os"
+	"path/filepath"
 	"unsafe"
 
 	"golang.org/x/sys/windows"
@@ -25,6 +26,14 @@ func secureStateDirectory(path string, before os.FileInfo) error {
 		return errors.New("canopi state parent is not protected by an exclusive current-user ACL")
 	}
 	return nil
+}
+
+func prepareStateRepairCoordinator(directory string) error {
+	file, err := openStateRepairCoordinator(filepath.Join(directory, ".canopi-state-repair.lock"))
+	if err != nil {
+		return err
+	}
+	return file.Close()
 }
 
 func privateStateFile(path string, info os.FileInfo) bool {

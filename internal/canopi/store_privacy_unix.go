@@ -29,6 +29,10 @@ func secureStateDirectory(path string, before os.FileInfo) error {
 	return nil
 }
 
+func prepareStateRepairCoordinator(string) error {
+	return nil
+}
+
 func ownedStateDirectory(info os.FileInfo) bool {
 	stat, ok := info.Sys().(*syscall.Stat_t)
 	return ok && stat.Uid == uint32(os.Geteuid()) // #nosec G115 -- effective UID is nonnegative and represented by uid_t.

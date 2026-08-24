@@ -464,6 +464,15 @@ func (s Spool) normalized() (Spool, error) {
 	if strings.TrimSpace(s.Directory) == "" || !filepath.IsAbs(s.Directory) {
 		return Spool{}, errors.New("canopi spool directory must be absolute")
 	}
+	if err := validateSpoolDirectoryAncestors(s.Directory); err != nil {
+		return Spool{}, err
+	}
+	canonicalDirectory, err := canonicalSpoolDirectory(s.Directory)
+	if err == nil {
+		s.Directory = canonicalDirectory
+	} else if !errors.Is(err, os.ErrNotExist) {
+		return Spool{}, err
+	}
 	if s.MaxEvents == 0 {
 		s.MaxEvents = defaultMaxSpoolEvents
 	}
@@ -508,7 +517,10 @@ func (s Spool) ensureDirectory() error {
 	if !info.IsDir() || info.Mode()&os.ModeSymlink != 0 {
 		return errors.New("canopi spool directory must be a private real directory")
 	}
-	return secureSpoolDirectory(s.Directory, info)
+	if err := secureSpoolDirectory(s.Directory, info); err != nil {
+		return err
+	}
+	return prepareSpoolRepairCoordinator(s.Directory)
 }
 
 func (s Spool) requirePreparedDirectory() error {
