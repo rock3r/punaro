@@ -40,13 +40,16 @@ case "$operation" in
 			fi
 		done
 		[ -n "$destination" ] || exit 2
-		if [ "$tag" = catalog ] && [ -f "$state/fail-catalog-download-once" ] && [ "$(cat "$state/catalog-draft")" = false ]; then
+		if [ "$tag" = catalog ] && [ -f "$state/fail-catalog-download-once" ]; then
 			rm "$state/fail-catalog-download-once"
 			exit 1
 		fi
 		copy_assets "$tag" "$destination"
 		;;
 	upload)
+		if [ "$tag" = catalog ] && [ "$(cat "$state/catalog-draft")" = false ]; then
+			touch "$state/unsafe-live-catalog-upload"
+		fi
 		mkdir -p "$remote/$tag"
 		for source in "$@"; do
 			if [ -f "$source" ]; then

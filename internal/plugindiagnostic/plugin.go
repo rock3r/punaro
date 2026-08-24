@@ -196,8 +196,12 @@ func readFileContext(ctx context.Context, path string, maximum int64) ([]byte, e
 		return nil, errors.New("plugin file unavailable")
 	}
 	defer func() { _ = file.Close() }()
+	opened, err := file.Stat()
+	if err != nil || !opened.Mode().IsRegular() || !os.SameFile(info, opened) || opened.Size() != info.Size() || opened.Size() < 1 || opened.Size() > maximum {
+		return nil, errors.New("plugin file unavailable")
+	}
 	body, err := io.ReadAll(io.LimitReader(pluginContextReader{ctx: ctx, reader: file}, maximum+1))
-	if err != nil || len(body) == 0 || int64(len(body)) > maximum {
+	if err != nil || len(body) == 0 || int64(len(body)) != opened.Size() || int64(len(body)) > maximum {
 		return nil, errors.New("plugin file unavailable")
 	}
 	return body, nil

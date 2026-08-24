@@ -43,6 +43,8 @@ if ! grep -Fq -- '--provenance mode=max' "$repo_dir/.github/workflows/release.ym
 	exit 1
 fi
 if ! grep -Fq 'ARG PUNARO_RELEASE' "$repo_dir/Dockerfile" ||
+	! grep -Fq 'COPY .mcp.json mcp.json ./' "$repo_dir/Dockerfile" ||
+	! grep -Fq 'COPY scripts/punaro-plugin-mcp scripts/punaro-plugin-mcp.cmd ./scripts/' "$repo_dir/Dockerfile" ||
 	! grep -Fq 'main.serverBuildRelease=${PUNARO_RELEASE}' "$repo_dir/Dockerfile" ||
 	! grep -Fq -- '--build-arg "PUNARO_IMAGE=$repository:$RELEASE"' "$repo_dir/.github/workflows/release.yml" ||
 	! grep -Fq 'org.opencontainers.image.version="${PUNARO_RELEASE}"' "$repo_dir/Dockerfile" ||

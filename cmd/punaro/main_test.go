@@ -559,6 +559,31 @@ func TestDoctorFileDigestCommandValidatesAndHashesRegularFile(t *testing.T) {
 	}
 }
 
+func TestDoctorDSNReadCommandAndCredentialPreloadStayInsideDeadline(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "app.dsn")
+	if err := os.WriteFile(path, []byte("postgres://punaro_app@localhost/punaro?sslmode=disable\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	var stdout bytes.Buffer
+	if code := runDoctorDSNRead([]string{"--path", path}, &stdout); code != 0 || stdout.String() != "postgres://punaro_app@localhost/punaro?sslmode=disable" {
+		t.Fatalf("DSN helper code=%d output=%q", code, stdout.String())
+	}
+
+	previous := serverDoctorDSNRead
+	serverDoctorDSNRead = func(ctx context.Context, _ string) (string, bool) {
+		<-ctx.Done()
+		return "", false
+	}
+	t.Cleanup(func() { serverDoctorDSNRead = previous })
+	ctx, cancel := context.WithTimeout(t.Context(), 20*time.Millisecond)
+	defer cancel()
+	started := time.Now()
+	diagnostic := withServerDoctorCredentials(ctx, operator.Installation{AppDSNFile: "/stalled/app.dsn", OwnerDSNFile: "/stalled/owner.dsn"})
+	if _, marked, available := serverDoctorCredential(diagnostic, "/stalled/app.dsn"); !marked || available || time.Since(started) > time.Second {
+		t.Fatalf("deadline credential marked=%t available=%t elapsed=%s", marked, available, time.Since(started))
+	}
+}
+
 func TestUpRefusesActiveUpdateBeforeStartingWriters(t *testing.T) {
 	preserveDependencies(t)
 	directory := testInstallation(t)

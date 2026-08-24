@@ -61,6 +61,33 @@ if grep -Eq '^release (upload|edit|create) ' "$sequence/gh.log"; then
 	exit 1
 fi
 
+replacement="$temporary/replacement"
+prepare_case "$replacement"
+mkdir -p "$replacement/state/remote/catalog"
+printf '%s\n' previous-catalog >"$replacement/state/remote/catalog/punaro-catalog.json"
+printf '%s\n' previous-signature >"$replacement/state/remote/catalog/punaro-catalog.sig"
+printf '%s\n' false >"$replacement/state/catalog-draft"
+PATH="$replacement/bin:$PATH" \
+	PUNARO_FAKE_GH_STATE="$replacement/state" \
+	PUNARO_FAKE_GH_LOG="$replacement/gh.log" \
+	PUNARO_FAKE_GO_LOG="$replacement/go.log" \
+	"$repo_dir/scripts/publish-signed-release.sh" --release v0.1.0-alpha.1 --dir "$replacement/documents" --keys-file "$replacement/release.pub" >/dev/null
+if [ -e "$replacement/state/unsafe-live-catalog-upload" ]; then
+	printf '%s\n' 'catalog assets were replaced while the release was live' >&2
+	exit 1
+fi
+if [ "$(cat "$replacement/state/catalog-draft")" != false ] || ! cmp -s "$replacement/documents/punaro-catalog.json" "$replacement/state/remote/catalog/punaro-catalog.json" || ! cmp -s "$replacement/documents/punaro-catalog.sig" "$replacement/state/remote/catalog/punaro-catalog.sig"; then
+	printf '%s\n' 'verified replacement catalog was not published as one hidden transition' >&2
+	exit 1
+fi
+draft_line=$(grep -n 'release edit catalog --repo rock3r/punaro --draft=true --prerelease' "$replacement/gh.log" | head -n 1 | cut -d: -f1)
+upload_line=$(grep -n 'release upload catalog .*punaro-catalog.json .*punaro-catalog.sig --repo rock3r/punaro --clobber' "$replacement/gh.log" | head -n 1 | cut -d: -f1)
+publish_line=$(grep -n 'release edit catalog --repo rock3r/punaro --draft=false --prerelease' "$replacement/gh.log" | tail -n 1 | cut -d: -f1)
+if [ -z "$draft_line" ] || [ -z "$upload_line" ] || [ -z "$publish_line" ] || [ "$draft_line" -ge "$upload_line" ] || [ "$upload_line" -ge "$publish_line" ]; then
+	printf '%s\n' 'catalog replacement did not remain hidden from before upload through verification' >&2
+	exit 1
+fi
+
 artifacts="$temporary/artifacts"
 prepare_case "$artifacts"
 printf '%s\n' tampered >"$artifacts/state/remote/v0.1.0-alpha.1/punaro-adapter-linux-amd64"

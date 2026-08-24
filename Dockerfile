@@ -16,6 +16,8 @@ COPY internal ./internal
 COPY plugin.json ./
 COPY .codex-plugin/plugin.json ./.codex-plugin/
 COPY .claude-plugin/plugin.json ./.claude-plugin/
+COPY .mcp.json mcp.json ./
+COPY scripts/punaro-plugin-mcp scripts/punaro-plugin-mcp.cmd ./scripts/
 COPY skills ./skills
 COPY Dockerfile .dockerignore docker-compose.memory-onboarding-e2e.yml ./
 COPY scripts/install-client.sh scripts/install-adapter.sh ./scripts/

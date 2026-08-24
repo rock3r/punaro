@@ -687,6 +687,14 @@ func TestPluginDoctorValidatesAllAdaptersLauncherAndExactSkillTree(t *testing.T)
 	if !result.Portable || !result.Codex || !result.Claude || !result.Launcher || result.Version != "v0.1.0-alpha.1" || result.SkillDigest != "sha256:"+digest {
 		t.Fatalf("plugin=%#v", result)
 	}
+	var helperOutput bytes.Buffer
+	if code := runAdapterPluginInspect([]string{"--root", root}, &helperOutput); code != 0 {
+		t.Fatalf("plugin inspection helper code=%d", code)
+	}
+	var helperResult pluginDoctorResult
+	if json.Unmarshal(helperOutput.Bytes(), &helperResult) != nil || helperResult != result {
+		t.Fatalf("plugin inspection helper=%#v want=%#v", helperResult, result)
+	}
 	adapterExpectedSkillSetDigest = strings.Repeat("f", 64)
 	if tampered := inspectAdapterPlugin(t.Context(), root); tampered.SkillDigest != "" {
 		t.Fatalf("skill drift passed: %#v", tampered)
@@ -1624,7 +1632,7 @@ func TestPrivateWindowsDescriptorRejectsEveryUnauthorizedAllowACE(t *testing.T) 
 func TestAdapterServiceBindingRejectsStalePlatformDefinitions(t *testing.T) {
 	for goos, valid := range map[string]string{
 		"linux":   "[Service]\nExecStart=%h/.local/bin/punaro-bootstrap run --directory %h/.local/state/punaro-bootstrap\n",
-		"darwin":  `<plist><string>exec "$HOME/.local/bin/punaro-bootstrap" run --directory "$HOME/.local/state/punaro-bootstrap"</string></plist>`,
+		"darwin":  `<plist><dict><key>Label</key><string>org.punaro.adapter</string><key>ProgramArguments</key><array><string>/bin/sh</string><string>-c</string><string>exec "$HOME/.local/bin/punaro-bootstrap" run --directory "$HOME/.local/state/punaro-bootstrap"</string></array></dict></plist>`,
 		"windows": "$root = $PSScriptRoot\r\n$bootstrap = Join-Path $root 'bootstrap'\r\n$bin = Join-Path $root 'bin\\punaro-bootstrap.exe'\r\n& $bin run --directory $bootstrap\r\n",
 	} {
 		t.Run(goos, func(t *testing.T) {
@@ -1642,6 +1650,39 @@ func TestAdapterServiceBindingRejectsStalePlatformDefinitions(t *testing.T) {
 				t.Fatal("commented expected Linux service binding was accepted")
 			}
 		})
+	}
+}
+
+func TestAdapterLaunchdBindingRequiresStructuralInstalledAndEffectiveCommands(t *testing.T) {
+	command := `exec "$HOME/.local/bin/punaro-bootstrap" run --directory "$HOME/.local/state/punaro-bootstrap"`
+	validPlist := `<plist><dict><key>Label</key><string>org.punaro.adapter</string><key>ProgramArguments</key><array><string>/bin/sh</string><string>-c</string><string>` + command + `</string></array><key>Other</key><string>ignored</string></dict></plist>`
+	if !adapterLaunchdPlistBound(validPlist) {
+		t.Fatal("valid structural LaunchAgent plist rejected")
+	}
+	for _, stale := range []string{
+		`<plist><dict><key>Label</key><string>org.punaro.adapter</string><key>Unrelated</key><string>` + command + `</string><key>ProgramArguments</key><array><string>/bin/sh</string><string>-c</string><string>exec /tmp/attacker</string></array></dict></plist>`,
+		strings.Replace(validPlist, "org.punaro.adapter", "org.attacker.adapter", 1),
+		strings.Replace(validPlist, "<string>-c</string>", "<string>-c</string><string>extra</string>", 1),
+		validPlist + validPlist,
+	} {
+		if adapterLaunchdPlistBound(stale) {
+			t.Fatalf("stale LaunchAgent plist accepted: %s", stale)
+		}
+	}
+
+	validEffective := "path = /Users/seb/Library/LaunchAgents/org.punaro.adapter.plist\nstate = running\nprogram = /bin/sh\narguments = {\n\t/bin/sh\n\t-c\n\t" + command + "\n}\nruns = 1\n"
+	if !adapterLaunchdEffectiveBound(validEffective) {
+		t.Fatal("valid effective launchd command rejected")
+	}
+	for _, stale := range []string{
+		strings.Replace(validEffective, "program = /bin/sh", "program = /tmp/attacker", 1),
+		strings.Replace(validEffective, command, "exec /tmp/attacker", 1),
+		strings.Replace(validEffective, "\t-c\n", "\t-c\n\textra\n", 1),
+		validEffective + validEffective,
+	} {
+		if adapterLaunchdEffectiveBound(stale) {
+			t.Fatalf("stale effective launchd command accepted: %q", stale)
+		}
 	}
 }
 

@@ -96,7 +96,9 @@ download_release_candidate() {
 restore_previous_catalog() {
 	attempt=1
 	while [ "$attempt" -le 3 ]; do
-		if gh release upload catalog "$previous_catalog_signature" "$previous_catalog" --repo "$repository" --clobber; then
+		if gh release edit catalog --repo "$repository" --draft=true --prerelease &&
+			gh release upload catalog "$previous_catalog" "$previous_catalog_signature" --repo "$repository" --clobber &&
+			gh release edit catalog --repo "$repository" --draft=false --prerelease; then
 			return 0
 		fi
 		attempt=$((attempt + 1))
@@ -181,17 +183,17 @@ if [ "$release_is_draft" = true ]; then
 fi
 
 if [ "$catalog_exists" = true ] && [ "$catalog_draft" = false ]; then
-	# GitHub replaces each asset separately. Keep the previously verified pair
-	# locally and restore it on every partial upload or verification failure.
+	# A clobber is delete-then-upload per asset. Hide the release before changing
+	# either member of the signed pair, and keep the previously verified pair for
+	# an equally hidden restoration on every failure.
 	catalog_restore_required=true
-	gh release upload catalog "$catalog_signature" --repo "$repository" --clobber
-	gh release upload catalog "$catalog" --repo "$repository" --clobber
+	gh release edit catalog --repo "$repository" --draft=true --prerelease
+	gh release upload catalog "$catalog" "$catalog_signature" --repo "$repository" --clobber
 elif [ "$catalog_exists" = true ]; then
 	# A prior interrupted first publication remains invisible as a draft. Finish
 	# both assets before exposing it.
 	gh release upload catalog "$catalog" "$catalog_signature" --repo "$repository" --clobber
 	catalog_redraft_required=true
-	gh release edit catalog --repo "$repository" --draft=false --prerelease
 else
 	# Initial publication is assembled as a draft so a partial asset upload is
 	# never visible to bootstrap clients.
@@ -200,7 +202,6 @@ else
 		--notes 'Signed short-lived Punaro release catalog. Bootstrap verifies the detached signature.' \
 		"$catalog" "$catalog_signature"
 	catalog_redraft_required=true
-	gh release edit catalog --repo "$repository" --draft=false --prerelease
 fi
 
 verification_dir="$download_dir/verification"
@@ -222,6 +223,10 @@ cmp -s "$catalog_signature" "$verification_dir/punaro-catalog.sig" || fail 'publ
 	go run ./cmd/punaro-release verify-artifacts --manifest "$verification_dir/punaro-release.json" --dir "$verification_dir"
 ) || fail 'published signature verification failed'
 
+# Expose the remotely downloaded and cryptographically verified pair in one
+# release-state transition. Clients see either a verified prior pair, a hidden
+# catalog during replacement, or the verified new pair—never mixed assets.
+gh release edit catalog --repo "$repository" --draft=false --prerelease
 catalog_restore_required=false
 catalog_redraft_required=false
 

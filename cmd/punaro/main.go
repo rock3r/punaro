@@ -31,7 +31,7 @@ const minimumClientLifecycleSchema int64 = 44
 
 var (
 	inspectSchema = func(ctx context.Context, dsnFile string) (punaropostgres.SchemaState, error) {
-		database, err := punaropostgres.OpenApplication(ctx, punaropostgres.Config{DSNFile: dsnFile})
+		database, err := openServerDoctorApplication(ctx, dsnFile)
 		if err != nil {
 			return punaropostgres.SchemaState{}, err
 		}
@@ -39,7 +39,7 @@ var (
 		return database.SchemaState(ctx)
 	}
 	inspectOwner = func(ctx context.Context, dsnFile string) (punaropostgres.Principal, error) {
-		database, err := punaropostgres.OpenApplication(ctx, punaropostgres.Config{DSNFile: dsnFile})
+		database, err := openServerDoctorApplication(ctx, dsnFile)
 		if err != nil {
 			return punaropostgres.Principal{}, err
 		}
@@ -47,7 +47,7 @@ var (
 		return database.InstallationOwner(ctx)
 	}
 	maintenanceActive = func(ctx context.Context, dsnFile string) (bool, error) {
-		database, err := punaropostgres.OpenApplication(ctx, punaropostgres.Config{DSNFile: dsnFile})
+		database, err := openServerDoctorApplication(ctx, dsnFile)
 		if err != nil {
 			return false, err
 		}
@@ -66,12 +66,12 @@ var (
 		return admin.BootstrapOwner(ctx, name)
 	}
 	verifyInstallationPair = func(ctx context.Context, appDSNFile, ownerDSNFile string) error {
-		app, err := punaropostgres.OpenApplication(ctx, punaropostgres.Config{DSNFile: appDSNFile})
+		app, err := openServerDoctorApplication(ctx, appDSNFile)
 		if err != nil {
 			return err
 		}
 		defer func() { _ = app.Close() }()
-		admin, err := punaropostgres.OpenAdministration(ctx, punaropostgres.Config{DSNFile: ownerDSNFile})
+		admin, err := openServerDoctorAdministration(ctx, ownerDSNFile)
 		if err != nil {
 			return err
 		}
@@ -409,6 +409,8 @@ func run(args []string, stdout, stderr io.Writer) int {
 		return runDoctorProfile(args[1:], stdout, stderr)
 	case "doctor-file-digest":
 		return runDoctorFileDigest(args[1:], stdout)
+	case "doctor-dsn-read":
+		return runDoctorDSNRead(args[1:], stdout)
 	case "client":
 		if len(args) > 1 && (args[1] == "invite" || args[1] == "add") {
 			return runClientAdd(args[2:], stdout, stderr)
@@ -711,6 +713,7 @@ func unavailableServerDoctorChecks(gatewayColocated bool) []punarodiagnostic.Che
 }
 
 func diagnoseServer(ctx context.Context, installation operator.Installation, machineID string, gatewayColocated bool, relayProfile string) (punarodiagnostic.Report, error) {
+	ctx = withServerDoctorCredentials(ctx, installation)
 	identity := punarodiagnostic.Identity{Platform: runtime.GOOS + "-" + runtime.GOARCH}
 	if _, digest, ok := strings.Cut(installation.Image, "@"); ok {
 		identity.ArtifactDigest = digest

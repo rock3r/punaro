@@ -5,8 +5,10 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"flag"
 	"io"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"runtime"
 	"strings"
@@ -23,6 +25,43 @@ var adapterExpectedSkillSetDigest string
 // adapterExpectedPluginRuntimeDigest binds the portable MCP registrations and
 // launcher scripts shipped with the same release.
 var adapterExpectedPluginRuntimeDigest string
+
+func inspectAdapterPluginIsolated(ctx context.Context, root string) pluginDoctorResult {
+	if ctx == nil || ctx.Err() != nil {
+		return pluginDoctorResult{}
+	}
+	executable, err := os.Executable()
+	if err != nil {
+		return pluginDoctorResult{}
+	}
+	command := exec.CommandContext(ctx, executable, "doctor-plugin-inspect", "--root", root) // #nosec G204,G702 -- os.Executable self helper with explicit data argument.
+	command.Stdin = nil
+	command.Stderr = io.Discard
+	output := boundedDoctorOutput{maximum: maximumPluginManifestBytes}
+	command.Stdout = &output
+	if command.Run() != nil || ctx.Err() != nil || output.overflow {
+		return pluginDoctorResult{}
+	}
+	decoder := json.NewDecoder(strings.NewReader(output.buffer.String()))
+	var result pluginDoctorResult
+	if decoder.Decode(&result) != nil || decoder.Decode(&struct{}{}) != io.EOF {
+		return pluginDoctorResult{}
+	}
+	return result
+}
+
+func runAdapterPluginInspect(args []string, stdout io.Writer) int {
+	flags := flag.NewFlagSet("punaro-adapter doctor-plugin-inspect", flag.ContinueOnError)
+	flags.SetOutput(io.Discard)
+	root := flags.String("root", "", "installed plugin root")
+	if flags.Parse(args) != nil || flags.NArg() != 0 {
+		return 2
+	}
+	if json.NewEncoder(stdout).Encode(inspectAdapterPlugin(context.Background(), *root)) != nil {
+		return 1
+	}
+	return 0
+}
 
 func inspectAdapterPlugin(ctx context.Context, root string) pluginDoctorResult {
 	if ctx == nil || ctx.Err() != nil || root == "" || !filepath.IsAbs(root) || filepath.Clean(root) != root {
@@ -43,14 +82,28 @@ func inspectAdapterPlugin(ctx context.Context, root string) pluginDoctorResult {
 	if runtime.GOOS == "windows" {
 		launcher += ".cmd"
 	}
-	launcherInfo, launcherErr := os.Lstat(filepath.Join(root, "scripts", launcher)) // #nosec G703 -- fixed plugin child.
+	launcherOK := inspectPluginLauncher(filepath.Join(root, "scripts", launcher))
 	runtimeDigest, runtimeErr := plugindiagnostic.RuntimeDigestContext(ctx, root)
-	result.Launcher = launcherErr == nil && launcherInfo.Mode().IsRegular() && launcherInfo.Mode()&os.ModeSymlink == 0 && (runtime.GOOS == "windows" || launcherInfo.Mode().Perm()&0o111 != 0) && runtimeErr == nil && adapterExpectedPluginRuntimeDigest != "" && runtimeDigest == adapterExpectedPluginRuntimeDigest
+	result.Launcher = launcherOK && runtimeErr == nil && adapterExpectedPluginRuntimeDigest != "" && runtimeDigest == adapterExpectedPluginRuntimeDigest
 	digest, digestErr := plugindiagnostic.SkillSetDigestContext(ctx, filepath.Join(root, "skills"))
 	if digestErr == nil && adapterExpectedSkillSetDigest != "" && digest == adapterExpectedSkillSetDigest {
 		result.SkillDigest = "sha256:" + digest
 	}
 	return result
+}
+
+func inspectPluginLauncher(path string) bool {
+	expected, err := os.Lstat(path) // #nosec G703 -- fixed plugin child.
+	if err != nil || !expected.Mode().IsRegular() || expected.Mode()&os.ModeSymlink != 0 || runtime.GOOS != "windows" && expected.Mode().Perm()&0o111 == 0 {
+		return false
+	}
+	file, err := os.Open(path) // #nosec G304,G703 -- child-isolated validated plugin launcher.
+	if err != nil {
+		return false
+	}
+	defer func() { _ = file.Close() }()
+	opened, err := file.Stat()
+	return err == nil && opened.Mode().IsRegular() && os.SameFile(expected, opened) && opened.Size() == expected.Size() && (runtime.GOOS == "windows" || opened.Mode().Perm()&0o111 != 0)
 }
 
 func readPluginIdentity(ctx context.Context, path string) (string, bool) {
@@ -113,8 +166,12 @@ func readPluginFile(ctx context.Context, path string, maximum int) ([]byte, erro
 		return nil, errors.New("plugin file unavailable")
 	}
 	defer func() { _ = file.Close() }()
+	opened, err := file.Stat()
+	if err != nil || !opened.Mode().IsRegular() || !os.SameFile(info, opened) || opened.Size() != info.Size() || opened.Size() < 1 || opened.Size() > int64(maximum) {
+		return nil, errors.New("plugin file unavailable")
+	}
 	body, err := io.ReadAll(io.LimitReader(pluginDoctorContextReader{ctx: ctx, reader: file}, int64(maximum)+1))
-	if err != nil || len(body) == 0 || len(body) > maximum {
+	if err != nil || len(body) == 0 || int64(len(body)) != opened.Size() || len(body) > maximum {
 		return nil, errors.New("plugin file unavailable")
 	}
 	return body, nil

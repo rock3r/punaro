@@ -15,6 +15,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -113,7 +114,7 @@ var (
 	adapterDoctorBootstrapProbe = func(ctx context.Context, directory, bootstrapRelease string) (punarodiagnostic.Report, error) {
 		return bootstrap.Doctor(ctx, bootstrap.DoctorRequest{Directory: directory, BootstrapRelease: bootstrapRelease})
 	}
-	adapterDoctorPluginProbe = inspectAdapterPlugin
+	adapterDoctorPluginProbe = inspectAdapterPluginIsolated
 )
 
 func runAdapterDoctor(args []string, stdout, stderr io.Writer) int {
@@ -746,6 +747,10 @@ func inspectAdapterService(ctx context.Context, _ adapterConfig) serviceDoctorRe
 		effective, ok := adapterServiceCommand(ctx, "systemctl", "--user", "show", "--property=ExecStart", "--value", "punaro-adapter.service")
 		result.Executable = ok && adapterSystemdExecStartBound(effective, home)
 	}
+	if runtime.GOOS == "darwin" && result.Executable {
+		effective, ok := adapterServiceCommand(ctx, "launchctl", "print", "gui/"+currentUserID()+"/org.punaro.adapter")
+		result.Executable = ok && adapterLaunchdEffectiveBound(effective)
+	}
 	result.Enabled, result.Running, result.ExitStatus, result.RestartState = inspectAdapterServiceManager(ctx, runtime.GOOS)
 	if runtime.GOOS == "windows" && result.Executable {
 		task, ok := adapterServiceCommand(ctx, "schtasks.exe", "/Query", "/TN", "Punaro Adapter", "/XML")
@@ -858,13 +863,181 @@ func adapterServiceFileBound(goos, body string) bool {
 		line := "ExecStart=%h/.local/bin/punaro-bootstrap run --directory %h/.local/state/punaro-bootstrap"
 		return exactAdapterServiceLine(body, line)
 	case "darwin":
-		command := `<string>exec "$HOME/.local/bin/punaro-bootstrap" run --directory "$HOME/.local/state/punaro-bootstrap"</string>`
-		return strings.Count(body, command) == 1
+		return adapterLaunchdPlistBound(body)
 	case "windows":
 		return strings.Count(body, "$bin = Join-Path $root 'bin\\punaro-bootstrap.exe'") == 1 && strings.Count(body, "& $bin run --directory $bootstrap") == 1
 	default:
 		return false
 	}
+}
+
+func adapterLaunchdPlistBound(body string) bool {
+	if len(body) > 64<<10 {
+		return false
+	}
+	decoder := xml.NewDecoder(strings.NewReader(body))
+	next := func() (xml.Token, error) {
+		for {
+			token, err := decoder.Token()
+			if err != nil {
+				return nil, err
+			}
+			switch value := token.(type) {
+			case xml.CharData:
+				if strings.TrimSpace(string(value)) == "" {
+					continue
+				}
+			case xml.ProcInst, xml.Directive, xml.Comment:
+				continue
+			}
+			return token, nil
+		}
+	}
+	token, err := next()
+	root, ok := token.(xml.StartElement)
+	if err != nil || !ok || root.Name.Local != "plist" {
+		return false
+	}
+	token, err = next()
+	dictionary, ok := token.(xml.StartElement)
+	if err != nil || !ok || dictionary.Name.Local != "dict" {
+		return false
+	}
+	seen := map[string]bool{}
+	labelOK, argumentsOK := false, false
+	for {
+		token, err = next()
+		if err != nil {
+			return false
+		}
+		if end, ok := token.(xml.EndElement); ok {
+			if end.Name.Local != "dict" {
+				return false
+			}
+			break
+		}
+		keyStart, ok := token.(xml.StartElement)
+		if !ok || keyStart.Name.Local != "key" {
+			return false
+		}
+		key, ok := decodeAdapterXMLString(decoder, keyStart)
+		if !ok || key == "" || seen[key] {
+			return false
+		}
+		seen[key] = true
+		token, err = next()
+		valueStart, ok := token.(xml.StartElement)
+		if err != nil || !ok {
+			return false
+		}
+		switch key {
+		case "Label":
+			value, valid := decodeAdapterXMLString(decoder, valueStart)
+			labelOK = valid && valueStart.Name.Local == "string" && value == "org.punaro.adapter"
+		case "ProgramArguments":
+			arguments, valid := decodeAdapterXMLStringArray(decoder, valueStart)
+			argumentsOK = valid && slices.Equal(arguments, adapterLaunchdArguments())
+		default:
+			if decoder.Skip() != nil {
+				return false
+			}
+		}
+	}
+	token, err = next()
+	endRoot, ok := token.(xml.EndElement)
+	if err != nil || !ok || endRoot.Name.Local != "plist" {
+		return false
+	}
+	_, err = next()
+	return errors.Is(err, io.EOF) && labelOK && argumentsOK
+}
+
+func decodeAdapterXMLString(decoder *xml.Decoder, start xml.StartElement) (string, bool) {
+	if start.Name.Local != "key" && start.Name.Local != "string" {
+		return "", false
+	}
+	var value strings.Builder
+	for {
+		token, err := decoder.Token()
+		if err != nil {
+			return "", false
+		}
+		switch token := token.(type) {
+		case xml.CharData:
+			_, _ = value.Write(token)
+		case xml.EndElement:
+			return value.String(), token.Name == start.Name
+		default:
+			return "", false
+		}
+	}
+}
+
+func decodeAdapterXMLStringArray(decoder *xml.Decoder, start xml.StartElement) ([]string, bool) {
+	if start.Name.Local != "array" {
+		return nil, false
+	}
+	var values []string
+	for {
+		token, err := decoder.Token()
+		if err != nil {
+			return nil, false
+		}
+		switch token := token.(type) {
+		case xml.CharData:
+			if strings.TrimSpace(string(token)) != "" {
+				return nil, false
+			}
+		case xml.StartElement:
+			value, ok := decodeAdapterXMLString(decoder, token)
+			if !ok || token.Name.Local != "string" {
+				return nil, false
+			}
+			values = append(values, value)
+		case xml.EndElement:
+			return values, token.Name == start.Name
+		default:
+			return nil, false
+		}
+	}
+}
+
+func adapterLaunchdArguments() []string {
+	return []string{"/bin/sh", "-c", `exec "$HOME/.local/bin/punaro-bootstrap" run --directory "$HOME/.local/state/punaro-bootstrap"`}
+}
+
+func adapterLaunchdEffectiveBound(body string) bool {
+	if len(body) > 64<<10 {
+		return false
+	}
+	lines := strings.Split(body, "\n")
+	var arguments []string
+	inArguments, complete, programCount, argumentsCount := false, false, 0, 0
+	for _, line := range lines {
+		line = strings.TrimSpace(line)
+		if line == "program = /bin/sh" {
+			programCount++
+		}
+		if line == "arguments = {" {
+			argumentsCount++
+			if inArguments || complete {
+				return false
+			}
+			inArguments = true
+			continue
+		}
+		if inArguments {
+			if line == "}" {
+				inArguments, complete = false, true
+				continue
+			}
+			if line == "" {
+				return false
+			}
+			arguments = append(arguments, line)
+		}
+	}
+	return programCount == 1 && argumentsCount == 1 && complete && !inArguments && slices.Equal(arguments, adapterLaunchdArguments())
 }
 
 func exactAdapterServiceLine(body, expected string) bool {

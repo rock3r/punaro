@@ -35,6 +35,11 @@ Skill-set digests length-prefix every relative path and file body so arbitrary
 skill bytes cannot create an ambiguous tree encoding. Explicit bootstrap public
 keys and bootstrap health state are read as bounded regular non-symlink files
 through the same diagnostic deadline and descriptor-identity checks.
+Server PostgreSQL credential files and adapter plugin trees are inspected in
+deadline-isolated child helpers. A stalled mount during `Lstat`, open, walk, or
+read therefore yields unavailable checks instead of extending the advertised
+total deadline; DSN values remain in a private parent/child pipe and are never
+printed in the report or logs.
 
 ## Commands
 
@@ -245,7 +250,10 @@ release identity for `minimum_bootstrap_release`. On Linux, the executable
 check also binds systemd's effective `ExecStart`, including drop-ins, to the
 exact bootstrap run command. On Windows, it structurally parses the scheduled
 task and requires one exact PowerShell action whose `-File` target is the
-protected installed runner.
+protected installed runner. On macOS, it structurally decodes the installed
+plist's exact `Label` and three-element `ProgramArguments`, then also binds
+launchd's effective loaded program and arguments so a stale loaded job cannot
+pass from an unrelated matching string.
 
 ### Bootstrap
 

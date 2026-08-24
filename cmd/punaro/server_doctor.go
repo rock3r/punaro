@@ -44,6 +44,91 @@ type boundedServerDoctorOutput struct {
 	overflow bool
 }
 
+type serverDoctorCredentialContextKey struct{}
+
+type serverDoctorCredentials struct {
+	values map[string]string
+}
+
+var serverDoctorDSNRead = isolatedServerDoctorDSN
+
+func withServerDoctorCredentials(ctx context.Context, installation operator.Installation) context.Context {
+	credentials := serverDoctorCredentials{values: map[string]string{}}
+	for _, path := range []string{installation.AppDSNFile, installation.OwnerDSNFile} {
+		if _, attempted := credentials.values[path]; attempted {
+			continue
+		}
+		dsn, ok := serverDoctorDSNRead(ctx, path)
+		if ok {
+			credentials.values[path] = dsn
+		} else {
+			credentials.values[path] = ""
+		}
+	}
+	return context.WithValue(ctx, serverDoctorCredentialContextKey{}, credentials)
+}
+
+func serverDoctorCredential(ctx context.Context, path string) (string, bool, bool) {
+	credentials, diagnostic := ctx.Value(serverDoctorCredentialContextKey{}).(serverDoctorCredentials)
+	if !diagnostic {
+		return "", false, false
+	}
+	dsn, attempted := credentials.values[path]
+	return dsn, true, attempted && dsn != ""
+}
+
+func openServerDoctorApplication(ctx context.Context, path string) (*punaropostgres.Database, error) {
+	if dsn, diagnostic, ok := serverDoctorCredential(ctx, path); diagnostic {
+		if !ok {
+			return nil, errors.New("PostgreSQL application credential is unavailable")
+		}
+		return punaropostgres.OpenApplicationDSN(ctx, dsn)
+	}
+	return punaropostgres.OpenApplication(ctx, punaropostgres.Config{DSNFile: path})
+}
+
+func openServerDoctorAdministration(ctx context.Context, path string) (*punaropostgres.Administration, error) {
+	if dsn, diagnostic, ok := serverDoctorCredential(ctx, path); diagnostic {
+		if !ok {
+			return nil, errors.New("PostgreSQL owner credential is unavailable")
+		}
+		return punaropostgres.OpenAdministrationDSN(ctx, dsn)
+	}
+	return punaropostgres.OpenAdministration(ctx, punaropostgres.Config{DSNFile: path})
+}
+
+func isolatedServerDoctorDSN(ctx context.Context, path string) (string, bool) {
+	executable, err := os.Executable()
+	if err != nil {
+		return "", false
+	}
+	output, ok := boundedCommandLimit(ctx, 16<<10, executable, "doctor-dsn-read", "--path", path)
+	if !ok || strings.TrimSpace(output) == "" {
+		return "", false
+	}
+	return strings.TrimSpace(output), true
+}
+
+func directServerDoctorDSN(_ context.Context, path string) (string, bool) {
+	dsn, err := punaropostgres.ReadDSNFile(path)
+	return dsn, err == nil
+}
+
+func runDoctorDSNRead(args []string, stdout io.Writer) int {
+	flags := flag.NewFlagSet("punaro doctor-dsn-read", flag.ContinueOnError)
+	flags.SetOutput(io.Discard)
+	path := flags.String("path", "", "protected PostgreSQL DSN file")
+	if flags.Parse(args) != nil || flags.NArg() != 0 {
+		return 2
+	}
+	dsn, err := punaropostgres.ReadDSNFile(*path)
+	if err != nil {
+		return 1
+	}
+	_, _ = io.WriteString(stdout, dsn)
+	return 0
+}
+
 func (output *boundedServerDoctorOutput) Write(value []byte) (int, error) {
 	remaining := output.maximum - output.buffer.Len()
 	if remaining > 0 {
@@ -79,7 +164,7 @@ func inspectServerDoctorState(parent context.Context, installation operator.Inst
 		state.GatewayInstalled, state.GatewayEnabled, state.GatewayRunning, state.GatewayExecutable, state.GatewayExitStatus, state.GatewayRestartState, state.GatewayRelease = inspectGatewayService(ctx, serverBuildRelease)
 	}
 
-	database, err := punaropostgres.OpenApplication(ctx, punaropostgres.Config{DSNFile: installation.AppDSNFile})
+	database, err := openServerDoctorApplication(ctx, installation.AppDSNFile)
 	if err == nil {
 		private, listenerErr := database.ListenerPrivate(ctx)
 		state.DatabasePrivate = known(listenerErr == nil, private)
@@ -87,7 +172,7 @@ func inspectServerDoctorState(parent context.Context, installation operator.Inst
 		state.PostgresKnown = err == nil
 		_ = database.Close()
 	}
-	administration, err := punaropostgres.OpenAdministration(ctx, punaropostgres.Config{DSNFile: installation.OwnerDSNFile})
+	administration, err := openServerDoctorAdministration(ctx, installation.OwnerDSNFile)
 	if err == nil {
 		private, listenerErr := administration.ListenerPrivate(ctx)
 		state.AdminPrivate = known(listenerErr == nil, private)
@@ -533,7 +618,7 @@ func serverGatewaySystemdExecStartBound(body string) bool {
 }
 
 func inspectUpdateState(parent context.Context, installation operator.Installation) (knownDoctorBool, knownDoctorBool, knownDoctorBool) {
-	admin, err := punaropostgres.OpenAdministration(parent, punaropostgres.Config{DSNFile: installation.OwnerDSNFile})
+	admin, err := openServerDoctorAdministration(parent, installation.OwnerDSNFile)
 	if err != nil {
 		return knownDoctorBool{}, knownDoctorBool{}, knownDoctorBool{}
 	}
@@ -577,12 +662,16 @@ func updatePhaseRequiresRecoveryReceipt(phase punaropostgres.UpdatePhase) bool {
 }
 
 func boundedCommand(parent context.Context, executable string, arguments ...string) (string, bool) {
+	return boundedCommandLimit(parent, serverDoctorOutputLimit, executable, arguments...)
+}
+
+func boundedCommandLimit(parent context.Context, maximum int, executable string, arguments ...string) (string, bool) {
 	ctx, cancel := context.WithTimeout(parent, serverDoctorCommandTimeout)
 	defer cancel()
 	command := exec.CommandContext(ctx, executable, arguments...) // #nosec G204 -- fixed audited executable and structured arguments.
 	command.Stdin = nil
 	command.Stderr = io.Discard
-	output := boundedServerDoctorOutput{maximum: serverDoctorOutputLimit}
+	output := boundedServerDoctorOutput{maximum: maximum}
 	command.Stdout = &output
 	if err := command.Run(); err != nil || ctx.Err() != nil || output.overflow {
 		return "", false

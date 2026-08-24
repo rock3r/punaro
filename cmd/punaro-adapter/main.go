@@ -100,6 +100,8 @@ func main() {
 		err = runMailboxMCP()
 	case os.Args[1] == "doctor":
 		os.Exit(runAdapterDoctor(os.Args[2:], os.Stdout, os.Stderr))
+	case os.Args[1] == "doctor-plugin-inspect":
+		os.Exit(runAdapterPluginInspect(os.Args[2:], os.Stdout))
 	case os.Args[1] == "version":
 		if adapterBuildRelease == "" {
 			os.Exit(1)

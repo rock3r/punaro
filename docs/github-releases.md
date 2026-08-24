@@ -77,8 +77,12 @@ The offline publisher re-hashes every native artifact named by the verified
 manifest in the operator's signing directory and in the GitHub draft before it
 publishes anything. It repeats remote artifact verification after publication;
 a mismatch prevents catalog advancement or restores/hides the previous catalog
-state. The signing directory must therefore retain the exact native artifacts
-alongside the four signed document files.
+state. Replacing an existing catalog first makes that GitHub Release a draft,
+uploads the document/signature pair while it is unavailable to bootstrap
+clients, downloads and verifies the remote bytes, and only then exposes the
+release again. A failure restores the previously verified pair while the
+catalog remains hidden. The signing directory must therefore retain the exact
+native artifacts alongside the four signed document files.
 
 The unsigned workflow never creates or mutates the live `catalog` prerelease.
 Only the offline-signature publisher can make those stable assets visible.

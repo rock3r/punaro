@@ -58,6 +58,16 @@ func OpenApplication(ctx context.Context, cfg Config) (*Database, error) {
 	if err != nil {
 		return nil, err
 	}
+	return OpenApplicationDSN(ctx, dsn)
+}
+
+// OpenApplicationDSN opens an application connection from an already
+// protected and validated in-memory DSN. Diagnostic callers use this after a
+// deadline-isolated credential read.
+func OpenApplicationDSN(ctx context.Context, dsn string) (*Database, error) {
+	if strings.TrimSpace(dsn) == "" {
+		return nil, errors.New("PostgreSQL connection configuration is invalid")
+	}
 	db, err := open(ctx, dsn)
 	if err != nil {
 		return nil, err
