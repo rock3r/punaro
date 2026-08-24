@@ -190,6 +190,9 @@ Service and edge: `health_endpoint`, `readiness_endpoint`,
 `gateway_release`. These gateway checks are required only with the explicit
 server `--gateway-co-located` declaration; otherwise they are optional and the
 separate Telegram component report supplies gateway readiness.
+For a co-located gateway, `gateway_service_executable` verifies both the base
+unit and systemd's effective `ExecStart`, including drop-ins, before the fixed
+installed binary's release identity is considered sufficient.
 
 ### Adapter
 

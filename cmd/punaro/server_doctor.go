@@ -413,7 +413,8 @@ func inspectGatewayService(parent context.Context, expectedRelease string) (know
 	running := activeKnown && strings.TrimSpace(activeState) == "active"
 	exitStatus, exitKnown := boundedCommand(parent, "systemctl", "show", "--property=ExecMainStatus", "--value", "punaro-telegram.service")
 	serviceResult, resultKnown := boundedCommand(parent, "systemctl", "show", "--property=Result", "--value", "punaro-telegram.service")
-	executable := known(true, serverGatewayServiceFileBound(parent, "/etc/systemd/system/punaro-telegram.service"))
+	effectiveExecStart, effectiveKnown := boundedCommand(parent, "systemctl", "show", "--property=ExecStart", "--value", "punaro-telegram.service")
+	executable := known(effectiveKnown, serverGatewayServiceFileBound(parent, "/etc/systemd/system/punaro-telegram.service") && serverGatewaySystemdExecStartBound(effectiveExecStart))
 	release, releaseKnown := boundedCommand(parent, "/usr/local/bin/punaro-telegram", "version")
 	return known(true, installed), known(true, enabled), known(activeKnown, running), executable,
 		known(exitKnown, strings.TrimSpace(exitStatus) == "0"), known(resultKnown, strings.TrimSpace(serviceResult) == "success"),
@@ -432,6 +433,28 @@ func serverGatewayServiceFileBound(ctx context.Context, path string) bool {
 		}
 	}
 	return count == 1
+}
+
+func serverGatewaySystemdExecStartBound(body string) bool {
+	if len(body) > 64<<10 {
+		return false
+	}
+	canonical := strings.TrimSpace(body)
+	if len(canonical) < 2 || canonical[0] != '{' || canonical[len(canonical)-1] != '}' || strings.Count(canonical, "{") != 1 || strings.Count(canonical, "}") != 1 || strings.ContainsAny(canonical, "\r\n\x00") {
+		return false
+	}
+	fields := map[string]string{}
+	seen := map[string]bool{}
+	for _, field := range strings.Split(canonical[1:len(canonical)-1], ";") {
+		name, value, found := strings.Cut(strings.TrimSpace(field), "=")
+		if !found || name == "" || seen[name] {
+			return false
+		}
+		seen[name] = true
+		fields[name] = strings.TrimSpace(value)
+	}
+	const executable = "/usr/local/bin/punaro-telegram"
+	return fields["path"] == executable && fields["argv[]"] == executable
 }
 
 func inspectUpdateState(parent context.Context, installation operator.Installation) (knownDoctorBool, knownDoctorBool, knownDoctorBool) {

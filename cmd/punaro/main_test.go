@@ -1139,6 +1139,23 @@ func TestServerGatewayServiceDefinitionReadIsBoundedAndContextAware(t *testing.T
 	}
 }
 
+func TestServerGatewaySystemdExecStartRequiresExactEffectiveExecutable(t *testing.T) {
+	valid := "{ path=/usr/local/bin/punaro-telegram ; argv[]=/usr/local/bin/punaro-telegram ; ignore_errors=no ; start_time=[n/a] ; stop_time=[n/a] ; pid=0 ; code=(null) ; status=0/0 }\n"
+	if !serverGatewaySystemdExecStartBound(valid) {
+		t.Fatal("valid effective gateway ExecStart rejected")
+	}
+	for _, stale := range []string{
+		strings.Replace(valid, "/usr/local/bin/punaro-telegram", "/tmp/punaro-telegram", 1),
+		strings.Replace(valid, "argv[]=/usr/local/bin/punaro-telegram", "argv[]=/usr/local/bin/punaro-telegram doctor", 1),
+		valid + valid,
+		"",
+	} {
+		if serverGatewaySystemdExecStartBound(stale) {
+			t.Fatalf("stale effective gateway ExecStart accepted: %q", stale)
+		}
+	}
+}
+
 func TestServerDoctorRequiresReleasePostgreSQLMajor(t *testing.T) {
 	preserveDependencies(t)
 	directory := testInstallation(t)
