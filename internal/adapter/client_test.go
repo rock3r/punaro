@@ -161,6 +161,34 @@ func TestHTTPRelayClientDoctorProbeRequiresConfirmedOriginProtocol(t *testing.T)
 	}
 }
 
+func TestHTTPRelayClientDoctorEndpointBindsAssertionToSignature(t *testing.T) {
+	public, private, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	endpoint := "agent/a/session"
+	client, err := NewHTTPRelayClient("http://127.0.0.1:54321", "machine-a", private, &http.Client{Transport: roundTripperFunc(func(request *http.Request) (*http.Response, error) {
+		timestamp, parseErr := time.Parse(time.RFC3339Nano, request.Header.Get("X-Punaro-Timestamp"))
+		signature, signatureErr := base64.RawURLEncoding.DecodeString(request.Header.Get("X-Punaro-Signature"))
+		signed := relay.SignedRequest{MachineID: request.Header.Get("X-Punaro-Machine"), Method: request.Method, Path: request.URL.Path, Body: []byte(request.Header.Get(relay.DoctorEndpointHeader)), Timestamp: timestamp, Nonce: request.Header.Get("X-Punaro-Nonce")}
+		if parseErr != nil || signatureErr != nil || request.Header.Get(relay.DoctorEndpointHeader) != endpoint || !ed25519.Verify(public, relay.CanonicalRequest(signed), signature) {
+			t.Fatal("doctor endpoint assertion was not signed")
+		}
+		return testHTTPResponse(request, http.StatusNoContent, http.Header{
+			relay.ResponseNonceHeader:    {signed.Nonce},
+			relay.ProtocolHeader:         {strconv.Itoa(relay.ProtocolVersion)},
+			relay.DoctorAttachmentHeader: {"true"},
+		}), nil
+	})}, AccessServiceToken{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	result, err := client.DoctorEndpoint(t.Context(), endpoint)
+	if err != nil || !result.Attached || !result.Protocol || !result.Enrolled {
+		t.Fatalf("result=%#v err=%v", result, err)
+	}
+}
+
 func TestHTTPRelayClientDoctorProbeVerifiesAccessEnforcement(t *testing.T) {
 	_, private, err := ed25519.GenerateKey(rand.Reader)
 	if err != nil {

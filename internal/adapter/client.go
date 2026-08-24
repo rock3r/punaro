@@ -207,7 +207,7 @@ func (c *HTTPRelayClient) doctor(ctx context.Context, endpoint string) (DoctorPr
 		return DoctorProbeResult{}, err
 	}
 	timestamp := time.Now().UTC()
-	signed := relay.SignedRequest{MachineID: c.machineID, Method: http.MethodHead, Path: relay.DoctorPath, Timestamp: timestamp, Nonce: nonce}
+	signed := relay.SignedRequest{MachineID: c.machineID, Method: http.MethodHead, Path: relay.DoctorPath, Body: []byte(endpoint), Timestamp: timestamp, Nonce: nonce}
 	signed.Signature = ed25519.Sign(c.privateKey, relay.CanonicalRequest(signed))
 	target := c.baseURL.ResolveReference(&url.URL{Path: relay.DoctorPath})
 	request, err := http.NewRequestWithContext(ctx, http.MethodHead, target.String(), nil)
@@ -275,7 +275,7 @@ func (c *HTTPRelayClient) doctorAccessIsEnforced(ctx context.Context, endpoint s
 		return false
 	}
 	timestamp := time.Now().UTC()
-	signed := relay.SignedRequest{MachineID: c.machineID, Method: http.MethodHead, Path: relay.DoctorPath, Timestamp: timestamp, Nonce: nonce}
+	signed := relay.SignedRequest{MachineID: c.machineID, Method: http.MethodHead, Path: relay.DoctorPath, Body: []byte(endpoint), Timestamp: timestamp, Nonce: nonce}
 	signed.Signature = ed25519.Sign(c.privateKey, relay.CanonicalRequest(signed))
 	target := c.baseURL.ResolveReference(&url.URL{Path: relay.DoctorPath})
 	request, err := http.NewRequestWithContext(ctx, http.MethodHead, target.String(), nil)

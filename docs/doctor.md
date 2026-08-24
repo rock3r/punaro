@@ -311,6 +311,11 @@ Durable state and liveness: `state_integrity`, `conversation_route_integrity`,
 `terminal_inbound_rejection`, `terminal_outbound_rejection`,
 `stuck_head_delivery`, `message_less_update_stall`, `deleted_topic_target`,
 `transient_retry_stall`, `claim_backlog`, `claim_backlog_age`.
+Inbound poll-offset progress and outbound delivery-head progress use separate
+durable clocks, so continuous new Telegram updates cannot hide a repeatedly
+failing outbound head. Endpoint-specific relay attachment probes bind the exact
+asserted endpoint into the machine signature; changing that header invalidates
+the probe rather than exposing an endpoint-enumeration oracle.
 
 ### Fleet
 

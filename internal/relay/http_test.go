@@ -1191,3 +1191,40 @@ func TestHTTPDoctorProbeAuthenticatesWithoutDurableMutation(t *testing.T) {
 		t.Fatalf("durable nonces after notification probe=%d err=%v", nonces, err)
 	}
 }
+
+func TestHTTPDoctorEndpointAssertionIsBoundToSignature(t *testing.T) {
+	public, private, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	store, err := Open(filepath.Join(t.TempDir(), "relay.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+	auth, err := NewAuthenticator(store, []Machine{{ID: "machine-a", PublicKey: public, EndpointPrefixes: []string{"agent/a/"}}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	clock := time.Date(2026, time.July, 13, 12, 0, 0, 0, time.UTC)
+	handler := NewHandler(store, auth, HandlerOptions{Now: func() time.Time { return clock }})
+	signedEndpoint := "agent/a/session"
+	signed := signRequest(private, "machine-a", http.MethodHead, DoctorPath, []byte(signedEndpoint), clock, "endpoint-bound-doctor")
+	probe := func(endpoint string) *httptest.ResponseRecorder {
+		request := httptest.NewRequestWithContext(t.Context(), http.MethodHead, DoctorPath, nil)
+		request.Header.Set("X-Punaro-Machine", signed.MachineID)
+		request.Header.Set("X-Punaro-Timestamp", signed.Timestamp.Format(time.RFC3339Nano))
+		request.Header.Set("X-Punaro-Nonce", signed.Nonce)
+		request.Header.Set("X-Punaro-Signature", base64.RawURLEncoding.EncodeToString(signed.Signature))
+		request.Header.Set(DoctorEndpointHeader, endpoint)
+		response := httptest.NewRecorder()
+		handler.ServeHTTP(response, request)
+		return response
+	}
+	if response := probe(signedEndpoint); response.Code != http.StatusNoContent {
+		t.Fatalf("signed endpoint status=%d body=%q", response.Code, response.Body.String())
+	}
+	if response := probe("agent/a/other"); response.Code != http.StatusUnauthorized || response.Header().Get(DoctorAttachmentHeader) != "" {
+		t.Fatalf("mutated endpoint status=%d headers=%v", response.Code, response.Header())
+	}
+}

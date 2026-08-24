@@ -48,7 +48,9 @@ func (a *Authenticator) AttachmentDeviceID(machineID string) ([16]byte, bool) {
 }
 
 // SignedRequest is the complete application-level authentication envelope.
-// HTTP code builds it from headers and the exact bounded request body.
+// HTTP code builds it from headers and the exact bounded request body. The
+// read-only endpoint-specific doctor probe binds its asserted endpoint through
+// Body even though HEAD carries no wire body.
 type SignedRequest struct {
 	MachineID string
 	Method    string
@@ -328,7 +330,11 @@ func (a *Authenticator) AuthenticateReadOnlyDoctor(request *http.Request, body [
 	if err != nil || base64.RawURLEncoding.EncodeToString(signature) != signatureText {
 		return MachineSession{}, ErrForbidden
 	}
-	signed := SignedRequest{MachineID: request.Header.Get("X-Punaro-Machine"), Method: request.Method, Path: request.URL.Path, Timestamp: timestamp, Nonce: request.Header.Get("X-Punaro-Nonce"), Signature: signature}
+	signedBody := body
+	if request.Method == http.MethodHead && request.URL.Path == DoctorPath {
+		signedBody = []byte(request.Header.Get(DoctorEndpointHeader))
+	}
+	signed := SignedRequest{MachineID: request.Header.Get("X-Punaro-Machine"), Method: request.Method, Path: request.URL.Path, Body: signedBody, Timestamp: timestamp, Nonce: request.Header.Get("X-Punaro-Nonce"), Signature: signature}
 	machine, err := a.verifySignature(signed, now.UTC())
 	if err != nil {
 		return MachineSession{}, ErrForbidden

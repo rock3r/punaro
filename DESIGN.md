@@ -1045,6 +1045,13 @@ not expose a send idempotency key, so a crash after an accepted Telegram send
 and before relay acknowledgement is deliberately at-least-once. Agent text is
 rendered as escaped rich HTML with entity detection disabled and content
 protection set.
+Gateway health persists inbound poll-offset progress separately from outbound
+delivery-head progress. Only a completed relay acknowledgement advances the
+outbound clock during a failing cycle, so ongoing inbound traffic cannot mask a
+repeatedly failing outbound head. The endpoint-specific read-only doctor probe
+hashes the exact `X-Punaro-Doctor-Endpoint` value into the machine-signed
+canonical request; a proxy cannot change the asserted endpoint without making
+authentication fail.
 
 Product pings and replies to the human use `punaro-adapter send --to
 user-telegram`. The adapter resolves the session's sole claimed topic and
