@@ -45,6 +45,10 @@ fi
 if ! grep -Fq 'ARG PUNARO_RELEASE' "$repo_dir/Dockerfile" ||
 	! grep -Fq 'COPY .mcp.json mcp.json ./' "$repo_dir/Dockerfile" ||
 	! grep -Fq 'COPY scripts/punaro-plugin-mcp scripts/punaro-plugin-mcp.cmd ./scripts/' "$repo_dir/Dockerfile" ||
+	! grep -Fxq '!.mcp.json' "$repo_dir/.dockerignore" ||
+	! grep -Fxq '!mcp.json' "$repo_dir/.dockerignore" ||
+	! grep -Fxq '!scripts/punaro-plugin-mcp' "$repo_dir/.dockerignore" ||
+	! grep -Fxq '!scripts/punaro-plugin-mcp.cmd' "$repo_dir/.dockerignore" ||
 	! grep -Fq 'main.serverBuildRelease=${PUNARO_RELEASE}' "$repo_dir/Dockerfile" ||
 	! grep -Fq -- '--build-arg "PUNARO_IMAGE=$repository:$RELEASE"' "$repo_dir/.github/workflows/release.yml" ||
 	! grep -Fq 'org.opencontainers.image.version="${PUNARO_RELEASE}"' "$repo_dir/Dockerfile" ||
