@@ -22,6 +22,7 @@ import (
 	"time"
 
 	"github.com/rock3r/punaro/internal/adapter"
+	"github.com/rock3r/punaro/internal/bootstrap"
 	"github.com/rock3r/punaro/internal/clientidentity"
 	"github.com/rock3r/punaro/internal/clienttransport"
 	"github.com/rock3r/punaro/internal/relay"
@@ -100,6 +101,8 @@ func main() {
 		err = runMailboxMCP()
 	case os.Args[1] == "doctor":
 		os.Exit(runAdapterDoctor(os.Args[2:], os.Stdout, os.Stderr))
+	case os.Args[1] == "doctor-bootstrap-report":
+		os.Exit(bootstrap.RunDoctorHelper(os.Args[2:], os.Stdout))
 	case os.Args[1] == "doctor-plugin-inspect":
 		os.Exit(runAdapterPluginInspect(os.Args[2:], os.Stdout))
 	case os.Args[1] == "version":

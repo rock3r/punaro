@@ -26,6 +26,8 @@ const (
 
 var bootstrapBuildRelease string
 
+var bootstrapDoctorProbe = bootstrap.IsolatedDoctor
+
 type bootstrapExitError struct{ code int }
 
 func (err bootstrapExitError) Error() string { return "" }
@@ -53,7 +55,7 @@ func runBootstrapDoctor(args []string, stdout, stderr io.Writer) int {
 		}
 		keys = loaded
 	}
-	report, err := bootstrap.Doctor(ctx, bootstrap.DoctorRequest{Directory: *directory, MachineID: strings.TrimSpace(*machineID), Origin: strings.TrimSpace(*origin), Keys: keys, BootstrapRelease: bootstrapBuildRelease})
+	report, err := bootstrapDoctorProbe(ctx, bootstrap.DoctorRequest{Directory: *directory, MachineID: strings.TrimSpace(*machineID), Origin: strings.TrimSpace(*origin), Keys: keys, BootstrapRelease: bootstrapBuildRelease})
 	if err != nil {
 		_, _ = fmt.Fprintln(stderr, "punaro-bootstrap doctor failed: diagnostic report unavailable")
 		return 2

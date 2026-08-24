@@ -112,7 +112,7 @@ var (
 		return inspectAdapterBootstrapRelease(ctx, defaultAdapterBootstrapExecutable())
 	}
 	adapterDoctorBootstrapProbe = func(ctx context.Context, directory, bootstrapRelease string) (punarodiagnostic.Report, error) {
-		return bootstrap.Doctor(ctx, bootstrap.DoctorRequest{Directory: directory, BootstrapRelease: bootstrapRelease})
+		return bootstrap.IsolatedDoctor(ctx, bootstrap.DoctorRequest{Directory: directory, BootstrapRelease: bootstrapRelease})
 	}
 	adapterDoctorPluginProbe = inspectAdapterPluginIsolated
 )

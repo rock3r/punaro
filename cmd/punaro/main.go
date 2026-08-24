@@ -413,6 +413,8 @@ func run(args []string, stdout, stderr io.Writer) int {
 		return runDoctorDSNRead(args[1:], stdout)
 	case "doctor-path-check":
 		return runDoctorPathCheck(args[1:], stdout)
+	case "doctor-storage-check":
+		return runDoctorStorageCheck(args[1:], stdout)
 	case "client":
 		if len(args) > 1 && (args[1] == "invite" || args[1] == "add") {
 			return runClientAdd(args[2:], stdout, stderr)

@@ -620,6 +620,35 @@ func TestDoctorPathCheckCommandAndIsolationStayInsideDeadline(t *testing.T) {
 	}
 }
 
+func TestDoctorStorageCommandAndIsolationStayInsideDeadline(t *testing.T) {
+	if runtime.GOOS != "windows" {
+		var stdout bytes.Buffer
+		if code := runDoctorStorageCheck([]string{"--path", t.TempDir(), "--minimum", "1"}, &stdout); code != 0 {
+			t.Fatalf("storage helper code=%d", code)
+		}
+		var state knownDoctorBool
+		if json.Unmarshal(stdout.Bytes(), &state) != nil || !state.Known || !state.OK {
+			t.Fatalf("storage helper state=%#v output=%q", state, stdout.String())
+		}
+	}
+	if runtime.GOOS == "windows" {
+		return
+	}
+	blocker := filepath.Join(t.TempDir(), "blocked-storage-check")
+	if err := os.WriteFile(blocker, []byte("#!/bin/sh\nexec sleep 10\n"), 0o700); err != nil { // #nosec G306 -- private executable deadline fixture.
+		t.Fatal(err)
+	}
+	previous := serverDoctorStorageExecutable
+	serverDoctorStorageExecutable = func() (string, error) { return blocker, nil }
+	t.Cleanup(func() { serverDoctorStorageExecutable = previous })
+	ctx, cancel := context.WithTimeout(t.Context(), 20*time.Millisecond)
+	defer cancel()
+	started := time.Now()
+	if state := isolatedServerDoctorStorage(ctx, t.TempDir(), 1); state.Known || time.Since(started) > time.Second {
+		t.Fatalf("isolated storage state=%#v elapsed=%s", state, time.Since(started))
+	}
+}
+
 func TestUpRefusesActiveUpdateBeforeStartingWriters(t *testing.T) {
 	preserveDependencies(t)
 	directory := testInstallation(t)

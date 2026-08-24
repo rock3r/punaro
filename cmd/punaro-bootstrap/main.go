@@ -47,6 +47,11 @@ func run(args []string) error {
 			return bootstrapExitError{code: code}
 		}
 		return nil
+	case "doctor-bootstrap-report":
+		if code := bootstrap.RunDoctorHelper(args[1:], os.Stdout); code != 0 {
+			return bootstrapExitError{code: code}
+		}
+		return nil
 	case "fleet-doctor":
 		if code := runFleetDoctor(args[1:], os.Stdout, os.Stderr); code != 0 {
 			return bootstrapExitError{code: code}

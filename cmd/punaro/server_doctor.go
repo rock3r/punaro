@@ -59,9 +59,50 @@ type serverDoctorPathRequest struct {
 }
 
 var (
-	serverDoctorPathCheck      = isolatedServerDoctorPaths
-	serverDoctorPathExecutable = os.Executable
+	serverDoctorPathCheck         = isolatedServerDoctorPaths
+	serverDoctorPathExecutable    = os.Executable
+	serverDoctorStorageCheck      = isolatedServerDoctorStorage
+	serverDoctorStorageExecutable = os.Executable
 )
+
+func isolatedServerDoctorStorage(ctx context.Context, path string, minimum uint64) knownDoctorBool {
+	executable, err := serverDoctorStorageExecutable()
+	if err != nil {
+		return knownDoctorBool{}
+	}
+	output, ok := boundedCommandLimit(ctx, 256, executable, "doctor-storage-check", "--path", path, "--minimum", strconv.FormatUint(minimum, 10))
+	if !ok {
+		return knownDoctorBool{}
+	}
+	decoder := json.NewDecoder(strings.NewReader(output))
+	var state knownDoctorBool
+	if decoder.Decode(&state) != nil || decoder.Decode(&struct{}{}) != io.EOF || !state.Known {
+		return knownDoctorBool{}
+	}
+	return state
+}
+
+func directServerDoctorStorage(_ context.Context, path string, minimum uint64) knownDoctorBool {
+	return inspectServerStorage(path, minimum)
+}
+
+func runDoctorStorageCheck(args []string, stdout io.Writer) int {
+	flags := flag.NewFlagSet("punaro doctor-storage-check", flag.ContinueOnError)
+	flags.SetOutput(io.Discard)
+	path := flags.String("path", "", "installation data directory")
+	minimum := flags.Uint64("minimum", 0, "minimum available bytes")
+	if flags.Parse(args) != nil || flags.NArg() != 0 || *path == "" || !filepath.IsAbs(*path) || filepath.Clean(*path) != *path || *minimum == 0 {
+		return 2
+	}
+	state := inspectServerStorage(*path, *minimum)
+	if !state.Known {
+		return 1
+	}
+	if json.NewEncoder(stdout).Encode(state) != nil {
+		return 1
+	}
+	return 0
+}
 
 func encodeServerDoctorPathRequest(installation operator.Installation) (string, bool) {
 	body, err := json.Marshal(serverDoctorPathRequest{Directory: installation.Directory, Installation: installation})
@@ -228,7 +269,7 @@ func inspectServerDoctorState(parent context.Context, installation operator.Inst
 	state.ComposeBinding = fileDigestMatches(ctx, operator.OverrideFile(installation.Directory), serverBuildComposeSHA256)
 	state.MigrationBinding = known(serverBuildMigrationSHA256 != "", serverBuildMigrationSHA256 == punaropostgres.MigrationManifestSHA256())
 	state.RunningImage = inspectRunningImage(ctx, installation)
-	state.Storage = inspectServerStorage(installation.DataDir, serverDoctorMinimumFree)
+	state.Storage = serverDoctorStorageCheck(ctx, installation.DataDir, serverDoctorMinimumFree)
 	state.BackupAvailable, state.BackupFresh = inspectServerBackups(ctx, installation.BackupDir, time.Now().UTC())
 	state.HealthPrivate = known(true, listener.IsLoopback(installation.HealthListenAddr))
 	state.BlobPrivate = known(true, serverBlobTopologyPrivate(installation))

@@ -41,6 +41,38 @@ func TestDoctorVerifiesSignedSlotWithoutMutatingBootstrapState(t *testing.T) {
 	}
 }
 
+func TestDoctorHelperAndIsolationStayInsideDeadline(t *testing.T) {
+	directory := privateDir(t)
+	request, ok := encodeDoctorHelperRequest(DoctorRequest{Directory: directory, BootstrapRelease: "v0.1.0"})
+	if !ok {
+		t.Fatal("doctor helper request encoding failed")
+	}
+	var stdout strings.Builder
+	if code := RunDoctorHelper([]string{"--request", request}, &stdout); code != 0 {
+		t.Fatalf("doctor helper code=%d", code)
+	}
+	report, err := punarodiagnostic.Decode(strings.NewReader(stdout.String()))
+	if err != nil || report.Component != punarodiagnostic.ComponentBootstrap {
+		t.Fatalf("doctor helper report=%#v err=%v", report, err)
+	}
+	if runtime.GOOS == "windows" {
+		return
+	}
+	blocker := filepath.Join(t.TempDir(), "blocked-bootstrap-doctor")
+	if err := os.WriteFile(blocker, []byte("#!/bin/sh\nexec sleep 10\n"), 0o700); err != nil { // #nosec G306 -- private executable deadline fixture.
+		t.Fatal(err)
+	}
+	previous := doctorHelperExecutable
+	doctorHelperExecutable = func() (string, error) { return blocker, nil }
+	t.Cleanup(func() { doctorHelperExecutable = previous })
+	ctx, cancel := context.WithTimeout(t.Context(), 20*time.Millisecond)
+	defer cancel()
+	started := time.Now()
+	if _, err := IsolatedDoctor(ctx, DoctorRequest{Directory: directory}); err == nil || time.Since(started) > time.Second {
+		t.Fatalf("isolated doctor err=%v elapsed=%s", err, time.Since(started))
+	}
+}
+
 func TestDoctorFailsUnsafeLockAndInsufficientPreflightDiskWithoutChangingEither(t *testing.T) {
 	origin := newSignedOrigin(t, originSpec{payload: testArtifact, goos: runtime.GOOS, goarch: runtime.GOARCH})
 	directory := privateDir(t)

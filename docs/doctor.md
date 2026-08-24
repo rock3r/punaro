@@ -40,11 +40,13 @@ Skill-set digests length-prefix every relative path and file body so arbitrary
 skill bytes cannot create an ambiguous tree encoding. Explicit bootstrap public
 keys and bootstrap health state are read as bounded regular non-symlink files
 through the same diagnostic deadline and descriptor-identity checks.
-Server installation-path validation, PostgreSQL credential files, and adapter
-plugin trees are inspected in deadline-isolated child helpers. A stalled mount
-during `Lstat`, open, walk, or read therefore yields unavailable checks instead
-of extending the advertised total deadline; DSN values remain in a private
-parent/child pipe and are never printed in the report or logs.
+Server installation-path validation, storage-capacity inspection, PostgreSQL
+credential files, adapter plugin trees, and the complete bootstrap diagnostic
+are inspected in deadline-isolated child helpers. A stalled mount during
+`Lstat`, `Statfs`, open, walk, or read therefore yields unavailable checks (or
+no bootstrap report) instead of extending the advertised total deadline; DSN
+values remain in a private parent/child pipe and are never printed in the report
+or logs.
 
 ## Commands
 
@@ -276,8 +278,10 @@ pass from an unrelated matching string.
 `candidate_health`.
 
 Compose-manifest hashing and bootstrap slot inspection reject non-regular or
-linked paths before opening files, use bounded incremental reads, and honor the
-single command deadline between reads.
+linked paths before opening files and use bounded incremental reads. Both the
+standalone bootstrap doctor and the adapter's embedded bootstrap checks run the
+complete inspection in a deadline-isolated child, so a synchronous filesystem
+operation cannot outlive the single command deadline.
 
 ### Telegram gateway
 
