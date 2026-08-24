@@ -351,9 +351,11 @@ instead of extending the total doctor timeout. Durable state and liveness:
 `transient_retry_stall`, `claim_backlog`, `claim_backlog_age`.
 Inbound poll-offset progress and outbound delivery-head progress use separate
 durable clocks, so continuous new Telegram updates cannot hide a repeatedly
-failing outbound head. Endpoint-specific relay attachment probes bind the exact
-asserted endpoint into the machine signature; changing that header invalidates
-the probe rather than exposing an endpoint-enumeration oracle.
+failing outbound head. Once a head is blocked, failures in earlier advertise,
+poll, or lease phases preserve its age until a completed cycle or explicit
+outbound progress proves advancement. Endpoint-specific relay attachment probes
+bind the exact asserted endpoint into the machine signature; changing that
+header invalidates the probe rather than exposing an endpoint-enumeration oracle.
 
 ### Fleet
 

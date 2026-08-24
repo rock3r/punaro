@@ -189,8 +189,15 @@ func (s *State) RecordGatewayCycle(record GatewayCycleRecord) error {
 	if !first && previousOffset == record.Offset {
 		progressAt = previousProgress
 	}
+	outboundBlocked := record.OutboundBlocked
+	if !first && previousOutboundBlocked && record.Failure != GatewayFailureNone && !record.OutboundProgress {
+		// A failure before the outbound phase cannot prove that the known
+		// unacknowledged head advanced. Preserve its durable age until a full
+		// successful cycle or explicit outbound progress does prove that.
+		outboundBlocked = true
+	}
 	outboundProgressAt := now
-	if !first && record.OutboundBlocked && !record.OutboundProgress && previousOutboundBlocked {
+	if !first && outboundBlocked && !record.OutboundProgress && previousOutboundBlocked {
 		if previousOutboundProgress.Valid {
 			outboundProgressAt = previousOutboundProgress.Int64
 		} else {
@@ -236,7 +243,7 @@ func (s *State) RecordGatewayCycle(record GatewayCycleRecord) error {
 		last_failure=excluded.last_failure,
 		terminal_inbound=CASE WHEN excluded.last_failure='' THEN 0 ELSE gateway_health.terminal_inbound+excluded.terminal_inbound END,
 		terminal_outbound=CASE WHEN excluded.last_failure='' THEN 0 ELSE gateway_health.terminal_outbound+excluded.terminal_outbound END`,
-		now, successAt, pollAt, relayAt, telegramAt, progressAt, outboundProgressAt, record.Offset, record.OutboundBlocked, consecutiveDelta, string(record.Failure), inboundDelta, outboundDelta)
+		now, successAt, pollAt, relayAt, telegramAt, progressAt, outboundProgressAt, record.Offset, outboundBlocked, consecutiveDelta, string(record.Failure), inboundDelta, outboundDelta)
 	return err
 }
 

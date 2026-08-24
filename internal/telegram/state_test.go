@@ -156,6 +156,66 @@ func TestGatewayHealthOutboundStallIgnoresInboundOffsetProgress(t *testing.T) {
 	}
 }
 
+func TestGatewayHealthPreservesBlockedHeadAcrossEarlierPhaseFailures(t *testing.T) {
+	t.Parallel()
+	database := filepath.Join(t.TempDir(), "telegram.db")
+	state, err := Open(database)
+	if err != nil {
+		t.Fatal(err)
+	}
+	now := testCallbackNow
+	cycles := []GatewayCycleRecord{
+		{At: now, Offset: 8, PollOK: true, RelayOK: true, OutboundBlocked: true, Failure: GatewayFailureTransient},
+		{At: now.Add(4 * time.Minute), Offset: 9, Failure: GatewayFailureTransient},
+		{At: now.Add(9 * time.Minute), Offset: 10, Failure: GatewayFailureTransient},
+	}
+	for _, cycle := range cycles {
+		if err := state.RecordGatewayCycle(cycle); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := state.Close(); err != nil {
+		t.Fatal(err)
+	}
+	snapshot, err := InspectGatewayState(t.Context(), database, now.Add(10*time.Minute))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !snapshot.StuckHead {
+		t.Fatalf("earlier-phase failures cleared the blocked outbound head age: %#v", snapshot)
+	}
+}
+
+func TestGatewayHealthSuccessfulCycleClearsPreservedBlockedHead(t *testing.T) {
+	t.Parallel()
+	database := filepath.Join(t.TempDir(), "telegram.db")
+	state, err := Open(database)
+	if err != nil {
+		t.Fatal(err)
+	}
+	now := testCallbackNow
+	cycles := []GatewayCycleRecord{
+		{At: now, Offset: 8, PollOK: true, RelayOK: true, OutboundBlocked: true, Failure: GatewayFailureTransient},
+		{At: now.Add(time.Minute), Offset: 9, Failure: GatewayFailureTransient},
+		{At: now.Add(2 * time.Minute), Offset: 9, PollOK: true, RelayOK: true, TelegramOK: true},
+	}
+	for _, cycle := range cycles {
+		if err := state.RecordGatewayCycle(cycle); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := state.Close(); err != nil {
+		t.Fatal(err)
+	}
+	snapshot, err := InspectGatewayState(t.Context(), database, now.Add(10*time.Minute))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if snapshot.StuckHead || snapshot.ConsecutiveFailures != 0 {
+		t.Fatalf("successful cycle did not clear the blocked outbound head: %#v", snapshot)
+	}
+}
+
 func TestOpenMigratesOutboundProgressLedgerInPlace(t *testing.T) {
 	t.Parallel()
 	database := filepath.Join(t.TempDir(), "telegram.db")
