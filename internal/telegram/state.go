@@ -833,6 +833,17 @@ func (s *State) StageTerminalOutbound(deliveryID, conversationID string, class G
 	return tx.Commit()
 }
 
+// FinalizeTerminalOutbound removes retry-deduplication evidence only after the
+// relay has durably acknowledged the terminal delivery. Conversation-scoped
+// doctor evidence remains until that target later recovers.
+func (s *State) FinalizeTerminalOutbound(deliveryID string) error {
+	if strings.TrimSpace(deliveryID) == "" {
+		return fmt.Errorf("invalid terminal outbound delivery")
+	}
+	_, err := s.db.ExecContext(context.Background(), `DELETE FROM gateway_terminal_outbound_events WHERE delivery_id=?`, deliveryID)
+	return err
+}
+
 // RecoverTerminalOutbound clears a repaired conversation before its successful
 // delivery acknowledgement crosses the external relay boundary.
 func (s *State) RecoverTerminalOutbound(conversationID string) error {

@@ -221,6 +221,13 @@ func TestBridgeStagesPermanentDropBeforeRelayAcknowledgement(t *testing.T) {
 	if snapshot.TerminalOutbound != 1 {
 		t.Fatalf("terminal outbound drop was not durable before the cycle record: %#v", snapshot)
 	}
+	var stagedEvents int
+	if err := state.db.QueryRowContext(t.Context(), `SELECT COUNT(*) FROM gateway_terminal_outbound_events`).Scan(&stagedEvents); err != nil {
+		t.Fatal(err)
+	}
+	if stagedEvents != 0 {
+		t.Fatalf("acknowledged terminal event was retained: %d", stagedEvents)
+	}
 }
 
 func TestBridgePersistsOutboundRecoveryBeforeRelayAcknowledgement(t *testing.T) {
@@ -391,6 +398,13 @@ func TestBridgeWrapsDroppedDeliveryAckFailureWithCycleMetadata(t *testing.T) {
 	var cycleErr *GatewayCycleError
 	if !errors.As(err, &cycleErr) || cycleErr.Phase != GatewayPhaseAck || cycleErr.TerminalOutbound != 1 || !cycleErr.OutboundBlocked || cycleErr.OutboundProgress || fmt.Sprint(relayClient.acked) != "[poison]" {
 		t.Fatalf("err=%#v acked=%v", cycleErr, relayClient.acked)
+	}
+	var stagedEvents int
+	if err := state.db.QueryRowContext(t.Context(), `SELECT COUNT(*) FROM gateway_terminal_outbound_events`).Scan(&stagedEvents); err != nil {
+		t.Fatal(err)
+	}
+	if stagedEvents != 1 {
+		t.Fatalf("unacknowledged terminal event was not retained: %d", stagedEvents)
 	}
 }
 

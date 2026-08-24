@@ -183,6 +183,9 @@ func (b Bridge) SyncOnce(ctx context.Context, offset int64) (int64, error) {
 					return next, &GatewayCycleError{Phase: GatewayPhaseAck, TerminalInbound: terminalInbound, TerminalOutbound: terminalOutbound, InboundRecovery: inboundRecovery, OutboundRecovery: outboundRecovery, InboundTargetEvents: inboundTargetEvents, OutboundTargetEvents: outboundTargetEvents, OutboundBlocked: true, OutboundProgress: outboundProgress, Err: err}
 				}
 				outboundProgress = true
+				if err := b.State.FinalizeTerminalOutbound(delivery.ID); err != nil {
+					return next, &GatewayCycleError{Phase: GatewayPhaseAck, TerminalInbound: terminalInbound, TerminalOutbound: terminalOutbound, InboundRecovery: inboundRecovery, OutboundRecovery: outboundRecovery, InboundTargetEvents: inboundTargetEvents, OutboundTargetEvents: outboundTargetEvents, OutboundBlocked: true, OutboundProgress: outboundProgress, Err: fmt.Errorf("finalize acknowledged terminal telegram delivery: %w", err)}
+				}
 				continue
 			}
 			b.logEvent("telegram_send_err", "delivery_id="+delivery.ID)
