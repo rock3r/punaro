@@ -267,6 +267,8 @@ and a 30-second timeout. The current hook schema runs such hooks in the
 background, so agent work continues immediately while the adapter has enough
 time to finish parsing, normalizing, and syncing an event. A non-zero adapter
 exit is therefore a durability signal, not a control signal for Claude.
+The adapter captures the hook process invocation time before reading its stdin,
+so bounded input processing cannot reorder adjacent lifecycle timestamps.
 
 `CANOPI_SPOOL_DIR` is optional; when omitted, `prepare` creates
 `canopi-claude-spool` beside the token file. On Unix, the directory must belong

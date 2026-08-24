@@ -54,6 +54,13 @@ func runPrepare(getenv func(string) string) error {
 }
 
 func runHook(input io.Reader, getenv func(string) string, spawn func() error) error {
+	// Claude starts async hook processes at lifecycle boundaries. Capture the
+	// process invocation time before input processing so a slow provider payload
+	// cannot make an older lifecycle transition appear newer than one that follows.
+	return runHookAt(input, getenv, spawn, time.Now())
+}
+
+func runHookAt(input io.Reader, getenv func(string) string, spawn func() error, invokedAt time.Time) error {
 	if getenv("CANOPI_ENDPOINT") == "" || getenv("CANOPI_TOKEN_FILE") == "" || getenv("CANOPI_MACHINE_ID") == "" {
 		return nil
 	}
@@ -69,7 +76,7 @@ func runHook(input io.Reader, getenv func(string) string, spawn func() error) er
 		MachineLabel: getenv("CANOPI_MACHINE_LABEL"),
 		TaskTitle:    getenv("CANOPI_TASK_TITLE"),
 		Repository:   getenv("CANOPI_REPOSITORY"),
-	}, time.Now())
+	}, invokedAt)
 	if err != nil {
 		return err
 	}

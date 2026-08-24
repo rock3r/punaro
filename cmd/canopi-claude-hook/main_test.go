@@ -6,7 +6,9 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+	"time"
 
+	"github.com/rock3r/punaro/canopi/protocol"
 	"github.com/rock3r/punaro/internal/canopiadapter"
 )
 
@@ -85,5 +87,37 @@ func TestHookReturnsMalformedPayloadFailure(t *testing.T) {
 	}
 	if err := runHook(bytes.NewReader([]byte(`{"session_id":`)), func(key string) string { return environment[key] }, func() error { return nil }); err == nil {
 		t.Fatal("runHook() accepted malformed provider input")
+	}
+}
+
+func TestHookUsesInvocationTimeBeforeInputProcessing(t *testing.T) {
+	raw := []byte(`{"session_id":"session-1","cwd":"/src/punaro","hook_event_name":"PermissionRequest"}`)
+	environment := map[string]string{
+		"CANOPI_ENDPOINT":   "http://canopi.test",
+		"CANOPI_TOKEN_FILE": "/private/token",
+		"CANOPI_MACHINE_ID": "studio-m2",
+		"CANOPI_SPOOL_DIR":  t.TempDir(),
+	}
+	if err := runPrepare(func(key string) string { return environment[key] }); err != nil {
+		t.Fatal(err)
+	}
+	invokedAt := time.Date(2026, 8, 24, 9, 12, 0, 0, time.FixedZone("offset", 3600))
+	if err := runHookAt(bytes.NewReader(raw), func(key string) string { return environment[key] }, func() error { return nil }, invokedAt); err != nil {
+		t.Fatal(err)
+	}
+	files, err := filepath.Glob(filepath.Join(environment["CANOPI_SPOOL_DIR"], "*.json"))
+	if err != nil || len(files) != 1 {
+		t.Fatalf("spool files = %v, %v", files, err)
+	}
+	payload, err := os.ReadFile(files[0])
+	if err != nil {
+		t.Fatal(err)
+	}
+	event, err := protocol.DecodeEvent(bytes.NewReader(payload), 64<<10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !event.ActivityAt.Equal(invokedAt.UTC()) || !event.EmittedAt.Equal(invokedAt.UTC()) {
+		t.Fatalf("event timestamps = %s/%s, want invocation time %s", event.ActivityAt, event.EmittedAt, invokedAt.UTC())
 	}
 }
