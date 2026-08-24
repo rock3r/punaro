@@ -40,46 +40,6 @@ func privateStateFile(path string, info os.FileInfo) bool {
 	return info.Mode().IsRegular() && info.Mode()&os.ModeSymlink == 0 && privateStateWindowsACL(path)
 }
 
-func openStateFile(path string) (*os.File, error) {
-	name, err := windows.UTF16PtrFromString(path)
-	if err != nil {
-		return nil, err
-	}
-	handle, err := windows.CreateFile(name, windows.GENERIC_READ, windows.FILE_SHARE_READ, nil, windows.OPEN_EXISTING, windows.FILE_ATTRIBUTE_NORMAL|windows.FILE_FLAG_OPEN_REPARSE_POINT, 0) // #nosec G304 -- absolute operator-selected state path is validated before and after open.
-	if err != nil {
-		return nil, err
-	}
-	var details windows.ByHandleFileInformation
-	if err := windows.GetFileInformationByHandle(handle, &details); err != nil || details.FileAttributes&windows.FILE_ATTRIBUTE_REPARSE_POINT != 0 || details.FileAttributes&windows.FILE_ATTRIBUTE_DIRECTORY != 0 {
-		_ = windows.CloseHandle(handle)
-		if err != nil {
-			return nil, err
-		}
-		return nil, os.ErrInvalid
-	}
-	return os.NewFile(uintptr(handle), path), nil // #nosec G115 -- successful Win32 handles are nonnegative.
-}
-
-func openPrivateStateFile(path string) (*os.File, error) {
-	before, err := os.Lstat(path)
-	if err != nil {
-		return nil, err
-	}
-	if !privateStateFile(path, before) {
-		return nil, errors.New("canopi state must be a private current-user-owned regular file")
-	}
-	file, err := openStateFile(path)
-	if err != nil {
-		return nil, err
-	}
-	after, err := file.Stat()
-	if err != nil || !os.SameFile(before, after) || !privateStateFile(path, after) {
-		_ = file.Close()
-		return nil, errors.New("canopi state changed while opening")
-	}
-	return file, nil
-}
-
 func protectStateFile(path string, file *os.File) error {
 	if err := setPrivateStateACL(path); err != nil {
 		return err
