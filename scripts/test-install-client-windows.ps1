@@ -69,7 +69,16 @@ try {
             [TimeSpan]$RepetitionInterval,
             [TimeSpan]$RepetitionDuration
         )
-        return [pscustomobject]@{ User = $User; AtLogOn = [bool]$AtLogOn; Once = [bool]$Once; RepetitionInterval = $RepetitionInterval; RepetitionDuration = $RepetitionDuration }
+        return [pscustomobject]@{
+            User = $User
+            AtLogOn = [bool]$AtLogOn
+            Once = [bool]$Once
+            Repetition = [pscustomobject]@{
+                Interval = if ($null -eq $RepetitionInterval) { $null } else { $RepetitionInterval.ToString() }
+                Duration = if ($null -eq $RepetitionDuration) { $null } else { $RepetitionDuration.ToString() }
+                StopAtDurationEnd = $true
+            }
+        }
     }
     function New-ScheduledTaskPrincipal { param([string]$UserId, [string]$LogonType, [string]$RunLevel) return [pscustomobject]@{ UserId = $UserId } }
     function New-ScheduledTaskSettingsSet { param([switch]$AllowStartIfOnBatteries, [switch]$DontStopIfGoingOnBatteries, [switch]$Hidden, [TimeSpan]$ExecutionTimeLimit) return [pscustomobject]@{ ExecutionTimeLimit = $ExecutionTimeLimit; Hidden = $Hidden; RestartCount = 0; RestartInterval = [TimeSpan]::Zero } }
@@ -111,6 +120,17 @@ try {
         if (Test-Path -LiteralPath $path) { throw "Windows client installer must not create retired attachment artifact $path" }
     }
     if ($global:punaroRegisteredTask -ne 'Punaro Adapter') { throw 'Windows client installer did not register the expected per-user task' }
+    if (@($global:punaroRegisteredTriggers | Where-Object { $_.Once }).Count -ne 0 -or $global:punaroStartTaskCalled) {
+        throw 'Windows client installer armed or started a fresh adapter without -Enable'
+    }
+    $global:punaroRegisteredTriggers = $null
+    $global:punaroStartTaskCalled = $false
+    & (Join-Path $repoDir 'scripts\install-client.ps1') -RelayUrl 'https://relay.example.test' -MachineId 'windows-test' -AgentMailboxBin $mailbox -AgentGuidanceDir $project -Enable
+    if ($LASTEXITCODE -ne 0) { throw 'Windows client installer failed to enable the adapter task' }
+    $registeredRepeat = @($global:punaroRegisteredTriggers | Where-Object { $_.Once })
+    if (-not $global:punaroStartTaskCalled -or $registeredRepeat.Count -ne 1 -or $registeredRepeat[0].Repetition.Interval -ne 'PT1M' -or $registeredRepeat[0].Repetition.Duration -ne 'P3650D' -or $registeredRepeat[0].Repetition.StopAtDurationEnd) {
+        throw 'Windows client installer did not register an ISO 8601 repeating trigger'
+    }
     $global:punaroDisableTaskCalled = $false
     $global:punaroStartTaskCalled = $false
     $global:punaroRegisteredTriggers = $null

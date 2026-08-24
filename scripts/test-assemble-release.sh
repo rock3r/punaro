@@ -35,6 +35,11 @@ if ! grep -Fq 'build punaro-relay-adopt-prepare ./cmd/punaro-relay-adopt-prepare
 	printf '%s\n' 'linux release artifacts omit punaro-relay-adopt-prepare' >&2
 	exit 1
 fi
+windows_build=$(sed -n '/- runner:.*windows-latest/,+4p; /- runner:.*ubuntu-latest/,+4p' "$repo_dir/.github/workflows/release.yml" | grep -B4 -A1 'goos: windows' || true)
+if ! printf '%s\n' "$windows_build" | grep -Fq 'runner: ubuntu-latest' || printf '%s\n' "$windows_build" | grep -Fq 'runner: windows-latest'; then
+	printf '%s\n' 'Windows release artifacts must be cross-compiled from the canonical LF checkout' >&2
+	exit 1
+fi
 if ! grep -Fq -- '--provenance mode=max' "$repo_dir/.github/workflows/release.yml" ||
 	! grep -Fq -- '--sbom true' "$repo_dir/.github/workflows/release.yml" ||
 	! grep -Fq 'packages: write' "$repo_dir/.github/workflows/release.yml" ||

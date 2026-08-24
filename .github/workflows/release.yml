@@ -311,7 +311,10 @@ jobs:
             goos: linux
             goarch: arm64
             cgo: '0'
-          - runner: windows-latest
+          # Cross-compile from the same LF checkout used to assemble the
+          # portable plugin bundle. Native Windows checkout conversion changes
+          # the byte-bound skill/runtime digests embedded in the adapter.
+          - runner: ubuntu-latest
             goos: windows
             goarch: amd64
             cgo: '0'
