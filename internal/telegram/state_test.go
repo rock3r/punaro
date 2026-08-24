@@ -283,7 +283,7 @@ func TestOpenMigratesOutboundProgressLedgerInPlace(t *testing.T) {
 	}
 }
 
-func TestGatewayHealthClearsTerminalFailuresAfterSuccessfulRecovery(t *testing.T) {
+func TestGatewayHealthEmptyCyclePreservesTerminalFailures(t *testing.T) {
 	t.Parallel()
 	database := filepath.Join(t.TempDir(), "telegram.db")
 	state, err := Open(database)
@@ -298,6 +298,44 @@ func TestGatewayHealthClearsTerminalFailuresAfterSuccessfulRecovery(t *testing.T
 		now = now.Add(time.Minute)
 	}
 	if err := state.RecordGatewayCycle(GatewayCycleRecord{At: now, Offset: 9, PollOK: true, RelayOK: true, TelegramOK: true}); err != nil {
+		t.Fatal(err)
+	}
+	if err := state.Close(); err != nil {
+		t.Fatal(err)
+	}
+	snapshot, err := InspectGatewayState(t.Context(), database, now.Add(time.Minute))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if snapshot.TerminalInbound != 1 || snapshot.TerminalOutbound != 2 || snapshot.LastFailure != GatewayFailureDeletedTopic || snapshot.ConsecutiveFailures != 3 {
+		t.Fatalf("empty cycle cleared terminal state: %#v", snapshot)
+	}
+}
+
+func TestGatewayHealthClearsTerminalFailuresAfterPlaneRecovery(t *testing.T) {
+	t.Parallel()
+	database := filepath.Join(t.TempDir(), "telegram.db")
+	state, err := Open(database)
+	if err != nil {
+		t.Fatal(err)
+	}
+	now := testCallbackNow
+	for _, class := range []GatewayFailureClass{GatewayFailureInboundRelayPermanent, GatewayFailureOutboundTelegramPermanent, GatewayFailureDeletedTopic} {
+		if err := state.RecordGatewayCycle(GatewayCycleRecord{At: now, Offset: 8, Failure: class}); err != nil {
+			t.Fatal(err)
+		}
+		now = now.Add(time.Minute)
+	}
+	if err := state.RecordGatewayCycle(GatewayCycleRecord{At: now, Offset: 9, PollOK: true, RelayOK: true, TelegramOK: true, InboundRecovery: true}); err != nil {
+		t.Fatal(err)
+	}
+	var terminalInbound, terminalOutbound int
+	var lastFailure string
+	if err := state.db.QueryRowContext(t.Context(), `SELECT terminal_inbound,terminal_outbound,last_failure FROM gateway_health WHERE id=1`).Scan(&terminalInbound, &terminalOutbound, &lastFailure); err != nil || terminalInbound != 0 || terminalOutbound != 2 || GatewayFailureClass(lastFailure) != GatewayFailureDeletedTopic {
+		t.Fatalf("partial recovery inbound=%d outbound=%d failure=%q err=%v", terminalInbound, terminalOutbound, lastFailure, err)
+	}
+	now = now.Add(time.Minute)
+	if err := state.RecordGatewayCycle(GatewayCycleRecord{At: now, Offset: 9, PollOK: true, RelayOK: true, TelegramOK: true, OutboundRecovery: true}); err != nil {
 		t.Fatal(err)
 	}
 	if err := state.Close(); err != nil {

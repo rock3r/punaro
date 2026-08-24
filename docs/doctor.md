@@ -356,7 +356,9 @@ poll, or lease phases preserve its age until a completed cycle or explicit
 outbound progress proves advancement. Terminal inbound and outbound drops are
 persisted even when the gateway safely continues the rest of the page or leased
 delivery batch, so poison-item progress cannot make either rejection check look
-healthy. Endpoint-specific relay attachment probes
+healthy. Empty poll/lease cycles preserve that terminal state; it clears per
+plane only after a real inbound submission or outbound send demonstrates
+recovery. Endpoint-specific relay attachment probes
 bind the exact asserted endpoint into the machine signature; changing that
 header invalidates the probe rather than exposing an endpoint-enumeration oracle.
 

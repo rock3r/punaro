@@ -82,8 +82,9 @@ func TestBridgeSyncsInboundAndOutboundThroughOneAttachedGatewayEndpoint(t *testi
 		Sender: richSender,
 	}
 	next, err := bridge.SyncOnce(context.Background(), 10)
-	if err != nil {
-		t.Fatal(err)
+	var cycleErr *GatewayCycleError
+	if !errors.As(err, &cycleErr) || !cycleErr.NonFatal || cycleErr.Err != nil || !cycleErr.InboundRecovery || !cycleErr.OutboundRecovery {
+		t.Fatalf("err=%#v", cycleErr)
 	}
 	if next != 11 || submitted != 1 || len(relayClient.advertised) != 1 || relayClient.advertised[0] != "telegram/gateway" || len(relayClient.acked) != 1 || relayClient.acked[0] != "delivery-1" || len(richSender.html) != 1 {
 		t.Fatalf("next=%d submitted=%d advertised=%#v acked=%#v sent=%#v", next, submitted, relayClient.advertised, relayClient.acked, richSender.html)
@@ -221,6 +222,30 @@ func TestBridgeReportsPermanentInboundDropAfterContinuingPage(t *testing.T) {
 	var cycleErr *GatewayCycleError
 	if next != 12 || fmt.Sprint(submitted) != "[poison later]" || !errors.As(err, &cycleErr) || !cycleErr.NonFatal || cycleErr.Phase != GatewayPhaseInbound || cycleErr.TerminalInbound != 1 || cycleErr.TerminalOutbound != 0 || ClassifyGatewayCycleFailure(err) != GatewayFailureInboundRelayPermanent {
 		t.Fatalf("next=%d submitted=%v err=%#v", next, submitted, cycleErr)
+	}
+}
+
+func TestBridgeReportsPlaneRecoveryEvidence(t *testing.T) {
+	t.Parallel()
+	state, err := Open(filepath.Join(t.TempDir(), "telegram.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = state.Close() })
+	if err := state.SetRoute(55, 7, "conversation-1"); err != nil {
+		t.Fatal(err)
+	}
+	relayClient := &fakeBridgeRelay{deliveries: []relay.Delivery{{ID: "delivery-1", Message: relay.Message{ConversationID: "conversation-1", FromEndpoint: "agent/a", Body: "reply"}}}}
+	bridge := Bridge{
+		Relay: relayClient, Endpoint: relay.TelegramGatewayEndpoint, State: state,
+		Poller:  fakePoller{updates: []Update{{ID: 10, UserID: 55, ChatID: 55, ThreadID: 7, Text: "hello"}}},
+		Gateway: Gateway{AllowedUserID: 55, State: state, Submit: func(context.Context, Submission) error { return nil }},
+		Sender:  &scriptedRichSender{},
+	}
+	next, err := bridge.SyncOnce(t.Context(), 10)
+	var cycleErr *GatewayCycleError
+	if next != 11 || !errors.As(err, &cycleErr) || !cycleErr.NonFatal || cycleErr.Err != nil || !cycleErr.InboundRecovery || !cycleErr.OutboundRecovery || ClassifyGatewayCycleFailure(err) != GatewayFailureNone {
+		t.Fatalf("next=%d err=%#v", next, cycleErr)
 	}
 }
 
@@ -397,8 +422,9 @@ func TestBridgeResumesIncompleteClaimBeforePollingInbound(t *testing.T) {
 		Claims: executor,
 	}
 	next, err := bridge.SyncOnce(context.Background(), 30)
-	if err != nil {
-		t.Fatal(err)
+	var cycleErr *GatewayCycleError
+	if !errors.As(err, &cycleErr) || !cycleErr.NonFatal || cycleErr.Err != nil || !cycleErr.InboundRecovery || cycleErr.OutboundRecovery {
+		t.Fatalf("err=%#v", cycleErr)
 	}
 	resume, found, err := state.ClaimExecution("conversation-stuck")
 	if err != nil || !found || resume.Phase != ClaimPhaseComplete {

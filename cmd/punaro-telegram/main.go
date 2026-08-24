@@ -243,6 +243,8 @@ func failedGatewayCycleRecord(at time.Time, offset int64, err error) telegram.Ga
 	if errors.As(err, &cycleErr) {
 		record.TerminalInbound = cycleErr.TerminalInbound
 		record.TerminalOutbound = cycleErr.TerminalOutbound
+		record.InboundRecovery = cycleErr.InboundRecovery
+		record.OutboundRecovery = cycleErr.OutboundRecovery
 		record.OutboundBlocked = cycleErr.OutboundBlocked
 		record.OutboundProgress = cycleErr.OutboundProgress
 		if cycleErr.NonFatal {

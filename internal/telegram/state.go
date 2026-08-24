@@ -137,6 +137,8 @@ type GatewayCycleRecord struct {
 	OutboundProgress bool
 	TerminalInbound  int
 	TerminalOutbound int
+	InboundRecovery  bool
+	OutboundRecovery bool
 	Failure          GatewayFailureClass
 }
 
@@ -180,9 +182,11 @@ func (s *State) RecordGatewayCycle(record GatewayCycleRecord) error {
 	}
 	now := record.At.UTC().UnixMilli()
 	var previousOffset, previousProgress int64
+	var previousConsecutive, previousTerminalInbound, previousTerminalOutbound int
+	var previousFailure string
 	var previousOutboundProgress sql.NullInt64
 	var previousOutboundBlocked bool
-	err := s.db.QueryRowContext(context.Background(), `SELECT offset,last_progress_at,last_outbound_progress_at,outbound_blocked FROM gateway_health WHERE id = 1`).Scan(&previousOffset, &previousProgress, &previousOutboundProgress, &previousOutboundBlocked)
+	err := s.db.QueryRowContext(context.Background(), `SELECT offset,last_progress_at,last_outbound_progress_at,outbound_blocked,consecutive_failures,last_failure,terminal_inbound,terminal_outbound FROM gateway_health WHERE id = 1`).Scan(&previousOffset, &previousProgress, &previousOutboundProgress, &previousOutboundBlocked, &previousConsecutive, &previousFailure, &previousTerminalInbound, &previousTerminalOutbound)
 	first := errors.Is(err, sql.ErrNoRows)
 	if err != nil && !first {
 		return err
@@ -207,10 +211,8 @@ func (s *State) RecordGatewayCycle(record GatewayCycleRecord) error {
 		}
 	}
 	successAt, pollAt, relayAt, telegramAt := any(nil), any(nil), any(nil), any(nil)
-	consecutiveDelta := 1
 	if record.Failure == GatewayFailureNone {
 		successAt = now
-		consecutiveDelta = 0
 	}
 	if record.PollOK {
 		pollAt = now
@@ -228,6 +230,37 @@ func (s *State) RecordGatewayCycle(record GatewayCycleRecord) error {
 	if outboundDelta == 0 && (record.Failure == GatewayFailureOutboundTelegramPermanent || record.Failure == GatewayFailureDeletedTopic) {
 		outboundDelta = 1
 	}
+	terminalInbound, terminalOutbound := inboundDelta, outboundDelta
+	if !first {
+		terminalInbound += previousTerminalInbound
+		terminalOutbound += previousTerminalOutbound
+	}
+	if inboundDelta == 0 && record.InboundRecovery {
+		terminalInbound = 0
+	}
+	if outboundDelta == 0 && record.OutboundRecovery {
+		terminalOutbound = 0
+	}
+	effectiveFailure := record.Failure
+	if effectiveFailure == GatewayFailureNone && (terminalInbound > 0 || terminalOutbound > 0) {
+		previousClass := GatewayFailureClass(previousFailure)
+		switch {
+		case terminalOutbound > 0 && (previousClass == GatewayFailureOutboundTelegramPermanent || previousClass == GatewayFailureDeletedTopic):
+			effectiveFailure = previousClass
+		case terminalInbound > 0 && previousClass == GatewayFailureInboundRelayPermanent:
+			effectiveFailure = previousClass
+		case terminalOutbound > 0:
+			effectiveFailure = GatewayFailureOutboundTelegramPermanent
+		default:
+			effectiveFailure = GatewayFailureInboundRelayPermanent
+		}
+	}
+	consecutiveFailures := 0
+	if record.Failure != GatewayFailureNone {
+		consecutiveFailures = previousConsecutive + 1
+	} else if effectiveFailure != GatewayFailureNone {
+		consecutiveFailures = previousConsecutive
+	}
 	_, err = s.db.ExecContext(context.Background(), `INSERT INTO gateway_health(
 		id,last_cycle_at,last_success_at,last_poll_at,last_relay_at,last_telegram_at,last_progress_at,last_outbound_progress_at,offset,outbound_blocked,consecutive_failures,last_failure,terminal_inbound,terminal_outbound
 	) VALUES (1,?,?,?,?,?,?,?,?,?,?,?,?,?)
@@ -241,11 +274,11 @@ func (s *State) RecordGatewayCycle(record GatewayCycleRecord) error {
 		last_outbound_progress_at=excluded.last_outbound_progress_at,
 		offset=excluded.offset,
 		outbound_blocked=excluded.outbound_blocked,
-		consecutive_failures=CASE WHEN excluded.last_failure='' THEN 0 ELSE gateway_health.consecutive_failures+1 END,
+		consecutive_failures=excluded.consecutive_failures,
 		last_failure=excluded.last_failure,
-		terminal_inbound=CASE WHEN excluded.last_failure='' THEN 0 ELSE gateway_health.terminal_inbound+excluded.terminal_inbound END,
-		terminal_outbound=CASE WHEN excluded.last_failure='' THEN 0 ELSE gateway_health.terminal_outbound+excluded.terminal_outbound END`,
-		now, successAt, pollAt, relayAt, telegramAt, progressAt, outboundProgressAt, record.Offset, outboundBlocked, consecutiveDelta, string(record.Failure), inboundDelta, outboundDelta)
+		terminal_inbound=excluded.terminal_inbound,
+		terminal_outbound=excluded.terminal_outbound`,
+		now, successAt, pollAt, relayAt, telegramAt, progressAt, outboundProgressAt, record.Offset, outboundBlocked, consecutiveFailures, string(effectiveFailure), terminalInbound, terminalOutbound)
 	return err
 }
 

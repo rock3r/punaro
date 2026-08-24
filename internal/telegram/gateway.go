@@ -57,15 +57,16 @@ type OperatorNotify interface {
 // Gateway applies authorization, replay, and exact-topic routing policy to
 // Telegram updates before submitting opaque text to the relay.
 type Gateway struct {
-	AllowedUserID int64
-	State         *State
-	Submit        func(context.Context, Submission) error
-	ListUnclaimed func(context.Context) ([]relay.UnclaimedTopic, error)
-	Notify        OperatorNotify
-	Claims        *ClaimExecutor
-	Now           func() time.Time
-	Log           func(string, ...any)
-	terminalDrop  func(error)
+	AllowedUserID   int64
+	State           *State
+	Submit          func(context.Context, Submission) error
+	ListUnclaimed   func(context.Context) ([]relay.UnclaimedTopic, error)
+	Notify          OperatorNotify
+	Claims          *ClaimExecutor
+	Now             func() time.Time
+	Log             func(string, ...any)
+	terminalDrop    func(error)
+	inboundRecovery func()
 }
 
 // Handle never turns Telegram text into control input. Commands are accepted
@@ -124,6 +125,9 @@ func (g Gateway) Handle(ctx context.Context, update Update) error {
 			return nil
 		}
 		return fmt.Errorf("submit telegram message: %w", err)
+	}
+	if g.inboundRecovery != nil {
+		g.inboundRecovery()
 	}
 	if err := g.State.MarkProcessed(update.ID); err != nil {
 		return fmt.Errorf("record telegram update: %w", err)

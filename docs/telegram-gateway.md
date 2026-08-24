@@ -314,7 +314,9 @@ liveness clock and carries the terminal outbound outcome into the durable
 gateway-health record; an acknowledgement failure remains an explicit blocked
 ack-phase cycle. A deleted Telegram thread therefore fails closed and is
 dropped; repair the explicit route rather than recreating a thread
-automatically. Telegram 401, 429, 5xx, and network failures leave the delivery
+automatically. Empty cycles do not clear either terminal health outcome; a
+successful operation on the affected inbound or outbound plane does. Telegram
+401, 429, 5xx, and network failures leave the delivery
 unacknowledged for retry. The returned `message_id` is stored in the outbound
 map. The bridge renders opaque agent content as escaped
 HTML, disables automatic entity detection, and asks Telegram to protect
