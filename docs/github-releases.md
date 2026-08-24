@@ -107,6 +107,13 @@ Only the offline-signature publisher can make those stable assets visible.
      -f minimum_bootstrap_release=v0.1.0-alpha.1
    ```
 
+   Before any image or GitHub release mutation, the preflight job runs the
+   release library's canonical request validator. Product, bootstrap, and
+   supported-source names must be `v`-prefixed SemVer; repeated supported
+   sources and critical blocks are rejected. If a live catalog exists, the
+   same preflight also authenticates it and validates monotonic advancement
+   and retained rollback coverage.
+
    `minimum_bootstrap_release` is the oldest fixed, installer-owned bootstrap
    executable that can safely supervise the target release. Keep it at
    `v0.1.0-alpha.1` for alpha.2 unless the bootstrap protocol actually becomes

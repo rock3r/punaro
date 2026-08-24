@@ -125,6 +125,21 @@ jobs:
             done
           fi
           supported_from=$INPUT_SUPPORTED_FROM
+          request_args=(
+            --release "$release"
+            --sequence "$sequence"
+            --catalog-sequence "$catalog_sequence"
+            --minimum-bootstrap-release "$minimum_bootstrap_release"
+          )
+          if [ -n "$minimum_safe_sequence" ]; then
+            request_args+=(--minimum-safe-sequence "$minimum_safe_sequence")
+          fi
+          if [ -n "$critical_blocks" ]; then
+            IFS=, read -r -a blocks <<<"$critical_blocks"
+            for block in "${blocks[@]}"; do
+              request_args+=(--critical-block "$block")
+            done
+          fi
           if [ -n "$supported_from" ]; then
             IFS=, read -r -a sources <<<"$supported_from"
             if [ "${#sources[@]}" -gt 32 ]; then
@@ -140,8 +155,10 @@ jobs:
                 printf '%s\n' 'the target release cannot be its own upgrade source' >&2
                 exit 2
               fi
+              request_args+=(--supported-from "$source")
             done
           fi
+          go run ./cmd/punaro-release validate-request "${request_args[@]}"
           if gh release view "$release" >/dev/null 2>&1; then
             printf '%s\n' "release $release already exists" >&2
             exit 2

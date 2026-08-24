@@ -49,6 +49,7 @@ if ! grep -Fq '  preflight:' "$repo_dir/.github/workflows/release.yml" ||
 	! grep -Fq 'needs.preflight.outputs.minimum_safe_sequence' "$repo_dir/.github/workflows/release.yml" ||
 	! grep -Fq 'gh release view "$release"' "$repo_dir/.github/workflows/release.yml" ||
 	! printf '%s\n' "$preflight_job" | grep -Fq 'gh release download catalog --pattern punaro-catalog.sig' ||
+	! printf '%s\n' "$preflight_job" | grep -Fq 'punaro-release validate-request' ||
 	! printf '%s\n' "$preflight_job" | grep -Fq 'punaro-release validate-advancement'; then
 	printf '%s\n' 'release workflow does not validate every release input before the image job' >&2
 	exit 1

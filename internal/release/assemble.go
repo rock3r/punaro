@@ -44,6 +44,24 @@ type Assembled struct {
 	CatalogJSON  []byte
 }
 
+// ValidatePublicationRequest canonically validates operator-supplied release
+// identity and policy before a workflow performs any external mutation.
+func ValidatePublicationRequest(release, minimumBootstrapRelease string, supportedFrom []string, sequence, catalogSequence, minimumSafe int64, criticalBlocks []int64) error {
+	if sequence < 1 || catalogSequence < 1 || minimumSafe < 0 || minimumSafe > sequence {
+		return errors.New("release request is invalid")
+	}
+	if err := validateReleasePolicy(release, minimumBootstrapRelease, supportedFrom); err != nil {
+		return errors.New("release request is invalid")
+	}
+	if minimumSafe == 0 {
+		minimumSafe = sequence
+	}
+	if _, _, err := replacementCatalogEntries(nil, release, sequence, catalogSequence, minimumSafe, criticalBlocks, 1, strings.Repeat("0", sha256.Size*2)); err != nil {
+		return errors.New("release request is invalid")
+	}
+	return nil
+}
+
 // Assemble scans a directory of native artifacts and writes the unsigned
 // catalog and manifest bootstrap will later verify. It performs no network I/O
 // and does not sign.

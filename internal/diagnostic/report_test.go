@@ -57,7 +57,7 @@ func TestNewReportRejectsUnboundedOrUnstableFields(t *testing.T) {
 }
 
 func TestNewReportUsesSignedReleaseNameContract(t *testing.T) {
-	if _, err := New(ComponentAdapter, Identity{Release: "v1x.2y.3z", PluginVersion: "plugin+alpha"}, []Check{Pass("ok")}); err != nil {
+	if _, err := New(ComponentAdapter, Identity{Release: "v1.2.3-rc.1+darwin.arm64", PluginVersion: "v1.2.3-rc.1+darwin.arm64"}, []Check{Pass("ok")}); err != nil {
 		t.Fatalf("signed-release identity rejected by diagnostics: %v", err)
 	}
 }

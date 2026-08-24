@@ -116,6 +116,29 @@ func TestReleaseToolBoundsSupportedFromInputs(t *testing.T) {
 	}
 }
 
+func TestReleaseToolCanonicallyValidatesPolicyBeforePublication(t *testing.T) {
+	valid := []string{
+		"validate-request",
+		"--release", "v0.1.0-alpha.2",
+		"--sequence", "2",
+		"--catalog-sequence", "2",
+		"--minimum-bootstrap-release", "v0.1.0-alpha.1",
+		"--supported-from", "v0.1.0-alpha.1",
+	}
+	if err := run(valid); err != nil {
+		t.Fatalf("valid release policy rejected: %v", err)
+	}
+	for _, invalid := range [][]string{
+		{"validate-request", "--release", "v1..2.3", "--sequence", "2", "--catalog-sequence", "2", "--minimum-bootstrap-release", "v0.1.0"},
+		{"validate-request", "--release", "v0.1.0", "--sequence", "2", "--catalog-sequence", "2", "--minimum-bootstrap-release", "v1.2.3junk"},
+		{"validate-request", "--release", "v0.1.0", "--sequence", "2", "--catalog-sequence", "2", "--minimum-bootstrap-release", "v0.1.0", "--supported-from", "v0.0.9", "--supported-from", "v0.0.9"},
+	} {
+		if err := run(invalid); err == nil {
+			t.Fatalf("invalid release policy accepted: %v", invalid)
+		}
+	}
+}
+
 func TestReleaseToolValidatesLiveCatalogAdvancementBeforeBuild(t *testing.T) {
 	directory := t.TempDir()
 	if err := os.WriteFile(filepath.Join(directory, "punaro-adapter-linux-amd64"), []byte("adapter"), 0o600); err != nil {

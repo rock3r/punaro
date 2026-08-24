@@ -43,12 +43,12 @@ func validReleaseManifestJSON() string {
 }
 
 func TestValidProductReleaseNameDefinesSharedIdentityContract(t *testing.T) {
-	for _, name := range []string{"v0.1.0-alpha.1", "v1x.2y.3z", "plugin+alpha"} {
+	for _, name := range []string{"v0.1.0-alpha.1", "v1.2.3", "v1.2.3-rc.1+darwin.arm64"} {
 		if !ValidProductReleaseName(name) {
 			t.Fatalf("valid release name rejected: %q", name)
 		}
 	}
-	for _, name := range []string{"", "latest", CatalogReleaseName, LocalCheckoutRelease, "release/name", "release secret"} {
+	for _, name := range []string{"", "latest", CatalogReleaseName, LocalCheckoutRelease, "release/name", "release secret", "v1..2.3", "v1.2.3junk", "v01.2.3", "v1.2.3-01", "plugin+alpha"} {
 		if ValidProductReleaseName(name) {
 			t.Fatalf("invalid release name accepted: %q", name)
 		}
