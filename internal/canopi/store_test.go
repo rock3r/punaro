@@ -352,6 +352,9 @@ func TestWindowsStateLockIdentityContractIsCaseInsensitive(t *testing.T) {
 			t.Fatalf("Windows state lock identity is missing %q", required)
 		}
 	}
+	if strings.Contains(source, "strings.ToLower(filepath.Join(parent, filepath.Base(path)))") {
+		t.Fatal("Windows canonical state path folds case before persistence")
+	}
 }
 
 func TestWindowsStateLockUsesExclusiveNoReparseOpens(t *testing.T) {
@@ -360,7 +363,7 @@ func TestWindowsStateLockUsesExclusiveNoReparseOpens(t *testing.T) {
 		t.Fatal(err)
 	}
 	source := string(payload)
-	for _, required := range []string{"CREATE_NEW", "OPEN_EXISTING", "FILE_FLAG_OPEN_REPARSE_POINT", "FILE_ATTRIBUTE_REPARSE_POINT", "CreateMutex", "WaitForSingleObject", "LockOSThread", "strings.ToLower"} {
+	for _, required := range []string{"CREATE_NEW", "OPEN_EXISTING", "FILE_FLAG_OPEN_REPARSE_POINT", "FILE_ATTRIBUTE_REPARSE_POINT", "CreateMutex", "WaitForSingleObject", "LockOSThread", "strings.ToLower", "Global\\\\CanopiStateRepair-"} {
 		if !strings.Contains(source, required) {
 			t.Fatalf("Windows state lock open is missing %q", required)
 		}

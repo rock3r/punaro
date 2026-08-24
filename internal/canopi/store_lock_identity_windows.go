@@ -11,11 +11,19 @@ import (
 )
 
 func canonicalStateLockIdentity(path string) (string, error) {
+	canonical, err := canonicalStatePath(path)
+	if err != nil {
+		return "", err
+	}
+	return strings.ToLower(canonical), nil
+}
+
+func canonicalStatePath(path string) (string, error) {
 	parent, err := finalWindowsPath(filepath.Dir(path))
 	if err != nil {
 		return "", err
 	}
-	return strings.ToLower(filepath.Join(parent, filepath.Base(path))), nil
+	return filepath.Join(parent, filepath.Base(path)), nil
 }
 
 func finalWindowsPath(path string) (string, error) {

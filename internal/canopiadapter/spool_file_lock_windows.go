@@ -24,7 +24,7 @@ func withSpoolRepairLock(ctx context.Context, path string, repair func() error) 
 		return err
 	}
 	digest := sha256.Sum256([]byte(identity))
-	name, err := windows.UTF16PtrFromString("Local\\CanopiSpoolRepair-" + hex.EncodeToString(digest[:]))
+	name, err := windows.UTF16PtrFromString("Global\\CanopiSpoolRepair-" + hex.EncodeToString(digest[:]))
 	if err != nil {
 		return err
 	}

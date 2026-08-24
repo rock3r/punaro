@@ -24,8 +24,16 @@ func spoolEvent(id string) protocol.Event {
 	}
 }
 
+func preparedTestSpool(t *testing.T, spool Spool) Spool {
+	t.Helper()
+	if err := spool.Prepare(); err != nil {
+		t.Fatal(err)
+	}
+	return spool
+}
+
 func TestSpoolRetainsFailedDeliveryAndRetriesSameEvent(t *testing.T) {
-	spool := Spool{Directory: t.TempDir(), MaxEvents: 4, RetryMin: time.Millisecond, RetryMax: time.Millisecond}
+	spool := preparedTestSpool(t, Spool{Directory: t.TempDir(), MaxEvents: 4, RetryMin: time.Millisecond, RetryMax: time.Millisecond})
 	input := spoolEvent("event-stable")
 	if err := spool.Enqueue(input); err != nil {
 		t.Fatal(err)
@@ -60,7 +68,7 @@ func TestSpoolRetainsFailedDeliveryAndRetriesSameEvent(t *testing.T) {
 }
 
 func TestSpoolMovesPastRejectedEventWithoutDroppingIt(t *testing.T) {
-	spool := Spool{Directory: t.TempDir(), MaxEvents: 4, RetryMin: time.Millisecond, RetryMax: time.Millisecond}
+	spool := preparedTestSpool(t, Spool{Directory: t.TempDir(), MaxEvents: 4, RetryMin: time.Millisecond, RetryMax: time.Millisecond})
 	if err := spool.Enqueue(spoolEvent("event-a")); err != nil {
 		t.Fatal(err)
 	}
@@ -100,7 +108,7 @@ func TestSpoolMovesPastRejectedEventWithoutDroppingIt(t *testing.T) {
 }
 
 func TestSpoolIsBoundedAndDuplicateEnqueueIsIdempotent(t *testing.T) {
-	spool := Spool{Directory: t.TempDir(), MaxEvents: 1}
+	spool := preparedTestSpool(t, Spool{Directory: t.TempDir(), MaxEvents: 1})
 	if err := spool.Enqueue(spoolEvent("event-a")); err != nil {
 		t.Fatal(err)
 	}
@@ -118,7 +126,7 @@ func TestSpoolEnqueueReclaimsTemporaryFileLeftByCrash(t *testing.T) {
 	if err := os.WriteFile(orphan, []byte("partial"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	spool := Spool{Directory: directory, MaxEvents: 1}
+	spool := preparedTestSpool(t, Spool{Directory: directory, MaxEvents: 1})
 	if err := spool.Enqueue(spoolEvent("event-after-crash")); err != nil {
 		t.Fatal(err)
 	}
@@ -181,7 +189,7 @@ func TestWindowsSpoolLocksUseExclusiveNoReparseOpens(t *testing.T) {
 		t.Fatal(err)
 	}
 	source := string(payload)
-	for _, required := range []string{"CREATE_NEW", "OPEN_EXISTING", "FILE_FLAG_OPEN_REPARSE_POINT", "FILE_ATTRIBUTE_REPARSE_POINT", "CreateMutex", "WaitForSingleObject", "LockOSThread", "GetFinalPathNameByHandle", "strings.ToLower"} {
+	for _, required := range []string{"CREATE_NEW", "OPEN_EXISTING", "FILE_FLAG_OPEN_REPARSE_POINT", "FILE_ATTRIBUTE_REPARSE_POINT", "CreateMutex", "WaitForSingleObject", "LockOSThread", "GetFinalPathNameByHandle", "strings.ToLower", "Global\\\\CanopiSpoolRepair-"} {
 		if !strings.Contains(source, required) {
 			t.Fatalf("Windows spool lock open is missing %q", required)
 		}
@@ -206,7 +214,7 @@ func TestSpoolQueuedEventReadsAreBoundedBeforeAllocation(t *testing.T) {
 	if err := os.Truncate(path, maxSpoolEventBytes+1); err != nil {
 		t.Fatal(err)
 	}
-	spool := Spool{Directory: directory, MaxEvents: 1}
+	spool := preparedTestSpool(t, Spool{Directory: directory, MaxEvents: 1})
 	delivered := false
 	if err := spool.Drain(context.Background(), func(context.Context, protocol.Event) error {
 		delivered = true
@@ -237,7 +245,7 @@ func TestSpoolRejectsUnprotectedPreexistingEvent(t *testing.T) {
 		t.Fatal(err)
 	}
 	delivered := false
-	spool := Spool{Directory: directory, MaxEvents: 1}
+	spool := preparedTestSpool(t, Spool{Directory: directory, MaxEvents: 1})
 	legitimate := spoolEvent("legitimate-event")
 	if err := spool.Enqueue(legitimate); err != nil {
 		t.Fatalf("Enqueue() behind planted entry = %v", err)
@@ -261,7 +269,7 @@ func TestSpoolRejectsUnprotectedPreexistingEvent(t *testing.T) {
 
 func TestSpoolRecoversDrainLockLeftByCrashedWorker(t *testing.T) {
 	directory := t.TempDir()
-	spool := Spool{Directory: directory, MaxEvents: 1}
+	spool := preparedTestSpool(t, Spool{Directory: directory, MaxEvents: 1})
 	if err := spool.Enqueue(spoolEvent("event-a")); err != nil {
 		t.Fatal(err)
 	}
@@ -286,7 +294,7 @@ func TestSpoolRecoversDrainLockLeftByCrashedWorker(t *testing.T) {
 }
 
 func TestSpoolSupervisorDeliversEventEnqueuedAfterStartup(t *testing.T) {
-	spool := Spool{Directory: t.TempDir(), MaxEvents: 2, RetryMin: time.Millisecond, RetryMax: time.Millisecond}
+	spool := preparedTestSpool(t, Spool{Directory: t.TempDir(), MaxEvents: 2, RetryMin: time.Millisecond, RetryMax: time.Millisecond})
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	delivered := make(chan protocol.Event, 1)
@@ -317,6 +325,7 @@ func TestSpoolSupervisorDeliversEventEnqueuedAfterStartup(t *testing.T) {
 
 func TestEnqueueWaitsForActiveLockAndPersistsAfterRelease(t *testing.T) {
 	directory := t.TempDir()
+	spool := preparedTestSpool(t, Spool{Directory: directory, MaxEvents: 1})
 	lock := filepath.Join(directory, ".enqueue.lock")
 	release, err := acquireSpoolLock(context.Background(), lock)
 	if err != nil {
@@ -328,7 +337,6 @@ func TestEnqueueWaitsForActiveLockAndPersistsAfterRelease(t *testing.T) {
 		t.Fatal(err)
 	}
 	done := make(chan error, 1)
-	spool := Spool{Directory: directory, MaxEvents: 1}
 	go func() { done <- spool.Enqueue(spoolEvent("event-after-contention")) }()
 	select {
 	case err := <-done:
@@ -352,12 +360,12 @@ func TestEnqueueWaitsForActiveLockAndPersistsAfterRelease(t *testing.T) {
 
 func TestEnqueueUsesDurableContentionLaneBeforeProviderDeadline(t *testing.T) {
 	directory := t.TempDir()
+	spool := preparedTestSpool(t, Spool{Directory: directory, MaxEvents: 1, EnqueueLockTimeout: 20 * time.Millisecond})
 	release, err := acquireSpoolLock(context.Background(), filepath.Join(directory, ".enqueue.lock"))
 	if err != nil {
 		t.Fatal(err)
 	}
 	done := make(chan error, 1)
-	spool := Spool{Directory: directory, MaxEvents: 1, EnqueueLockTimeout: 20 * time.Millisecond}
 	go func() { done <- spool.Enqueue(spoolEvent("event-via-contention-lane")) }()
 	select {
 	case err := <-done:
@@ -528,31 +536,19 @@ func TestProviderEnqueueBudgetsStayBelowClaudeHookDeadline(t *testing.T) {
 	}
 }
 
-func TestSpoolOperationReturnsWhenHookDeadlineExpires(t *testing.T) {
-	started := make(chan struct{})
-	release := make(chan struct{})
-	operationDone := make(chan struct{})
-	ctx, cancel := context.WithTimeout(context.Background(), 25*time.Millisecond)
-	defer cancel()
-
-	startedAt := time.Now()
-	err := runSpoolOperation(ctx, func() error {
-		close(started)
-		<-release
-		close(operationDone)
-		return nil
-	})
-	if !errors.Is(err, context.DeadlineExceeded) {
-		t.Fatalf("runSpoolOperation() = %v, want deadline exceeded", err)
+func TestEnqueueRequiresSpoolPreparationOutsideHookPath(t *testing.T) {
+	directory := filepath.Join(t.TempDir(), "spool")
+	spool := Spool{Directory: directory}
+	if err := spool.Enqueue(spoolEvent("before-prepare")); err == nil {
+		t.Fatal("Enqueue() created an unprepared spool in the provider hook path")
 	}
-	if elapsed := time.Since(startedAt); elapsed > 500*time.Millisecond {
-		t.Fatalf("deadline-bounded spool operation took %s", elapsed)
+	if _, err := os.Stat(directory); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("Enqueue() mutated the unprepared spool: %v", err)
 	}
-	<-started
-	close(release)
-	select {
-	case <-operationDone:
-	case <-time.After(time.Second):
-		t.Fatal("blocked spool operation did not finish after release")
+	if err := spool.Prepare(); err != nil {
+		t.Fatal(err)
+	}
+	if err := spool.Enqueue(spoolEvent("after-prepare")); err != nil {
+		t.Fatalf("Enqueue() after Prepare() = %v", err)
 	}
 }

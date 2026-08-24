@@ -28,9 +28,22 @@ func main() {
 		case "supervise":
 			_ = runSupervisor(os.Getenv)
 			return
+		case "prepare":
+			if runPrepare(os.Getenv) != nil {
+				os.Exit(1)
+			}
+			return
 		}
 	}
 	_ = runHook(os.Stdin, os.Getenv, readProtectedToken, spawnDetached)
+}
+
+func runPrepare(getenv func(string) string) error {
+	spool, err := deliverySpool(getenv)
+	if err != nil {
+		return err
+	}
+	return spool.Prepare()
 }
 
 func runHook(input io.Reader, getenv func(string) string, readFile func(string) ([]byte, error), spawn func() error) error {

@@ -39,6 +39,10 @@ func secureSpoolDirectory(path string, before os.FileInfo) error {
 	return nil
 }
 
+func privateSpoolDirectory(path string, info os.FileInfo) bool {
+	return info.IsDir() && info.Mode()&os.ModeSymlink == 0 && privateWindowsSpoolACL(path, currentWindowsSpoolSID())
+}
+
 func privateSpoolFile(path string, info os.FileInfo) bool {
 	return info.Mode().IsRegular() && info.Mode()&os.ModeSymlink == 0 && privateWindowsSpoolACL(path, currentWindowsSpoolSID())
 }

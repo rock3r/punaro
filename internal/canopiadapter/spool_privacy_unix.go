@@ -16,6 +16,10 @@ func ownedSpoolDirectory(info os.FileInfo) bool {
 	return ok && uid >= 0 && stat.Uid == uint32(uid) // #nosec G115 -- nonnegative OS UID fits the platform field.
 }
 
+func privateSpoolDirectory(_ string, info os.FileInfo) bool {
+	return ownedSpoolDirectory(info) && info.IsDir() && info.Mode()&os.ModeSymlink == 0 && info.Mode().Perm()&0o077 == 0
+}
+
 func secureSpoolDirectory(path string, before os.FileInfo) error {
 	if !ownedSpoolDirectory(before) {
 		return errors.New("canopi spool directory must be owned by the current user")

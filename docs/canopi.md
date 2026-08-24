@@ -160,15 +160,17 @@ state path rejects overlapping collector writers and is released by `Close` or
 process exit. The collector canonicalizes and pins the state file's parent
 directory before locking, recovery, reads, and every later replacement, so
 retargeting an ancestor symlink cannot divert persistence away from the locked
-identity. Windows resolves that parent by handle and canonicalizes case,
-collapsing extended device paths, short names, case variants, and directory
-aliases. Unix resolves all parent symlinks. The state file itself remains subject
+identity. Windows resolves that parent by handle and preserves its case for I/O,
+while a separately case-folded value collapses extended device paths, short
+names, case variants, and directory aliases for lock naming. Unix resolves all
+parent symlinks. The state file itself remains subject
 to the no-link checks above rather than resolving a file link to its target.
 The predictable state-lock file itself is created exclusively and opened without
 following links; an unsafe pre-existing entry is removed, directory-synced, and
 recreated with current-user-only protection. Cross-process repair is serialized
-by the parent-directory kernel lock on Unix and a handle-canonicalized named
-kernel mutex on Windows before the entry is rechecked and unlinked.
+by the parent-directory kernel lock on Unix and a handle-canonicalized,
+cross-session named kernel mutex on Windows before the entry is rechecked and
+unlinked.
 Every server exit, including a signal or unexpected listener failure, waits for
 `http.Server.Shutdown` to finish draining active handlers before `Store.Close`
 releases that lifetime lock, fencing rolling restarts until every acknowledged
@@ -241,14 +243,17 @@ export CANOPI_MACHINE_ID=studio-m2
 export CANOPI_MACHINE_LABEL=studio-m2
 export CANOPI_TASK_TITLE='Punaro / current task'
 export CANOPI_REPOSITORY='rock3r/punaro'
+/absolute/bin/canopi-claude-hook prepare
 ```
 
 Copy the `hooks` object from
 `canopi/providers/claude-code-hooks.example.json` into project-local
 `.claude/settings.local.json` or the desired Claude settings scope, then replace
-the absolute binary path. Hook stdout and stderr stay empty.
+the absolute binary path. Run `prepare` before enabling those hooks; it creates
+and protects the spool outside Claude's two-second hook deadline. Hook stdout
+and stderr stay empty.
 
-`CANOPI_SPOOL_DIR` is optional; when omitted, the adapter creates
+`CANOPI_SPOOL_DIR` is optional; when omitted, `prepare` creates
 `canopi-claude-spool` beside the token file. On Unix, the directory must belong
 to the current user and is tightened to mode `0700`; on Windows, it must belong
 to the current user and is given a protected current-user-only DACL. Queued
@@ -270,13 +275,16 @@ The fixed enqueue, drain, and supervisor lock names use create-exclusive and
 no-follow opens with the same ownership and privacy validation. Unsafe entries
 left from a previously shared directory are removed, directory-synced, and
 replaced instead of permanently blocking the adapter. Repair is serialized by
-the parent-directory kernel lock on Unix and a handle-canonicalized named kernel
-mutex on Windows, so concurrent hooks cannot unlink each other's replacement locks.
+the parent-directory kernel lock on Unix and a handle-canonicalized,
+cross-session named kernel mutex on Windows, so concurrent hooks cannot unlink
+each other's replacement locks even when a service and interactive agent run in
+different sessions.
 The configured spool capacity includes a fixed contention reserve (one sixteenth,
 at least one and at most 256 slots). Normal and contention lanes therefore remain
 jointly bounded while concurrent hooks can publish without waiting past their
-provider deadline. The complete hook-facing enqueue, including directory
-creation and protection, is capped at 1.75 seconds, not just its lock acquisition.
+provider deadline. Directory creation and ACL protection happen only during the
+explicit `prepare` preflight or supervisor startup, never in the hook-facing
+enqueue. The complete hook-facing enqueue is capped at 1.75 seconds.
 The primary phase defaults to 250 ms and is capped at 750 ms; cleanup and capacity
 scans use cancellable 128-entry batches, and an
 exhausted primary budget immediately falls through to the contention reserve.

@@ -18,7 +18,7 @@ func withStateRepairLock(path string, repair func() error) error {
 	runtime.LockOSThread()
 	defer runtime.UnlockOSThread()
 	digest := sha256.Sum256([]byte(strings.ToLower(filepath.Clean(path))))
-	name, err := windows.UTF16PtrFromString("Local\\CanopiStateRepair-" + hex.EncodeToString(digest[:]))
+	name, err := windows.UTF16PtrFromString("Global\\CanopiStateRepair-" + hex.EncodeToString(digest[:]))
 	if err != nil {
 		return err
 	}

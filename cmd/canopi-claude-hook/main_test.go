@@ -20,6 +20,9 @@ func TestHookLaunchesDetachedDeliveryWithoutWaitingForNetwork(t *testing.T) {
 		"CANOPI_MACHINE_LABEL": "Studio M2",
 		"CANOPI_SPOOL_DIR":     t.TempDir(),
 	}
+	if err := runPrepare(func(key string) string { return environment[key] }); err != nil {
+		t.Fatal(err)
+	}
 	spawned := false
 	err := runHook(bytes.NewReader(raw), func(key string) string { return environment[key] }, func(string) ([]byte, error) {
 		return []byte("test-secret"), nil
@@ -47,5 +50,17 @@ func TestHookLaunchesDetachedDeliveryWithoutWaitingForNetwork(t *testing.T) {
 	}
 	if bytes.Contains(payload, []byte("private")) {
 		t.Fatal("durable normalized payload contains private hook input")
+	}
+}
+
+func TestPrepareCreatesSpoolBeforeHooksAreEnabled(t *testing.T) {
+	directory := filepath.Join(t.TempDir(), "spool")
+	environment := map[string]string{"CANOPI_SPOOL_DIR": directory}
+	if err := runPrepare(func(key string) string { return environment[key] }); err != nil {
+		t.Fatal(err)
+	}
+	spool := canopiadapter.Spool{Directory: directory}
+	if got, err := spool.Pending(); err != nil || got != 0 {
+		t.Fatalf("prepared spool pending = %d, %v", got, err)
 	}
 }

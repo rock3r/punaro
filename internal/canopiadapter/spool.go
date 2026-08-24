@@ -54,7 +54,7 @@ func (s Spool) Enqueue(event protocol.Event) error {
 	if err != nil {
 		return err
 	}
-	if err := runSpoolOperation(operationCtx, config.ensureDirectory); err != nil {
+	if err := config.requirePreparedDirectory(); err != nil {
 		return err
 	}
 	if err := contextErr(operationCtx); err != nil {
@@ -81,6 +81,15 @@ func (s Spool) Enqueue(event protocol.Event) error {
 		return err
 	}
 	return config.enqueueContention(operationCtx, event, payload)
+}
+
+// Prepare creates and protects the spool before provider hooks are enabled.
+func (s Spool) Prepare() error {
+	config, err := s.normalized()
+	if err != nil {
+		return err
+	}
+	return config.ensureDirectory()
 }
 
 func (s Spool) enqueueLocked(ctx context.Context, event protocol.Event, payload []byte) error {
@@ -488,19 +497,6 @@ func contextErr(ctx context.Context) error {
 	}
 }
 
-func runSpoolOperation(ctx context.Context, operation func() error) error {
-	result := make(chan error, 1)
-	go func() {
-		result <- operation()
-	}()
-	select {
-	case err := <-result:
-		return err
-	case <-ctx.Done():
-		return ctx.Err()
-	}
-}
-
 func (s Spool) ensureDirectory() error {
 	if err := os.MkdirAll(s.Directory, 0o700); err != nil {
 		return err
@@ -513,6 +509,17 @@ func (s Spool) ensureDirectory() error {
 		return errors.New("canopi spool directory must be a private real directory")
 	}
 	return secureSpoolDirectory(s.Directory, info)
+}
+
+func (s Spool) requirePreparedDirectory() error {
+	info, err := os.Lstat(s.Directory)
+	if err != nil {
+		return fmt.Errorf("canopi spool is not prepared: %w", err)
+	}
+	if !info.IsDir() || info.Mode()&os.ModeSymlink != 0 || !privateSpoolDirectory(s.Directory, info) {
+		return errors.New("canopi spool is not a prepared private real directory")
+	}
+	return nil
 }
 
 func (s Spool) eventPath(eventID string) string {
