@@ -256,6 +256,33 @@ func TestOpenStoreExcludesSecondWriterForSameStateFile(t *testing.T) {
 	}
 }
 
+func TestOpenStoreRejectsPersistenceAfterStateDirectoryReplacement(t *testing.T) {
+	root := t.TempDir()
+	stateDirectory := filepath.Join(root, "state")
+	if err := os.Mkdir(stateDirectory, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(stateDirectory, "state.json")
+	store, err := OpenStore(path, DefaultConfig())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = store.Close() }()
+	if err := os.Rename(stateDirectory, filepath.Join(root, "state-old")); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Mkdir(stateDirectory, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	now := time.Now().UTC()
+	if result, err := store.Apply(event("event-1", "agent", protocol.StateWorking, now)); err == nil || result != (ApplyResult{}) {
+		t.Fatalf("Apply() after state-directory replacement = %+v, %v; want durability rejection", result, err)
+	}
+	if _, err := os.Stat(path); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("replacement state directory was written: %v", err)
+	}
+}
+
 func TestStateLockRepairDoesNotRemoveReplacementInode(t *testing.T) {
 	directory := t.TempDir()
 	path := filepath.Join(directory, ".canopi-lock-test")

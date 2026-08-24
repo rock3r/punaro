@@ -164,13 +164,25 @@ func OpenStore(path string, config Config) (*Store, error) {
 	if err != nil {
 		return nil, fmt.Errorf("pin Canopi state path: %w", err)
 	}
+	pinnedDirectory := filepath.Dir(pinnedPath)
+	directoryIdentity, err := stateDirectoryIdentity(pinnedDirectory)
+	if err != nil {
+		return nil, fmt.Errorf("identify Canopi state directory: %w", err)
+	}
 	store := NewStore(normalized)
 	store.persist = func(state persistedStore) error {
+		if err := validateStateDirectoryIdentity(pinnedDirectory, directoryIdentity); err != nil {
+			return fmt.Errorf("revalidate Canopi state directory: %w", err)
+		}
 		return persistStore(pinnedPath, state, normalized.MaxStateBytes)
 	}
 	release, err := acquireStateStoreLock(pinnedPath)
 	if err != nil {
 		return nil, fmt.Errorf("lock Canopi state: %w", err)
+	}
+	if err := validateStateDirectoryIdentity(pinnedDirectory, directoryIdentity); err != nil {
+		_ = release()
+		return nil, fmt.Errorf("revalidate locked Canopi state directory: %w", err)
 	}
 	store.release = release
 	keepOpen := false
