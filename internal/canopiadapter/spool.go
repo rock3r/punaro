@@ -174,11 +174,6 @@ func (s Spool) enqueueLocked(ctx context.Context, event protocol.Event, payload 
 	if err := temporary.Close(); err != nil {
 		return err
 	}
-	if contextErr(ctx) != nil {
-		// The complete target is already namespace-visible and file-synced. The
-		// persistent supervisor re-syncs its directory before delivery.
-		return nil
-	}
 	return syncDirectory(s.Directory)
 }
 
@@ -379,11 +374,6 @@ func (s Spool) publishContentionEvent(ctx context.Context, target string, payloa
 	}
 	if err := os.Remove(temporaryName); err != nil && !errors.Is(err, os.ErrNotExist) {
 		return false, err
-	}
-	if contextErr(ctx) != nil {
-		// The target is published and file-synced; the supervisor completes the
-		// directory durability barrier before delivery.
-		return linkErr == nil, nil
 	}
 	if err := syncDirectory(s.Directory); err != nil {
 		return false, err

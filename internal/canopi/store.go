@@ -207,10 +207,10 @@ func OpenStore(path string, config Config) (*Store, error) {
 			_ = store.Close()
 		}
 	}()
-	if err := recoverStateReplacement(pinnedPath); err != nil {
+	if err := recoverPinnedStateReplacement(pinnedDirectoryHandle, filepath.Base(pinnedPath)); err != nil {
 		return nil, fmt.Errorf("recover Canopi state replacement: %w", err)
 	}
-	file, err := openPrivateStateFile(pinnedPath)
+	file, err := openPrivateStateFileInPinnedDirectory(pinnedDirectoryHandle, filepath.Base(pinnedPath))
 	if errors.Is(err, os.ErrNotExist) {
 		keepOpen = true
 		return store, nil
