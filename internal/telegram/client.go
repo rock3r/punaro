@@ -18,9 +18,8 @@ import (
 const maxBotResponseBytes = 1 << 20
 const maxRichMessageBytes = 32 << 10
 
-// BotAPIStatusError is a completed Telegram HTTP response. Client errors other
-// than authentication failure and rate limiting are terminal because retrying
-// the same request cannot change the rejected payload or target.
+// BotAPIStatusError is a completed Telegram HTTP response. Only bounded status
+// classes that unambiguously reject the payload or target are terminal.
 type BotAPIStatusError struct {
 	Method string
 	Status int
@@ -42,14 +41,15 @@ const (
 )
 
 // PermanentBotAPIFailure recognizes terminal request outcomes while keeping
-// 401 retryable because Access/proxy/token recovery may restore it.
+// 401 and 404 retryable because Access/proxy/token or base-URL recovery may
+// restore them.
 func PermanentBotAPIFailure(err error) bool {
 	var status BotAPIStatusError
 	if !errors.As(err, &status) {
 		return false
 	}
 	switch status.Status {
-	case http.StatusBadRequest, http.StatusForbidden, http.StatusNotFound, http.StatusMethodNotAllowed, http.StatusGone, http.StatusUnprocessableEntity:
+	case http.StatusBadRequest, http.StatusForbidden, http.StatusMethodNotAllowed, http.StatusGone, http.StatusUnprocessableEntity:
 		return true
 	default:
 		return false

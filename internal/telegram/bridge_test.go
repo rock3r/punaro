@@ -396,7 +396,7 @@ func TestBridgeWrapsDroppedDeliveryAckFailureWithCycleMetadata(t *testing.T) {
 
 func TestBridgeRetriesTransientTelegramRejection(t *testing.T) {
 	t.Parallel()
-	for _, status := range []int{401, 429, 500} {
+	for _, status := range []int{401, 404, 429, 500} {
 		t.Run(fmt.Sprint(status), func(t *testing.T) {
 			state, err := Open(filepath.Join(t.TempDir(), "telegram.db"))
 			if err != nil {
@@ -464,7 +464,7 @@ func TestClassifyGatewayCycleFailureSeparatesRetryAndTerminalPlanes(t *testing.T
 		{name: "permanent outbound Telegram", err: &GatewayCycleError{Phase: GatewayPhaseSend, Err: BotAPIStatusError{Method: "sendRichMessage", Status: 403}}, class: GatewayFailureOutboundTelegramPermanent},
 		{name: "permanent inbound relay", err: &GatewayCycleError{Phase: GatewayPhaseInbound, Err: permanentRelay}, class: GatewayFailureInboundRelayPermanent},
 		{name: "permanent relay outside inbound", err: &GatewayCycleError{Phase: GatewayPhaseAdvertise, Err: permanentRelay}, class: GatewayFailureTransient},
-		{name: "message-less poll", err: &GatewayCycleError{Phase: GatewayPhasePoll, Err: BotAPIStatusError{Method: "getUpdates", Status: 404}}, class: GatewayFailureMessageLessPoll},
+		{name: "message-less poll", err: &GatewayCycleError{Phase: GatewayPhasePoll, Err: BotAPIStatusError{Method: "getUpdates", Status: 400}}, class: GatewayFailureMessageLessPoll},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			if got := ClassifyGatewayCycleFailure(test.err); got != test.class {

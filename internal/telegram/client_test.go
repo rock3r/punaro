@@ -111,9 +111,12 @@ func TestClientDoctorRejectsOversizedOrCancelledProviderResponseWithoutLeakingIt
 	}
 }
 
-func TestBotAPIStatusClassificationKeepsUnauthorizedRetryableAndDetectsDeletedTopic(t *testing.T) {
+func TestBotAPIStatusClassificationKeepsAmbiguousResponsesRetryableAndDetectsDeletedTopic(t *testing.T) {
 	if PermanentBotAPIFailure(BotAPIStatusError{Method: "sendRichMessage", Status: http.StatusUnauthorized}) {
 		t.Fatal("Telegram 401 was made terminal")
+	}
+	if PermanentBotAPIFailure(BotAPIStatusError{Method: "sendRichMessage", Status: http.StatusNotFound}) {
+		t.Fatal("ambiguous Telegram 404 was made terminal")
 	}
 	if !PermanentBotAPIFailure(BotAPIStatusError{Method: "sendRichMessage", Status: http.StatusForbidden}) {
 		t.Fatal("Telegram 403 was not terminal")
