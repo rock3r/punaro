@@ -5,7 +5,7 @@ import (
 	"context"
 	"crypto/ed25519"
 	"crypto/rand"
-	"crypto/sha256"
+	"database/sql"
 	"encoding/base64"
 	"encoding/json"
 	"errors"
@@ -508,12 +508,22 @@ func TestMailboxDoctorReadsOnlyBoundedActiveAttachments(t *testing.T) {
 	}
 }
 
-func TestMailboxDoctorRejectsAttachmentReadMutation(t *testing.T) {
+func TestMailboxDoctorContainsAttachmentProbeMutation(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("POSIX helper fixture")
 	}
 	state := t.TempDir()
 	if err := os.Chmod(state, 0o700); err != nil { // #nosec G302 -- private mailbox fixture.
+		t.Fatal(err)
+	}
+	database, err := sql.Open("sqlite", filepath.Join(state, "mailbox.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := database.ExecContext(t.Context(), `CREATE TABLE mailbox_fixture (value TEXT)`); err != nil {
+		t.Fatal(err)
+	}
+	if err := database.Close(); err != nil {
 		t.Fatal(err)
 	}
 	helper := filepath.Join(t.TempDir(), "agent-mailbox")
@@ -533,13 +543,81 @@ exit 0
 	if err := os.WriteFile(helper, []byte(script), 0o700); err != nil { // #nosec G306 -- executable test helper.
 		t.Fatal(err)
 	}
-	_, err := probeAdapterMailbox(t.Context(), adapterConfig{mailboxBinary: helper, mailboxState: state, attachedGroup: "group/punaro"})
-	if err == nil || err.Error() != "mailbox changed state during doctor" {
-		t.Fatalf("attachment read mutation error=%v", err)
+	result, err := probeAdapterMailbox(t.Context(), adapterConfig{mailboxBinary: helper, mailboxState: state, attachedGroup: "group/punaro"})
+	if err != nil || strings.Join(result.Attached, ",") != "agent/a" {
+		t.Fatalf("attachment probe result=%#v err=%v", result, err)
+	}
+	if _, err := os.Stat(filepath.Join(state, "doctor-mutated")); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("attachment probe escaped its disposable snapshot: %v", err)
 	}
 }
 
-func TestMailboxDoctorRejectsStateMutationDuringHandshake(t *testing.T) {
+func TestMailboxDoctorAllowsConcurrentLiveMailboxWrites(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("POSIX helper fixture")
+	}
+	state := t.TempDir()
+	if err := os.Chmod(state, 0o700); err != nil { // #nosec G302 -- private mailbox fixture.
+		t.Fatal(err)
+	}
+	database, err := sql.Open("sqlite", filepath.Join(state, "mailbox.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := database.ExecContext(t.Context(), `PRAGMA journal_mode = WAL; CREATE TABLE mailbox_fixture (value TEXT)`); err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = database.Close() }()
+	t.Setenv("PUNARO_TEST_LIVE_MAILBOX", state)
+	writerDone := make(chan error, 1)
+	go func() {
+		deadline := time.Now().Add(5 * time.Second)
+		for {
+			if _, err := os.Stat(filepath.Join(state, "probe-ready")); err == nil {
+				break
+			}
+			if time.Now().After(deadline) {
+				writerDone <- errors.New("mailbox probe did not start")
+				return
+			}
+			time.Sleep(5 * time.Millisecond)
+		}
+		if _, err := database.ExecContext(t.Context(), `INSERT INTO mailbox_fixture (value) VALUES ('concurrent')`); err != nil {
+			writerDone <- err
+			return
+		}
+		writerDone <- os.WriteFile(filepath.Join(state, "write-complete"), []byte("done"), 0o600)
+	}()
+	helper := filepath.Join(t.TempDir(), "agent-mailbox")
+	script := `#!/bin/sh
+if [ "$3" = group ]; then
+  printf '%s\n' ready >"$PUNARO_TEST_LIVE_MAILBOX/probe-ready"
+  while [ ! -f "$PUNARO_TEST_LIVE_MAILBOX/write-complete" ]; do sleep 0.01; done
+  printf '%s\n' '[{"person":"agent/a","active":true}]'
+  exit 0
+fi
+read initialize
+printf '%s\n' '{"jsonrpc":"2.0","id":1,"result":{"protocolVersion":"2024-11-05","capabilities":{},"serverInfo":{"name":"fixture","version":"1"}}}'
+read initialized
+read tools
+printf '%s\n' '{"jsonrpc":"2.0","id":2,"result":{"tools":[]}}'
+exit 0
+`
+	if err := os.WriteFile(helper, []byte(script), 0o700); err != nil { // #nosec G306 -- executable test helper.
+		t.Fatal(err)
+	}
+	result, probeErr := probeAdapterMailbox(t.Context(), adapterConfig{mailboxBinary: helper, mailboxState: state, attachedGroup: "group/punaro"})
+	writerErr := <-writerDone
+	if probeErr != nil || strings.Join(result.Attached, ",") != "agent/a" || writerErr != nil {
+		t.Fatalf("mailbox result=%#v probe_err=%v writer_err=%v", result, probeErr, writerErr)
+	}
+	var rows int
+	if err := database.QueryRowContext(t.Context(), `SELECT COUNT(*) FROM mailbox_fixture WHERE value = 'concurrent'`).Scan(&rows); err != nil || rows != 1 {
+		t.Fatalf("concurrent mailbox WAL write rows=%d err=%v", rows, err)
+	}
+}
+
+func TestMailboxDoctorContainsStateMutationDuringHandshake(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("POSIX helper fixture")
 	}
@@ -548,8 +626,22 @@ func TestMailboxDoctorRejectsStateMutationDuringHandshake(t *testing.T) {
 	if err := os.Mkdir(state, 0o700); err != nil {
 		t.Fatal(err)
 	}
+	database, err := sql.Open("sqlite", filepath.Join(state, "mailbox.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := database.ExecContext(t.Context(), `CREATE TABLE mailbox_fixture (value TEXT)`); err != nil {
+		t.Fatal(err)
+	}
+	if err := database.Close(); err != nil {
+		t.Fatal(err)
+	}
 	helper := filepath.Join(directory, "agent-mailbox")
 	script := `#!/bin/sh
+if [ "$3" = group ]; then
+  printf '%s\n' '[]'
+  exit 0
+fi
 read initialize
 printf '%s\n' changed >"$2/doctor-mutated"
 printf '%s\n' '{"jsonrpc":"2.0","id":1,"result":{"protocolVersion":"2024-11-05","capabilities":{},"serverInfo":{"name":"fixture","version":"1"}}}'
@@ -563,21 +655,26 @@ exit 0
 	}
 	ctx, cancel := context.WithTimeout(t.Context(), 5*time.Second)
 	defer cancel()
-	if err := probeMailboxMCP(ctx, adapterConfig{mailboxBinary: helper, mailboxState: state}); err == nil {
-		t.Fatal("mailbox mutation was accepted as a read-only doctor probe")
+	if _, err := probeAdapterMailbox(ctx, adapterConfig{mailboxBinary: helper, mailboxState: state, attachedGroup: "group/punaro"}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(filepath.Join(state, "doctor-mutated")); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("MCP probe escaped its disposable snapshot: %v", err)
 	}
 }
 
-func TestMailboxDoctorRejectsStateMutationAfterFailedHandshake(t *testing.T) {
+func TestMailboxDoctorContainsStateMutationAfterFailedHandshake(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("POSIX helper fixture")
 	}
 	tests := []struct {
-		name   string
-		script string
+		name     string
+		script   string
+		expected string
 	}{
 		{
-			name: "initialize",
+			name:     "initialize",
+			expected: "mailbox MCP initialize failed",
 			script: `#!/bin/sh
 read initialize
 printf '%s\n' changed >"$2/doctor-mutated"
@@ -585,7 +682,8 @@ printf '%s\n' '{"jsonrpc":"2.0","id":1,"error":{"code":-32000,"message":"failed"
 `,
 		},
 		{
-			name: "tools list",
+			name:     "tools list",
+			expected: "mailbox MCP tools handshake failed",
 			script: `#!/bin/sh
 read initialize
 printf '%s\n' '{"jsonrpc":"2.0","id":1,"result":{"protocolVersion":"2024-11-05","capabilities":{},"serverInfo":{"name":"fixture","version":"1"}}}'
@@ -603,15 +701,28 @@ printf '%s\n' '{"jsonrpc":"2.0","id":2,"error":{"code":-32000,"message":"failed"
 			if err := os.Mkdir(state, 0o700); err != nil {
 				t.Fatal(err)
 			}
+			database, err := sql.Open("sqlite", filepath.Join(state, "mailbox.db"))
+			if err != nil {
+				t.Fatal(err)
+			}
+			if _, err := database.ExecContext(t.Context(), `CREATE TABLE mailbox_fixture (value TEXT)`); err != nil {
+				t.Fatal(err)
+			}
+			if err := database.Close(); err != nil {
+				t.Fatal(err)
+			}
 			helper := filepath.Join(directory, "agent-mailbox")
 			if err := os.WriteFile(helper, []byte(test.script), 0o700); err != nil { // #nosec G306 -- executable test helper.
 				t.Fatal(err)
 			}
 			ctx, cancel := context.WithTimeout(t.Context(), 5*time.Second)
 			defer cancel()
-			err := probeMailboxMCP(ctx, adapterConfig{mailboxBinary: helper, mailboxState: state})
-			if err == nil || err.Error() != "mailbox MCP changed state during doctor" {
-				t.Fatalf("mutation after failed %s handshake was not reported: %v", test.name, err)
+			_, err = probeAdapterMailbox(ctx, adapterConfig{mailboxBinary: helper, mailboxState: state, attachedGroup: "group/punaro"})
+			if err == nil || err.Error() != test.expected {
+				t.Fatalf("failed %s handshake error=%v", test.name, err)
+			}
+			if _, err := os.Stat(filepath.Join(state, "doctor-mutated")); !errors.Is(err, os.ErrNotExist) {
+				t.Fatalf("failed %s probe escaped its disposable snapshot: %v", test.name, err)
 			}
 		})
 	}
@@ -628,41 +739,21 @@ func TestInstalledAgentMailboxDoctorSmoke(t *testing.T) {
 	}
 	ctx, cancel := context.WithTimeout(t.Context(), 10*time.Second)
 	defer cancel()
-	before := doctorTestTreeDigest(t, state)
-	if err := probeMailboxMCP(ctx, adapterConfig{mailboxBinary: binary, mailboxState: state}); err != nil {
+	command := exec.CommandContext(ctx, binary, "--state-dir", state, "group", "create", "--group", "group/punaro") // #nosec G204,G702 -- installed binary smoke test with fixed arguments.
+	if output, err := command.CombinedOutput(); err != nil {
+		t.Fatalf("create installed mailbox fixture: %v: %s", err, output)
+	}
+	membersBefore, err := exec.CommandContext(ctx, binary, "--state-dir", state, "group", "members", "--group", "group/punaro", "--json").CombinedOutput() // #nosec G204,G702 -- installed binary smoke test with fixed arguments.
+	if err != nil {
+		t.Fatalf("inspect installed mailbox fixture: %v: %s", err, membersBefore)
+	}
+	if _, err := probeAdapterMailbox(ctx, adapterConfig{mailboxBinary: binary, mailboxState: state, attachedGroup: "group/punaro"}); err != nil {
 		t.Fatal(err)
 	}
-	if after := doctorTestTreeDigest(t, state); after != before {
-		t.Fatalf("mailbox doctor mutated state: before=%x after=%x", before, after)
+	membersAfter, err := exec.CommandContext(ctx, binary, "--state-dir", state, "group", "members", "--group", "group/punaro", "--json").CombinedOutput() // #nosec G204,G702 -- installed binary smoke test with fixed arguments.
+	if err != nil || !bytes.Equal(membersAfter, membersBefore) {
+		t.Fatalf("mailbox doctor changed logical membership state: err=%v before=%q after=%q", err, membersBefore, membersAfter)
 	}
-}
-
-func doctorTestTreeDigest(t *testing.T, root string) [32]byte {
-	t.Helper()
-	hash := sha256.New()
-	if err := filepath.WalkDir(root, func(path string, entry os.DirEntry, err error) error {
-		if err != nil {
-			return err
-		}
-		relative, err := filepath.Rel(root, path)
-		if err != nil {
-			return err
-		}
-		_, _ = io.WriteString(hash, relative)
-		if entry.Type().IsRegular() {
-			body, err := os.ReadFile(path) // #nosec G304,G122 -- test-owned non-concurrent mailbox fixture.
-			if err != nil {
-				return err
-			}
-			_, _ = hash.Write(body)
-		}
-		return nil
-	}); err != nil {
-		t.Fatal(err)
-	}
-	var digest [32]byte
-	copy(digest[:], hash.Sum(nil))
-	return digest
 }
 
 func TestPluginDoctorValidatesAllAdaptersLauncherAndExactSkillTree(t *testing.T) {

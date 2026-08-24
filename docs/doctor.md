@@ -27,8 +27,13 @@ component unhealthy.
 
 All component deadlines are bounded to 1–30 seconds. Network probes use signed
 non-consuming nonces and read-only protocol handshakes. Local SQLite checks use
-a read-only connection and bounded queries. Installed mailbox smoke checks
-hash their state tree before and after the MCP initialize/tools-only exchange.
+a read-only connection and bounded queries. Installed mailbox smoke checks run
+the fixed MCP initialize/tools-only and group-membership exchanges against a
+transactionally consistent private SQLite snapshot. Normal concurrent writes
+continue against the live mailbox without creating a false diagnostic failure;
+the snapshot is acquired through a read-only live connection, and any
+application-state write attempted by the probe is contained in the disposable
+snapshot and removed afterward.
 Backup contents, mailbox state, and nested skill trees are traversed in bounded
 directory batches with total-entry ceilings and deadline checks between reads.
 Skill-set digests length-prefix every relative path and file body so arbitrary

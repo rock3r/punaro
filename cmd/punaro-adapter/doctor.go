@@ -3,14 +3,14 @@ package main
 import (
 	"bufio"
 	"context"
-	"crypto/sha256"
-	"encoding/binary"
+	"database/sql"
 	"encoding/json"
 	"encoding/xml"
 	"errors"
 	"flag"
 	"fmt"
 	"io"
+	"net/url"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -26,13 +26,13 @@ import (
 	punarodiagnostic "github.com/rock3r/punaro/internal/diagnostic"
 	"github.com/rock3r/punaro/internal/incrementalfs"
 	"github.com/rock3r/punaro/internal/relay"
+	_ "modernc.org/sqlite" // SQLite snapshot driver for non-mutating mailbox diagnostics.
 )
 
 const (
 	defaultAdapterDoctorTimeout   = 15 * time.Second
 	maximumAdapterDoctorTimeout   = 30 * time.Second
 	maximumMailboxDoctorOutput    = 64 << 10
-	maximumMailboxDoctorEntries   = 4096
 	maximumMailboxDoctorBytes     = 64 << 20
 	maximumMailboxDoctorEndpoints = 256
 	maximumBootstrapVersionOutput = 256
@@ -387,18 +387,13 @@ func distinctDoctorPaths(config adapterConfig) bool {
 	return true
 }
 
-func probeAdapterMailbox(ctx context.Context, config adapterConfig) (result mailboxDoctorResult, resultErr error) {
-	before, err := mailboxDoctorTreeDigest(ctx, config.mailboxState)
+func probeAdapterMailbox(ctx context.Context, config adapterConfig) (mailboxDoctorResult, error) {
+	snapshot, err := mailboxDoctorSnapshot(ctx, config.mailboxState)
 	if err != nil {
-		return mailboxDoctorResult{}, errors.New("mailbox state cannot be inspected safely")
+		return mailboxDoctorResult{}, errors.New("mailbox state cannot be snapshotted safely")
 	}
-	defer func() {
-		after, err := mailboxDoctorTreeDigest(ctx, config.mailboxState)
-		if err != nil || before != after {
-			result = mailboxDoctorResult{}
-			resultErr = errors.New("mailbox changed state during doctor")
-		}
-	}()
+	defer func() { _ = os.RemoveAll(snapshot) }()
+	config.mailboxState = snapshot
 	if err := probeMailboxMCP(ctx, config); err != nil {
 		return mailboxDoctorResult{}, err
 	}
@@ -407,6 +402,50 @@ func probeAdapterMailbox(ctx context.Context, config adapterConfig) (result mail
 		return mailboxDoctorResult{}, err
 	}
 	return mailboxDoctorResult{Attached: attached}, nil
+}
+
+func mailboxDoctorSnapshot(ctx context.Context, root string) (string, error) {
+	if ctx == nil || !privateDoctorDirectory(root) {
+		return "", errors.New("mailbox state is unavailable")
+	}
+	source := filepath.Join(root, "mailbox.db")
+	info, err := os.Lstat(source) // #nosec G703 -- installer-selected private mailbox database.
+	if err != nil || !info.Mode().IsRegular() || info.Mode()&os.ModeSymlink != 0 || info.Size() < 0 || info.Size() > maximumMailboxDoctorBytes {
+		return "", errors.New("mailbox database is unsafe")
+	}
+	snapshot, err := os.MkdirTemp("", "punaro-mailbox-doctor-*")
+	if err != nil {
+		return "", errors.New("mailbox snapshot is unavailable")
+	}
+	cleanup := true
+	defer func() {
+		if cleanup {
+			_ = os.RemoveAll(snapshot)
+		}
+	}()
+	destination := filepath.Join(snapshot, "mailbox.db")
+	uri := (&url.URL{Scheme: "file", Path: source, RawQuery: "mode=ro"}).String()
+	database, err := sql.Open("sqlite", uri)
+	if err != nil {
+		return "", errors.New("mailbox snapshot is unavailable")
+	}
+	database.SetMaxOpenConns(1)
+	database.SetMaxIdleConns(1)
+	if err := database.PingContext(ctx); err != nil {
+		_ = database.Close()
+		return "", errors.New("mailbox snapshot is unavailable")
+	}
+	_, snapshotErr := database.ExecContext(ctx, `VACUUM INTO ?`, destination)
+	closeErr := database.Close()
+	if snapshotErr != nil || closeErr != nil {
+		return "", errors.New("mailbox snapshot is unavailable")
+	}
+	copyInfo, err := os.Lstat(destination) // #nosec G703 -- fresh private snapshot destination.
+	if err != nil || !copyInfo.Mode().IsRegular() || copyInfo.Mode()&os.ModeSymlink != 0 || copyInfo.Size() < 0 || copyInfo.Size() > maximumMailboxDoctorBytes || os.Chmod(destination, 0o600) != nil {
+		return "", errors.New("mailbox snapshot is unsafe")
+	}
+	cleanup = false
+	return snapshot, nil
 }
 
 func probeMailboxAttachments(ctx context.Context, config adapterConfig) ([]string, error) {
@@ -463,14 +502,10 @@ func adapterEndpointsAttached(ctx context.Context, config adapterConfig, endpoin
 	return true
 }
 
-func probeMailboxMCP(ctx context.Context, config adapterConfig) (resultErr error) {
+func probeMailboxMCP(ctx context.Context, config adapterConfig) error {
 	binary, err := validateMailboxDoctorConfiguration(config)
 	if err != nil {
 		return err
-	}
-	before, err := mailboxDoctorTreeDigest(ctx, config.mailboxState)
-	if err != nil {
-		return errors.New("mailbox state cannot be inspected safely")
 	}
 	command := exec.CommandContext(ctx, binary, "--state-dir", config.mailboxState, "mcp") // #nosec G204,G702 -- fixed MCP handshake using installer configuration.
 	stdin, err := command.StdinPipe()
@@ -494,10 +529,6 @@ func probeMailboxMCP(ctx context.Context, config adapterConfig) (resultErr error
 		if !waited {
 			_ = command.Wait()
 		}
-		after, err := mailboxDoctorTreeDigest(ctx, config.mailboxState)
-		if err != nil || before != after {
-			resultErr = errors.New("mailbox MCP changed state during doctor")
-		}
 	}()
 	writer := bufio.NewWriter(stdin)
 	decoder := json.NewDecoder(io.LimitReader(stdout, maximumMailboxDoctorOutput+1))
@@ -514,91 +545,6 @@ func probeMailboxMCP(ctx context.Context, config adapterConfig) (resultErr error
 	_ = command.Wait()
 	waited = true
 	return nil
-}
-
-func mailboxDoctorTreeDigest(ctx context.Context, root string) ([sha256.Size]byte, error) {
-	type digestEntry struct {
-		relative string
-		kind     string
-		digest   [sha256.Size]byte
-	}
-	records := make([]digestEntry, 0, 32)
-	var totalBytes int64
-	err := incrementalfs.Walk(ctx, root, maximumMailboxDoctorEntries, func(path, relative string, info os.FileInfo) error {
-		if err := ctx.Err(); err != nil {
-			return err
-		}
-		if info.Mode()&os.ModeSymlink != 0 {
-			return errors.New("mailbox state entry is unsafe")
-		}
-		if info.IsDir() {
-			records = append(records, digestEntry{relative: filepath.ToSlash(relative), kind: "directory"})
-			return nil
-		}
-		if !info.Mode().IsRegular() || info.Size() < 0 || totalBytes > maximumMailboxDoctorBytes-info.Size() {
-			return errors.New("mailbox state entry is unsafe")
-		}
-		totalBytes += info.Size()
-		file, err := openMailboxDoctorSnapshotFile(path, info)
-		if err != nil {
-			return err
-		}
-		fileHash := sha256.New()
-		_, copyErr := io.CopyN(fileHash, mailboxDoctorContextReader{ctx: ctx, reader: file}, info.Size())
-		var extra [1]byte
-		extraCount, extraErr := 0, ctx.Err()
-		if extraErr == nil {
-			extraCount, extraErr = file.Read(extra[:])
-		}
-		closeErr := file.Close()
-		if copyErr != nil || extraCount != 0 || !errors.Is(extraErr, io.EOF) || closeErr != nil {
-			return errors.New("mailbox state changed during inspection")
-		}
-		record := digestEntry{relative: filepath.ToSlash(relative), kind: "file"}
-		copy(record.digest[:], fileHash.Sum(nil))
-		records = append(records, record)
-		return nil
-	})
-	if err != nil {
-		return [sha256.Size]byte{}, err
-	}
-	sort.Slice(records, func(i, j int) bool { return records[i].relative < records[j].relative })
-	hash := sha256.New()
-	writeField := func(value []byte) error {
-		if err := binary.Write(hash, binary.BigEndian, uint64(len(value))); err != nil {
-			return err
-		}
-		_, err := hash.Write(value)
-		return err
-	}
-	for _, record := range records {
-		if err := writeField([]byte(record.relative)); err != nil {
-			return [sha256.Size]byte{}, err
-		}
-		if err := writeField([]byte(record.kind)); err != nil {
-			return [sha256.Size]byte{}, err
-		}
-		if record.kind == "file" {
-			if err := writeField(record.digest[:]); err != nil {
-				return [sha256.Size]byte{}, err
-			}
-		}
-	}
-	var digest [sha256.Size]byte
-	copy(digest[:], hash.Sum(nil))
-	return digest, nil
-}
-
-type mailboxDoctorContextReader struct {
-	ctx    context.Context
-	reader io.Reader
-}
-
-func (reader mailboxDoctorContextReader) Read(buffer []byte) (int, error) {
-	if err := reader.ctx.Err(); err != nil {
-		return 0, err
-	}
-	return reader.reader.Read(buffer)
 }
 
 func validateMailboxDoctorConfiguration(config adapterConfig) (string, error) {
