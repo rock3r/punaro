@@ -1,6 +1,6 @@
 // canopi-claude-hook adapts Claude Code command hooks to Canopi events. The
-// hook-facing process delegates stdin to a detached capture child and returns;
-// durable storage and network I/O therefore cannot extend the provider hook.
+// hook-facing process publishes a recoverable local queue entry before any
+// detached delivery; all network I/O happens after it returns.
 package main
 
 import (
@@ -22,9 +22,6 @@ const maxHookBytes = 1 << 20
 func main() {
 	if len(os.Args) == 2 {
 		switch os.Args[1] {
-		case "capture":
-			_ = runCapture(os.Stdin, os.Getenv, spawnSupervisor)
-			return
 		case "deliver":
 			_ = runDelivery(os.Getenv)
 			return
@@ -38,7 +35,7 @@ func main() {
 			return
 		}
 	}
-	_ = runHook(func() error { return spawnCapture(os.Stdin) })
+	_ = runHook(os.Stdin, os.Getenv, spawnDetached)
 }
 
 func runPrepare(getenv func(string) string) error {
@@ -49,18 +46,13 @@ func runPrepare(getenv func(string) string) error {
 	return spool.Prepare()
 }
 
-func runHook(spawn func() error) error {
-	_ = spawn()
-	return nil
-}
-
-func runCapture(input io.Reader, getenv func(string) string, spawn func() error) error {
+func runHook(input io.Reader, getenv func(string) string, spawn func() error) error {
 	if getenv("CANOPI_ENDPOINT") == "" || getenv("CANOPI_TOKEN_FILE") == "" || getenv("CANOPI_MACHINE_ID") == "" {
 		return nil
 	}
 	raw, err := io.ReadAll(io.LimitReader(input, maxHookBytes+1))
 	if err != nil || len(raw) > maxHookBytes {
-		return nil //nolint:nilerr // Detached capture failures have no provider-visible channel.
+		return nil //nolint:nilerr // Hook failures must never affect Claude Code.
 	}
 	event, emit, err := canopiadapter.MapClaudeHook(raw, canopiadapter.AdapterConfig{
 		MachineID:    getenv("CANOPI_MACHINE_ID"),
@@ -69,34 +61,27 @@ func runCapture(input io.Reader, getenv func(string) string, spawn func() error)
 		Repository:   getenv("CANOPI_REPOSITORY"),
 	}, time.Now())
 	if err != nil || !emit {
-		return nil //nolint:nilerr // Invalid or irrelevant hooks have no provider-visible channel.
+		return nil //nolint:nilerr // Invalid or irrelevant hooks are deliberately swallowed.
 	}
 	spool, err := deliverySpool(getenv)
-	if err != nil || spool.Enqueue(event) != nil {
-		return nil //nolint:nilerr // Detached capture failures have no provider-visible channel.
+	if err != nil {
+		return nil //nolint:nilerr // Hook failures must never affect Claude Code.
 	}
+	_ = spool.Enqueue(event)
+	// The supervisor is also kicked after an enqueue error: publish-before-sync
+	// can leave a complete recoverable target for it to re-sync and deliver.
 	_ = spawn()
 	return nil
 }
 
-func spawnCapture(input *os.File) error {
-	return spawnDetached("capture", input)
-}
-
-func spawnSupervisor() error {
-	return spawnDetached("supervise", nil)
-}
-
-func spawnDetached(mode string, input *os.File) error {
+func spawnDetached() error {
 	executable, err := os.Executable()
 	if err != nil {
 		return err
 	}
-	command := exec.CommandContext(context.Background(), executable, mode) // #nosec G204 -- os.Executable returns this already-running adapter binary; arguments are fixed.
-	command.Stdin = input
+	command := exec.CommandContext(context.Background(), executable, "supervise") // #nosec G204 -- os.Executable returns this already-running adapter binary; arguments are fixed.
 	command.Stdout = io.Discard
 	command.Stderr = io.Discard
-	configureDetachedProcess(command)
 	if err := command.Start(); err != nil {
 		return err
 	}

@@ -541,8 +541,82 @@ func TestEnqueueLockedStopsBeforeMaintenanceWhenPrimaryBudgetExpires(t *testing.
 }
 
 func TestPrimaryEnqueueLockBudgetRemainsBounded(t *testing.T) {
+	if providerEnqueueBudget >= 2*time.Second {
+		t.Fatalf("provider enqueue budget = %s, must remain below Claude's two-second hook deadline", providerEnqueueBudget)
+	}
+	if maxPrimaryLaneBudget >= providerEnqueueBudget {
+		t.Fatalf("primary budget = %s, must leave time for the durable contention lane", maxPrimaryLaneBudget)
+	}
 	if maxPrimaryLaneBudget > time.Second {
 		t.Fatalf("primary lock budget = %s, want <= 1s before contention fallback", maxPrimaryLaneBudget)
+	}
+}
+
+func TestEnqueuePublishesCompleteEventBeforeFileSyncReturns(t *testing.T) {
+	directory := t.TempDir()
+	started := make(chan struct{})
+	release := make(chan struct{})
+	spool := preparedTestSpool(t, Spool{
+		Directory: directory,
+		MaxEvents: 4,
+		syncFile: func(*os.File) error {
+			close(started)
+			<-release
+			return nil
+		},
+	})
+	done := make(chan error, 1)
+	go func() { done <- spool.Enqueue(spoolEvent("published-before-sync")) }()
+	<-started
+	path := spool.eventPath("published-before-sync")
+	payload, err := readPrivateSpoolFile(path, maxSpoolEventBytes)
+	if err != nil {
+		t.Fatalf("published event is not readable while Sync is blocked: %v", err)
+	}
+	event, err := protocol.DecodeEvent(bytes.NewReader(payload), maxSpoolEventBytes)
+	if err != nil || event.EventID != "published-before-sync" {
+		t.Fatalf("published event = %+v, %v", event, err)
+	}
+	close(release)
+	if err := <-done; err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestEnqueueLeavesPublishedEventWhenFileSyncFails(t *testing.T) {
+	spool := preparedTestSpool(t, Spool{
+		Directory: t.TempDir(),
+		MaxEvents: 4,
+		syncFile:  func(*os.File) error { return errors.New("simulated sync failure") },
+	})
+	if err := spool.Enqueue(spoolEvent("retained-after-sync-error")); err == nil {
+		t.Fatal("Enqueue() accepted a failed file sync")
+	}
+	if got, err := spool.Pending(); err != nil || got != 1 {
+		t.Fatalf("Pending() after sync failure = %d, %v; want durable handoff retained", got, err)
+	}
+}
+
+func TestDrainResyncsPublishedEventBeforeDelivery(t *testing.T) {
+	syncs := 0
+	spool := preparedTestSpool(t, Spool{
+		Directory: t.TempDir(),
+		MaxEvents: 4,
+		syncFile: func(*os.File) error {
+			syncs++
+			return nil
+		},
+	})
+	if err := spool.Enqueue(spoolEvent("resynced-before-delivery")); err != nil {
+		t.Fatal(err)
+	}
+	if err := spool.Drain(context.Background(), func(context.Context, protocol.Event) error {
+		if syncs < 2 {
+			t.Fatalf("delivery started after %d file syncs, want enqueue plus drain sync", syncs)
+		}
+		return nil
+	}); err != nil {
+		t.Fatal(err)
 	}
 }
 

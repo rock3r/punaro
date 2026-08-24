@@ -86,6 +86,14 @@ func openSpoolEventFile(path string) (*os.File, error) {
 	return os.NewFile(uintptr(descriptor), path), nil // #nosec G115 -- successful descriptors are nonnegative.
 }
 
+func openSpoolEventFileForSync(path string) (*os.File, error) {
+	descriptor, err := unix.Open(path, unix.O_RDWR|unix.O_CLOEXEC|unix.O_NOFOLLOW, 0) // #nosec G304 -- path is inside the validated private spool and checked before and after.
+	if err != nil {
+		return nil, err
+	}
+	return os.NewFile(uintptr(descriptor), path), nil // #nosec G115 -- successful descriptors are nonnegative.
+}
+
 func protectSpoolFile(_ string, file *os.File) error {
 	if err := file.Chmod(0o600); err != nil {
 		return err

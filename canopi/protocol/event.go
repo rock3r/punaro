@@ -216,11 +216,8 @@ func DecodeEvent(reader io.Reader, maxBytes int64) (Event, error) {
 	if int64(len(payload)) > maxBytes {
 		return Event{}, fmt.Errorf("event exceeds %d bytes", maxBytes)
 	}
-	if !utf8.Valid(payload) {
-		return Event{}, errors.New("event must be valid UTF-8 JSON")
-	}
-	if !validJSONUnicodeEscapes(payload) {
-		return Event{}, errors.New("event must use valid Unicode scalar escapes")
+	if err := ValidateJSONEncoding(payload); err != nil {
+		return Event{}, err
 	}
 	decoder := json.NewDecoder(bytes.NewReader(payload))
 	decoder.DisallowUnknownFields()
@@ -237,6 +234,18 @@ func DecodeEvent(reader io.Reader, maxBytes int64) (Event, error) {
 		return Event{}, err
 	}
 	return event, nil
+}
+
+// ValidateJSONEncoding rejects byte and escape sequences that encoding/json
+// would otherwise normalize into Unicode replacement characters.
+func ValidateJSONEncoding(payload []byte) error {
+	if !utf8.Valid(payload) {
+		return errors.New("event must be valid UTF-8 JSON")
+	}
+	if !validJSONUnicodeEscapes(payload) {
+		return errors.New("event must use valid Unicode scalar escapes")
+	}
+	return nil
 }
 
 func validJSONUnicodeEscapes(payload []byte) bool {

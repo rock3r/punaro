@@ -23,6 +23,7 @@ const (
 	defaultMaxSpoolEvents = 4_096
 	maxSpoolEventBytes    = 64 << 10
 	defaultEnqueueWait    = 250 * time.Millisecond
+	providerEnqueueBudget = 1750 * time.Millisecond
 	maxPrimaryLaneBudget  = 750 * time.Millisecond
 	enqueueLockPoll       = 5 * time.Millisecond
 	supervisorPoll        = 250 * time.Millisecond
@@ -40,11 +41,13 @@ type Spool struct {
 	RetryMax  time.Duration
 	// EnqueueLockTimeout bounds the primary lane before contention fallback.
 	EnqueueLockTimeout time.Duration
+	syncFile           func(*os.File) error
 }
 
 // Enqueue durably records an event. Re-enqueueing the same event ID is harmless.
 func (s Spool) Enqueue(event protocol.Event) error {
-	operationCtx := context.Background()
+	operationCtx, cancelOperation := context.WithTimeout(context.Background(), providerEnqueueBudget)
+	defer cancelOperation()
 	if err := event.Validate(); err != nil {
 		return err
 	}
@@ -160,15 +163,21 @@ func (s Spool) enqueueLocked(ctx context.Context, event protocol.Event, payload 
 		_ = temporary.Close()
 		return err
 	}
-	if err := temporary.Sync(); err != nil {
+	if err := os.Link(temporaryName, target); err != nil && !errors.Is(err, os.ErrExist) {
+		_ = temporary.Close()
+		return err
+	}
+	if err := s.syncSpoolFile(temporary); err != nil {
 		_ = temporary.Close()
 		return err
 	}
 	if err := temporary.Close(); err != nil {
 		return err
 	}
-	if err := os.Link(temporaryName, target); err != nil && !errors.Is(err, os.ErrExist) {
-		return err
+	if contextErr(ctx) != nil {
+		// The complete target is already namespace-visible and file-synced. The
+		// persistent supervisor re-syncs its directory before delivery.
+		return nil
 	}
 	return syncDirectory(s.Directory)
 }
@@ -255,7 +264,7 @@ func (s Spool) publishIntoContentionSlot(ctx context.Context, path, eventID stri
 		if matched || occupied {
 			return nil
 		}
-		created, inspectErr = s.publishContentionEvent(path, payload)
+		created, inspectErr = s.publishContentionEvent(ctx, path, payload)
 		return inspectErr
 	})
 	return matched, created, occupied, err
@@ -330,7 +339,7 @@ func queuedSpoolEventMatches(path, eventID string) (match, occupied bool, err er
 	return event.EventID == eventID, true, nil
 }
 
-func (s Spool) publishContentionEvent(target string, payload []byte) (created bool, err error) {
+func (s Spool) publishContentionEvent(ctx context.Context, target string, payload []byte) (created bool, err error) {
 	// The pre-lock name is outside the ordinary cleanup namespace. Once the
 	// inode is locked, renaming it makes ownership visible to cleanup atomically.
 	temporary, err := os.CreateTemp(s.Directory, ".contention-publishing-*.tmp")
@@ -361,15 +370,20 @@ func (s Spool) publishContentionEvent(target string, payload []byte) (created bo
 	if _, err := temporary.Write(payload); err != nil {
 		return false, err
 	}
-	if err := temporary.Sync(); err != nil {
-		return false, err
-	}
 	linkErr := os.Link(temporaryName, target)
 	if linkErr != nil && !errors.Is(linkErr, os.ErrExist) {
 		return false, linkErr
 	}
+	if err := s.syncSpoolFile(temporary); err != nil {
+		return false, err
+	}
 	if err := os.Remove(temporaryName); err != nil && !errors.Is(err, os.ErrNotExist) {
 		return false, err
+	}
+	if contextErr(ctx) != nil {
+		// The target is published and file-synced; the supervisor completes the
+		// directory durability barrier before delivery.
+		return linkErr == nil, nil
 	}
 	if err := syncDirectory(s.Directory); err != nil {
 		return false, err
@@ -491,6 +505,9 @@ func (s Spool) normalized() (Spool, error) {
 	}
 	if s.EnqueueLockTimeout <= 0 || s.EnqueueLockTimeout > maxPrimaryLaneBudget {
 		return Spool{}, errors.New("canopi primary enqueue budget must be at most 750 milliseconds")
+	}
+	if s.syncFile == nil {
+		s.syncFile = func(file *os.File) error { return file.Sync() }
 	}
 	return s, nil
 }
@@ -701,6 +718,14 @@ func (s Spool) drainLocked(ctx context.Context, deliver func(context.Context, pr
 				}
 				continue
 			}
+			if err := syncPrivateSpoolFile(path, s.syncSpoolFile); err != nil {
+				hadFailure = true
+				continue
+			}
+			if err := syncDirectory(s.Directory); err != nil {
+				hadFailure = true
+				continue
+			}
 			attemptCtx, cancel := context.WithTimeout(ctx, time.Second)
 			err = deliver(attemptCtx, event)
 			cancel()
@@ -733,6 +758,30 @@ func (s Spool) drainLocked(ctx context.Context, deliver func(context.Context, pr
 			backoff = s.RetryMax
 		}
 	}
+}
+
+func syncPrivateSpoolFile(path string, syncFile func(*os.File) error) error {
+	before, err := os.Lstat(path)
+	if err != nil || !privateSpoolFile(path, before) {
+		return errors.New("queued Canopi event must be a private current-user-owned regular file")
+	}
+	file, err := openSpoolEventFileForSync(path)
+	if err != nil {
+		return errors.New("queued Canopi event must be a private current-user-owned regular file")
+	}
+	defer func() { _ = file.Close() }()
+	after, err := file.Stat()
+	if err != nil || !os.SameFile(before, after) || !privateSpoolFile(path, after) {
+		return errors.New("queued Canopi event changed while opening for sync")
+	}
+	return syncFile(file)
+}
+
+func (s Spool) syncSpoolFile(file *os.File) error {
+	if s.syncFile != nil {
+		return s.syncFile(file)
+	}
+	return file.Sync()
 }
 
 func readPrivateSpoolFile(path string, maxBytes int64) ([]byte, error) {

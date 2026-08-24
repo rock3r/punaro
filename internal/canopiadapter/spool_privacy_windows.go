@@ -108,6 +108,26 @@ func openSpoolEventFile(path string) (*os.File, error) {
 	return os.NewFile(uintptr(handle), path), nil // #nosec G115 -- successful Win32 handles are nonnegative.
 }
 
+func openSpoolEventFileForSync(path string) (*os.File, error) {
+	name, err := windows.UTF16PtrFromString(path)
+	if err != nil {
+		return nil, err
+	}
+	handle, err := windows.CreateFile(name, windows.GENERIC_READ|windows.GENERIC_WRITE, windows.FILE_SHARE_READ, nil, windows.OPEN_EXISTING, windows.FILE_ATTRIBUTE_NORMAL|windows.FILE_FLAG_OPEN_REPARSE_POINT, 0) // #nosec G304 -- path is inside the validated private spool and checked before and after.
+	if err != nil {
+		return nil, err
+	}
+	var details windows.ByHandleFileInformation
+	if err := windows.GetFileInformationByHandle(handle, &details); err != nil || details.FileAttributes&windows.FILE_ATTRIBUTE_REPARSE_POINT != 0 || details.FileAttributes&windows.FILE_ATTRIBUTE_DIRECTORY != 0 {
+		_ = windows.CloseHandle(handle)
+		if err != nil {
+			return nil, err
+		}
+		return nil, os.ErrInvalid
+	}
+	return os.NewFile(uintptr(handle), path), nil // #nosec G115 -- successful Win32 handles are nonnegative.
+}
+
 func protectSpoolFile(path string, file *os.File) error {
 	sid := currentWindowsSpoolSID()
 	if sid == nil {

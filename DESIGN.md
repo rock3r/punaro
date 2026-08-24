@@ -1833,34 +1833,36 @@ assistant text is neither inspected for classification nor forwarded. Claude
 invocation IDs are random, fixed-length 256-bit values independent of both the
 bearer credential and provider payload, preventing the collector or a token
 holder from testing guesses about private hook content through visible IDs.
-The queued normalized event retains that ID across delivery retries. Adapter
-capture and delivery are detached, bounded, and incapable of blocking or
-controlling the coding agent. Derived machine labels and task titles are
-rune-safely bounded.
+The queued normalized event retains that ID across delivery retries. Raw Claude
+hook input must also pass the protocol's UTF-8 and paired-scalar-escape checks
+before provider JSON decoding. Adapter delivery is detached, bounded, and
+incapable of controlling the coding agent. Derived machine labels and task
+titles are rune-safely bounded.
 
-The provider-facing Claude process hands its inherited stdin directly to a
-detached local capture child and returns after process creation, before parsing,
-storage, or network work. The child runs in an independent Unix session or
-detached Windows process group, normalizes raw input only in memory, and durably
+The provider-facing Claude process normalizes raw input only in memory and
 writes each privacy-safe event to a bounded owner-only spool before launching a
 detached delivery process. Raw input is never placed in process arguments,
-environment variables, durable files, or requests. Unix
+environment variables, durable files, or requests. The completed event inode is
+hard-linked into its final queue name before file or directory sync begins. If
+Claude terminates a hook during either uncancellable durability barrier, or the
+detached supervisor launch fails, the target remains recoverable. The persistent
+supervisor reopens and re-syncs the file and directory before any delivery.
+Unix
 spools must be current-user-owned and are tightened to mode `0700`; Windows
 spools must be current-user-owned and receive a protected DACL containing only
 the current user's full-access ACE. One
 cross-process worker retries queued events with their original IDs until
 acknowledged, while continuing past a rejected event so independent later
-updates are not starved. Per-attempt network timeouts, process detachment, and
-kernel-released file locks keep provider hooks isolated from collector or
-filesystem stalls. Enqueue, drain, and
+updates are not starved. Per-attempt network timeouts and kernel-released file
+locks keep provider hooks isolated from collector outages. Enqueue, drain, and
 supervisor ownership is bound to each process's open handle, so process exit
 releases it and neither stale timestamps nor wall-clock jumps can fence out a
 live holder. Concurrent enqueues wait at most 250 ms for the primary lane. Longer
-contention publishes through an atomically claimed, fsynced reserve slot within
-the same total event bound; no collector network I/O runs under the primary
-lock. The provider-facing launcher performs no enqueue, so an uncancellable
-file sync in detached capture may safely finish after Claude's hook deadline.
-The configurable primary phase is capped at 750 ms, maintenance and capacity
+contention publishes through an atomically claimed reserve slot within the same
+total event bound; no collector network I/O runs under the primary lock. The
+target link precedes sync in both lanes, so a provider timeout cannot remove a
+complete event merely because sync stalled. The configurable primary phase is
+capped at 750 ms, maintenance and capacity
 scans are cancellable in 128-entry batches, and primary-budget exhaustion falls
 through to the reserve. The fallback temporary starts
 under a pre-lock staging name, acquires its kernel lock, and only then renames
@@ -1874,7 +1876,8 @@ polls even while the spool is empty, and provides a durable wake/restart path
 when a detached kick or worker crashes during a quiet session.
 On Windows, each hard-link publication and acknowledgement removal is followed
 by a directory `FlushFileBuffers`, matching the Unix directory-sync durability
-contract before detached capture treats enqueueing as complete.
+contract. The supervisor repeats the file and directory barrier before it can
+authenticate an event to the collector.
 Queued event reads stat the opened file and remain stream-limited to 64 KiB, so
 corrupt oversized entries cannot turn the event-count bound into unbounded memory.
 Each queued child must also be a stable, no-follow, private current-user-owned

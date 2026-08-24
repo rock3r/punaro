@@ -5,27 +5,12 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
-	"strings"
 	"testing"
 
 	"github.com/rock3r/punaro/internal/canopiadapter"
 )
 
-func TestHookDelegatesCaptureWithoutReadingProviderInput(t *testing.T) {
-	spawned := false
-	err := runHook(func() error {
-		spawned = true
-		return errors.New("simulated launch failure")
-	})
-	if err != nil {
-		t.Fatalf("runHook() error = %v; adapter failures must be swallowed", err)
-	}
-	if !spawned {
-		t.Fatal("runHook() did not launch detached capture")
-	}
-}
-
-func TestDetachedCaptureDurablyQueuesWithoutWaitingForNetwork(t *testing.T) {
+func TestHookDurablyQueuesBeforeDetachedDeliveryLaunchFailure(t *testing.T) {
 	raw := []byte(`{"session_id":"session-1","cwd":"/src/punaro","hook_event_name":"PermissionRequest","tool_name":"Bash","tool_input":{"command":"private"}}`)
 	environment := map[string]string{
 		"CANOPI_ENDPOINT":      "http://canopi.test",
@@ -39,15 +24,15 @@ func TestDetachedCaptureDurablyQueuesWithoutWaitingForNetwork(t *testing.T) {
 		t.Fatal(err)
 	}
 	spawned := false
-	err := runCapture(bytes.NewReader(raw), func(key string) string { return environment[key] }, func() error {
+	err := runHook(bytes.NewReader(raw), func(key string) string { return environment[key] }, func() error {
 		spawned = true
 		return errors.New("simulated launch failure")
 	})
 	if err != nil {
-		t.Fatalf("runCapture() error = %v", err)
+		t.Fatalf("runHook() error = %v; adapter failures must be swallowed", err)
 	}
 	if !spawned {
-		t.Fatal("runCapture() did not launch detached supervisor")
+		t.Fatal("runHook() did not launch detached delivery")
 	}
 	spool := canopiadapter.Spool{Directory: environment["CANOPI_SPOOL_DIR"]}
 	if got, err := spool.Pending(); err != nil || got != 1 {
@@ -63,25 +48,6 @@ func TestDetachedCaptureDurablyQueuesWithoutWaitingForNetwork(t *testing.T) {
 	}
 	if bytes.Contains(payload, []byte("private")) {
 		t.Fatal("durable normalized payload contains private hook input")
-	}
-}
-
-func TestDetachedProcessConfigurationSurvivesHookParentExit(t *testing.T) {
-	unixSource, err := os.ReadFile("process_detach_unix.go")
-	if err != nil {
-		t.Fatal(err)
-	}
-	windowsSource, err := os.ReadFile("process_detach_windows.go")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if !strings.Contains(string(unixSource), "Setsid: true") {
-		t.Fatal("Unix capture worker does not start in a detached session")
-	}
-	for _, required := range []string{"DETACHED_PROCESS", "CREATE_NEW_PROCESS_GROUP"} {
-		if !strings.Contains(string(windowsSource), required) {
-			t.Fatalf("Windows capture worker is missing %s", required)
-		}
 	}
 }
 

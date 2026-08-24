@@ -40,6 +40,9 @@ func MapClaudeHook(raw []byte, config AdapterConfig, now time.Time) (protocol.Ev
 	if config.MachineID == "" {
 		return protocol.Event{}, false, errors.New("machine ID is required")
 	}
+	if err := protocol.ValidateJSONEncoding(raw); err != nil {
+		return protocol.Event{}, false, fmt.Errorf("decode Claude hook: %w", err)
+	}
 	var hook claudeHook
 	if err := json.Unmarshal(raw, &hook); err != nil {
 		return protocol.Event{}, false, fmt.Errorf("decode Claude hook: %w", err)

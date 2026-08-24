@@ -62,6 +62,22 @@ func TestMapClaudeHookUsesInstalledPermissionSchemaWithoutPrivateContent(t *test
 	}
 }
 
+func TestMapClaudeHookRejectsMalformedUnicodeBeforeJSONNormalization(t *testing.T) {
+	invalidUTF8 := []byte(`{"session_id":"session-`)
+	invalidUTF8 = append(invalidUTF8, 0xff)
+	invalidUTF8 = append(invalidUTF8, []byte(`","cwd":"/src/punaro","hook_event_name":"SessionStart"}`)...)
+	for name, raw := range map[string][]byte{
+		"invalid UTF-8":      invalidUTF8,
+		"unpaired surrogate": []byte(`{"session_id":"session-\ud800","cwd":"/src/punaro","hook_event_name":"SessionStart"}`),
+	} {
+		t.Run(name, func(t *testing.T) {
+			if _, _, err := MapClaudeHook(raw, AdapterConfig{MachineID: "studio-m2", TaskTitle: "Punaro / tests"}, time.Now()); err == nil {
+				t.Fatal("MapClaudeHook() accepted malformed Unicode")
+			}
+		})
+	}
+}
+
 func TestMapClaudeHookDoesNotLetAssistantTextOverrideTerminalHook(t *testing.T) {
 	raw := []byte(`{"session_id":"session-1","cwd":"/src/punaro","hook_event_name":"Stop","stop_hook_active":false,"last_assistant_message":"I need one choice before I can continue. Which database should I use?"}`)
 	event, emit, err := MapClaudeHook(raw, AdapterConfig{MachineID: "studio-m2", TaskTitle: "Punaro / choice"}, time.Now())
