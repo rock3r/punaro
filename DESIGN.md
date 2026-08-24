@@ -1759,6 +1759,192 @@ This generated-stack contract covers the single configured `punarod` writer and
 externally provisioned PostgreSQL; the production PostgreSQL/profile bundle is
 still M-23.
 
+## Canopi lifecycle dashboard boundary
+
+Canopi is Punaro's independently deployable coding-agent status surface. Its
+versioned protocol is intentionally outside the Punaro relay/mail contract:
+provider adapters normalize lifecycle signals into strict events without
+knowing whether direct HTTP, a local spool, or a future Punaro bridge transports
+them. Punaro message content is never interpreted as Canopi control data.
+
+The MVP collector uses a separate bearer-authenticated loopback HTTP or LAN TLS
+listener, a bounded durable state snapshot, and at-least-once event IDs.
+Duplicate IDs are harmless and an already-durable duplicate is acknowledged
+before future-skew validation, preserving exact-retry idempotency across clock
+corrections.
+For one card, `activity_at` and then `event_id` fence delayed/out-of-order
+updates. Admission durably expires stale records before rejecting new identities
+at a configured live-record ceiling, and rejects activity timestamps beyond
+configured future clock skew. A failed
+state-file write never mutates the acknowledged in-memory revision, record, or
+dedupe set, so an exact retry still attempts persistence. Non-terminal TTL
+expiry archives/hides abandoned work and never converts it to success; done
+retention is independent. Expiry commits transactionally; a failed state-file
+write leaves the acknowledged record visible under the unchanged revision.
+The configured aggregate serialized-state budget is checked transactionally
+before an event is acknowledged; startup rejects a larger state file before
+allocating or decoding its body, and snapshot JSON is bounded by the same
+invariant. Admission evicts the oldest dedupe IDs until the candidate fits but
+never evicts the newly acknowledged ID; record overflow still fails
+transactionally. Serialized updates reclaim crash-left state
+temporaries in per-target namespaces and bounded directory batches before
+creating a replacement, without racing another state file in the same parent.
+The state path is absolute and clean. Its parent must be current-user-owned and
+is made owner-only; existing Unix state files must be stable, singly linked,
+current-user-owned `0600` regular files opened without following symlinks.
+Windows applies equivalent owner, protected-DACL, and no-reparse checks to the
+directory, existing state, and replacement temporary. Windows replacement
+hard-links the old target as a recovery copy, flushes that directory entry,
+publishes with `MoveFileEx` replacement plus write-through semantics, flushes
+the directory again, and restores the backup at startup if the target is absent.
+Each replacement also recovers or clears a leftover backup before creating the
+next one, preventing a failed flush or cleanup from wedging later writes.
+A kernel-held lifetime lock keyed by the state path excludes overlapping
+collector writers and is released by orderly close or process exit. Windows
+derives that lock key from the final path of an open state or parent-directory
+handle, collapsing case, extended-device, short-name, and directory aliases.
+Unix resolves the existing state path or its parent before deriving the key,
+collapsing aliases introduced by symlinks in ancestor directories.
+The fixed lock file uses exclusive creation and no-follow opening on both
+platforms; unsafe pre-existing entries are removed, directory-synced, and
+recreated with current-user-only protection. Repair is serialized cross-process
+with the parent-directory kernel lock on Unix and a case-normalized named kernel
+mutex on Windows before rechecking and unlinking the unsafe entry.
+Signal shutdown waits for the HTTP server to drain active handlers before closing
+the store and releasing this lifetime lock, so a rolling replacement cannot load
+or write state while an old ingestion is still persisting. This drain is
+deliberately unbounded rather than releasing the writer lock after a timeout.
+Snapshot and image ETags change only with state revision or rendered response
+content. Snapshot responses use a weak revision validator because their
+generation timestamp changes without a semantic state change; rendered PNGs
+use strong content hashes. TTL checks always use the real clock; only
+relative-time rendering and its image cache key use the configured bucket.
+
+Prompts, transcripts, assistant messages, credentials, tool inputs, and tool
+outputs are not part of the protocol. Metadata is default-deny: the schema and
+Go validator expose only `hook`, `simulated`, and `agent_type`, with matching
+per-key types. Wire and persisted decoding retain numeric metadata as exact JSON
+numbers instead of converting through `float64`; omission is valid, while an
+explicit JSON `null` is rejected because the schema requires an object. Only
+valid UTF-8 reaches JSON decoding, preventing malformed identifiers from being
+normalized into colliding replacement-character strings. Only explicit,
+trusted hook fields drive lifecycle state;
+assistant text is neither inspected for classification nor forwarded. Claude
+invocation IDs are random, fixed-length 256-bit values independent of both the
+bearer credential and provider payload, preventing the collector or a token
+holder from testing guesses about private hook content through visible IDs.
+The queued normalized event retains that ID across delivery retries. Raw Claude
+hook input must also pass the protocol's UTF-8 and paired-scalar-escape checks
+before provider JSON decoding. Adapter delivery is detached, bounded, and
+incapable of controlling the coding agent. Derived machine labels and task
+titles are rune-safely bounded.
+
+The provider-facing Claude process is configured as a current-schema asynchronous
+Claude Code command hook (30-second timeout), so it cannot block or control the
+agent while it normalizes raw input only in memory and writes each privacy-safe
+event to a bounded owner-only spool before launching a detached delivery process.
+Raw input is never placed in process arguments,
+environment variables, durable files, or requests. The completed event inode is
+hard-linked into its final queue name before file or directory sync begins. If
+Claude terminates a hook during either uncancellable durability barrier, or the
+detached supervisor launch fails, the target remains recoverable. A hook reports
+success only after the file and directory barriers succeed; on a sync failure it
+kicks the persistent supervisor and exits non-zero. The persistent supervisor
+reopens and re-syncs the file and directory before any delivery.
+Claude Code's current hook payload has neither a source timestamp nor a
+monotonic invocation sequence. The asynchronous integration therefore uses
+best-effort local invocation/admission ordering and never reads private
+transcripts to manufacture ordering data.
+Unix
+spools must be current-user-owned and are tightened to mode `0700`; Windows
+spools must be current-user-owned and receive a protected DACL containing only
+the current user's full-access ACE. One
+cross-process worker retries queued events with their original IDs until
+acknowledged, while continuing past a rejected event so independent later
+updates are not starved. Per-attempt network timeouts and kernel-released file
+locks keep provider hooks isolated from collector outages. Enqueue, drain, and
+supervisor ownership is bound to each process's open handle, so process exit
+releases it and neither stale timestamps nor wall-clock jumps can fence out a
+live holder. Concurrent enqueues wait at most 250 ms for the primary lane. Longer
+contention publishes through an atomically claimed reserve slot within the same
+total event bound; no collector network I/O runs under the primary lock. The
+target link precedes sync in both lanes, so a provider timeout cannot remove a
+complete event merely because sync stalled. The configurable primary phase is
+capped at 750 ms, maintenance and capacity
+scans are cancellable in 128-entry batches, and primary-budget exhaustion falls
+through to the reserve. The fallback temporary starts
+under a pre-lock staging name, acquires its kernel lock, and only then renames
+into the cleanup-visible namespace. Cleanup therefore cannot unlink the file in
+the create-to-lock window; a pre-lock crash remnant becomes reclaimable after one
+minute. Under the enqueue lock, every enqueue removes
+crash-left temporary event files before admitting new work. The same protected-token checks apply on the adapter
+host. A persistent
+`supervise` mode runs under the host service manager, holds a singleton lease,
+polls even while the spool is empty, and provides a durable wake/restart path
+when a detached kick or worker crashes during a quiet session.
+On Windows, each hard-link publication and acknowledgement removal is followed
+by a directory `FlushFileBuffers`, matching the Unix directory-sync durability
+contract. The supervisor repeats the file and directory barrier before it can
+authenticate an event to the collector.
+Queued event reads stat the opened file and remain stream-limited to 64 KiB, so
+corrupt oversized entries cannot turn the event-count bound into unbounded memory.
+Each queued child must also be a stable, no-follow, private current-user-owned
+regular file. Event enumeration discards pre-existing foreign or shared children
+after the parent is tightened and before capacity accounting or delivery; enqueue
+protects new files before publication.
+Fixed-name enqueue, drain, and supervisor locks are created exclusively and
+opened without following links. Pre-existing entries that fail current-user
+ownership or privacy checks are removed, directory-synced, and safely recreated.
+One sixteenth of the configured capacity (at least one, at most 256) is reserved
+for contention slots, so the primary and fallback lanes remain jointly bounded.
+Kernel locks on active fallback temporaries distinguish live publication from
+crash leftovers during cleanup.
+
+Structurally valid event batches continue across per-event admission failures
+and return ordered per-event status records with HTTP 207 when mixed; only a
+shared persistence failure aborts the batch. This prevents one permanently
+rejected identity from starving later updates on every retry. The simulator
+retains only rejected events from a mixed response and retries their stable IDs
+before advancing. The batch envelope is strictly an array; JSON `null` is not
+an empty batch and is rejected.
+
+The renderer always sorts the complete state set waiting, done, working, then
+recent-first inside each state, before applying configurable capacity. Accepted
+fixed-panel grids have one or two columns and one through six rows; other shapes
+are rejected before they can overlap typography or icons. The last slot becomes
+an omitted-tail per-state count when overflowing. Its output is an exact
+800x480 two-color PNG. Custom header titles are fitted into the pixels reserved
+before the right-aligned lifecycle totals. Each tile similarly fits its machine
+label only into the pixels preceding the right-aligned relative time plus a
+fixed gap. The panel thresholds each decoded RGB565 scanline and packs it
+MSB-first for the Seeed_GFX one-bit sprite; it performs a full e-paper
+refresh only after a changed ETag, bounded PNG download, successful decode, and
+exact dimension validation. The RTC-retained validator is versioned so a
+firmware update that changes image interpretation forces one corrective redraw.
+
+Canopi's first listener is loopback by default. A concrete private/link-local
+listener requires explicit LAN opt-in and an absolute TLS certificate/key pair;
+wildcard, public, and plaintext LAN binds fail closed. The panel accepts only an
+HTTPS render URL, synchronizes a valid wall clock over NTP before its first
+request, and validates the collector certificate against its configured CA.
+Adapter and simulator origins use the same HTTPS-except-literal-loopback
+policy and refuse redirects, so no reusable bearer is sent to an unvalidated
+target or over plaintext LAN traffic.
+This shared-token LAN MVP is not yet Punaro device-authenticated and must not be
+mounted on the public Punaro origin. Its bearer token must be a protected,
+current-user-owned regular file (or equivalent current-user-only Windows ACL),
+opened without following symlinks and rejected if its identity changes during
+open. The collector loads its TLS private key through that protected loader and
+constructs the in-memory certificate before serving, so the HTTP server never
+reopens a replaceable key path. Collector, provider adapter, and simulator share
+the same bearer-token loader.
+
+Simulator event IDs include a random per-process run identity, preventing a
+restart from colliding with the collector's durable dedupe window. A failed
+post retains the exact pending batch and event IDs for retry before the
+simulation advances. State transitions use the current tick timestamp so a
+resumed working update always orders after the preceding wait.
+
 ## Required adversarial acceptance tests
 
 The implementation is not internet-exposure-ready until these cases pass:

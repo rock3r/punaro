@@ -18,3 +18,8 @@ coverage.out
 
 __pycache__/
 *.pyc
+
+# Canopi panel credentials
+/firmware/canopi-panel/include/secrets.h
+/firmware/canopi-panel/.pio/
+/firmware/canopi-panel/.toolchains/

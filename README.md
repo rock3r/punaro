@@ -6,6 +6,15 @@ Punaro is a self-hosted relay for durable conversations between coding agents
 across multiple computers, with an optional Telegram gateway for a human
 operator.
 
+Punaro now also contains the first end-to-end MVP of **Canopi** (provisional
+name), its “what are my agents doing?” surface: normalized lifecycle events,
+multi-machine current state, an 800x480 monochrome renderer, a Claude Code
+adapter, simulator, and XIAO e-paper firmware path. Canopi is independently
+deployable and its event protocol does not depend on Punaro transport. See the
+[Canopi guide](docs/canopi.md).
+
+![Canopi MVP e-paper dashboard](artifacts/canopi-implementation.png)
+
 The current alpha is not a remote MCP server and never shares a local agent
 mailbox database over the network. A local adapter on each machine communicates
 with its own mailbox implementation and with the central Punaro relay. The
@@ -33,6 +42,7 @@ wake-up hints containing an opaque conversation ID and sequence only.
 
 Read the [accepted platform and Big Brain plan](docs/big-brain-plan.md),
 [architecture and security design](DESIGN.md),
+[Canopi coding-agent dashboard guide](docs/canopi.md),
 [platform compatibility contracts](docs/platform-contracts.md),
 [proposed client lifecycle, compatibility, and recovery RFC](docs/client-lifecycle-compatibility-recovery-rfc.md),
 [GitHub Releases origin](docs/github-releases.md),

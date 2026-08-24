@@ -1,0 +1,9 @@
+{
+  "name": "tool-openocd-esp32",
+  "version": "3.1200.0+20260703",
+  "description": "Espressif OpenOCD with ESP32-C3 strap-safe flasher",
+  "license": "GPL-2.0-or-later",
+  "system": [
+    "darwin_arm64"
+  ]
+}
