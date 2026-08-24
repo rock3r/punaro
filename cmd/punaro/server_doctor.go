@@ -6,6 +6,7 @@ import (
 	"crypto/sha256"
 	"encoding/base64"
 	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"flag"
 	"fmt"
@@ -51,6 +52,78 @@ type serverDoctorCredentials struct {
 }
 
 var serverDoctorDSNRead = isolatedServerDoctorDSN
+
+type serverDoctorPathRequest struct {
+	Directory    string                `json:"directory"`
+	Installation operator.Installation `json:"installation"`
+}
+
+var (
+	serverDoctorPathCheck      = isolatedServerDoctorPaths
+	serverDoctorPathExecutable = os.Executable
+)
+
+func encodeServerDoctorPathRequest(installation operator.Installation) (string, bool) {
+	body, err := json.Marshal(serverDoctorPathRequest{Directory: installation.Directory, Installation: installation})
+	if err != nil || len(body) == 0 || len(body) > 128<<10 {
+		return "", false
+	}
+	return base64.RawURLEncoding.EncodeToString(body), true
+}
+
+func isolatedServerDoctorPaths(ctx context.Context, installation operator.Installation) ([]string, bool) {
+	request, ok := encodeServerDoctorPathRequest(installation)
+	if !ok {
+		return nil, false
+	}
+	executable, err := serverDoctorPathExecutable()
+	if err != nil {
+		return nil, false
+	}
+	output, ok := boundedCommandLimit(ctx, 16<<10, executable, "doctor-path-check", "--request", request)
+	if !ok {
+		return nil, false
+	}
+	decoder := json.NewDecoder(strings.NewReader(output))
+	var failures []string
+	if decoder.Decode(&failures) != nil || decoder.Decode(&struct{}{}) != io.EOF || len(failures) > 32 {
+		return nil, false
+	}
+	for _, failure := range failures {
+		if failure == "" || len(failure) > 256 || strings.ContainsAny(failure, "\r\n\x00") {
+			return nil, false
+		}
+	}
+	return failures, true
+}
+
+func directServerDoctorPaths(_ context.Context, installation operator.Installation) ([]string, bool) {
+	return operator.CheckPaths(installation), true
+}
+
+func runDoctorPathCheck(args []string, stdout io.Writer) int {
+	flags := flag.NewFlagSet("punaro doctor-path-check", flag.ContinueOnError)
+	flags.SetOutput(io.Discard)
+	encoded := flags.String("request", "", "encoded content-free installation")
+	if flags.Parse(args) != nil || flags.NArg() != 0 || *encoded == "" || len(*encoded) > 192<<10 {
+		return 2
+	}
+	body, err := base64.RawURLEncoding.DecodeString(*encoded)
+	if err != nil || len(body) == 0 || len(body) > 128<<10 {
+		return 2
+	}
+	decoder := json.NewDecoder(strings.NewReader(string(body)))
+	decoder.DisallowUnknownFields()
+	var request serverDoctorPathRequest
+	if decoder.Decode(&request) != nil || decoder.Decode(&struct{}{}) != io.EOF || request.Directory == "" || !filepath.IsAbs(request.Directory) || filepath.Clean(request.Directory) != request.Directory {
+		return 2
+	}
+	request.Installation.Directory = request.Directory
+	if json.NewEncoder(stdout).Encode(operator.CheckPaths(request.Installation)) != nil {
+		return 1
+	}
+	return 0
+}
 
 func withServerDoctorCredentials(ctx context.Context, installation operator.Installation) context.Context {
 	credentials := serverDoctorCredentials{values: map[string]string{}}

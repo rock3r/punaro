@@ -584,6 +584,42 @@ func TestDoctorDSNReadCommandAndCredentialPreloadStayInsideDeadline(t *testing.T
 	}
 }
 
+func TestDoctorPathCheckCommandAndIsolationStayInsideDeadline(t *testing.T) {
+	installation, err := operator.Load(testInstallation(t))
+	if err != nil {
+		t.Fatal(err)
+	}
+	request, ok := encodeServerDoctorPathRequest(installation)
+	if !ok {
+		t.Fatal("path-check request encoding failed")
+	}
+	var stdout bytes.Buffer
+	if code := runDoctorPathCheck([]string{"--request", request}, &stdout); code != 0 {
+		t.Fatalf("path-check helper code=%d", code)
+	}
+	var failures []string
+	if json.Unmarshal(stdout.Bytes(), &failures) != nil || len(failures) != 0 {
+		t.Fatalf("path-check failures=%#v output=%q", failures, stdout.String())
+	}
+
+	if runtime.GOOS == "windows" {
+		return
+	}
+	blocker := filepath.Join(t.TempDir(), "blocked-path-check")
+	if err := os.WriteFile(blocker, []byte("#!/bin/sh\nexec sleep 10\n"), 0o700); err != nil { // #nosec G306 -- private executable deadline fixture.
+		t.Fatal(err)
+	}
+	previous := serverDoctorPathExecutable
+	serverDoctorPathExecutable = func() (string, error) { return blocker, nil }
+	t.Cleanup(func() { serverDoctorPathExecutable = previous })
+	ctx, cancel := context.WithTimeout(t.Context(), 20*time.Millisecond)
+	defer cancel()
+	started := time.Now()
+	if _, known := isolatedServerDoctorPaths(ctx, installation); known || time.Since(started) > time.Second {
+		t.Fatalf("isolated path check known=%t elapsed=%s", known, time.Since(started))
+	}
+}
+
 func TestUpRefusesActiveUpdateBeforeStartingWriters(t *testing.T) {
 	preserveDependencies(t)
 	directory := testInstallation(t)

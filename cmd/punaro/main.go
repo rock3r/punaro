@@ -411,6 +411,8 @@ func run(args []string, stdout, stderr io.Writer) int {
 		return runDoctorFileDigest(args[1:], stdout)
 	case "doctor-dsn-read":
 		return runDoctorDSNRead(args[1:], stdout)
+	case "doctor-path-check":
+		return runDoctorPathCheck(args[1:], stdout)
 	case "client":
 		if len(args) > 1 && (args[1] == "invite" || args[1] == "add") {
 			return runClientAdd(args[2:], stdout, stderr)
@@ -718,7 +720,11 @@ func diagnoseServer(ctx context.Context, installation operator.Installation, mac
 	if _, digest, ok := strings.Cut(installation.Image, "@"); ok {
 		identity.ArtifactDigest = digest
 	}
-	checks := serverPathChecks(operator.CheckPaths(installation))
+	pathFailures, pathKnown := serverDoctorPathCheck(ctx, installation)
+	checks := unavailableServerPathChecks()
+	if pathKnown {
+		checks = serverPathChecks(pathFailures)
+	}
 	checks = append(checks, punarodiagnostic.Pass("installation_configuration"), punarodiagnostic.Pass("image_digest_binding"))
 	extended := serverDoctorInspect(ctx, installation, machineID, gatewayColocated, relayProfile)
 	identity.MachineID = extended.MachineID
@@ -903,6 +909,19 @@ var serverPathDiagnostics = []serverPathDiagnostic{
 	{"generated daemon environment does not match installation configuration", "daemon_environment", "regenerate_server_configuration"},
 	{"generated Compose override unavailable or unsafe", "compose_override", "regenerate_server_configuration"},
 	{"generated Compose override does not match installation configuration", "compose_override", "regenerate_server_configuration"},
+}
+
+func unavailableServerPathChecks() []punarodiagnostic.Check {
+	checks := make([]punarodiagnostic.Check, 0, len(serverPathDiagnostics))
+	emitted := make(map[string]struct{}, len(serverPathDiagnostics))
+	for _, definition := range serverPathDiagnostics {
+		if _, duplicate := emitted[definition.code]; duplicate {
+			continue
+		}
+		emitted[definition.code] = struct{}{}
+		checks = append(checks, punarodiagnostic.Unavailable(definition.code, definition.remediation))
+	}
+	return checks
 }
 
 func serverPathChecks(failures []string) []punarodiagnostic.Check {
