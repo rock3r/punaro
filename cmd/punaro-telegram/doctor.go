@@ -350,10 +350,7 @@ func inspectTelegramService(ctx context.Context) telegramServiceDoctorResult {
 		result.Installed, result.Executable = inspectTelegramServiceDefinition(ctx, installedPath, executable, "darwin")
 		effective, loaded := telegramServiceCommand(ctx, "launchctl", "print", "gui/"+strconv.Itoa(os.Getuid())+"/org.punaro.telegram")
 		result.Executable = result.Executable && loaded && telegramLaunchdEffectiveBound(effective)
-		result.Enabled = result.Installed
-		result.Running = loaded
-		result.ExitStatus = result.Running
-		result.RestartState = loaded
+		result.Enabled, result.Running, result.ExitStatus, result.RestartState = inspectTelegramLaunchdServiceManager(effective, loaded)
 	case "linux":
 		result.Installed, result.Executable = inspectTelegramServiceDefinition(ctx, "/etc/systemd/system/punaro-telegram.service", executable, "linux")
 		effectiveExecStart, effectiveKnown := telegramServiceCommand(ctx, "systemctl", "show", "--property=ExecStart", "--value", "punaro-telegram.service")
@@ -388,6 +385,13 @@ func inspectTelegramService(ctx context.Context) telegramServiceDoctorResult {
 		}
 	}
 	return result
+}
+
+func inspectTelegramLaunchdServiceManager(output string, loaded bool) (bool, bool, bool, bool) {
+	running := loaded && strings.Contains(output, "state = running")
+	exitOK := running || loaded && strings.Contains(output, "last exit code = 0")
+	restartOK := loaded && strings.Contains(output, "runs =")
+	return loaded, running, exitOK, restartOK
 }
 
 func inspectTelegramServiceIsolated(ctx context.Context) telegramServiceDoctorResult {

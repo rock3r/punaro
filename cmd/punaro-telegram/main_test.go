@@ -99,6 +99,25 @@ func TestTelegramLaunchdBindingRequiresStructuralInstalledAndEffectiveCommands(t
 	}
 }
 
+func TestTelegramLaunchdServiceStateRequiresActuallyRunningAgent(t *testing.T) {
+	running := "state = running\nlast exit code = 1\nruns = 2\n"
+	enabled, active, exitOK, restartOK := inspectTelegramLaunchdServiceManager(running, true)
+	if !enabled || !active || !exitOK || !restartOK {
+		t.Fatalf("running state enabled=%t active=%t exit=%t restart=%t", enabled, active, exitOK, restartOK)
+	}
+
+	stopped := "state = exited\nlast exit code = 1\nruns = 2\n"
+	enabled, active, exitOK, restartOK = inspectTelegramLaunchdServiceManager(stopped, true)
+	if !enabled || active || exitOK || !restartOK {
+		t.Fatalf("stopped state enabled=%t active=%t exit=%t restart=%t", enabled, active, exitOK, restartOK)
+	}
+
+	enabled, active, exitOK, restartOK = inspectTelegramLaunchdServiceManager("state = exited\nlast exit code = 0\n", true)
+	if !enabled || active || !exitOK || restartOK {
+		t.Fatalf("non-restarting state enabled=%t active=%t exit=%t restart=%t", enabled, active, exitOK, restartOK)
+	}
+}
+
 func TestTelegramWindowsTaskRequiresExactInstalledExecutable(t *testing.T) {
 	executable := filepath.Join(t.TempDir(), "Punaro", "bin", "punaro-telegram.exe")
 	valid := `<Task><Actions><Exec><Command>` + executable + `</Command></Exec></Actions></Task>` + "\r\n"

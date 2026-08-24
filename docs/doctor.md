@@ -327,6 +327,9 @@ service while leaving the base unit apparently valid. On macOS, it
 structurally decodes the installed LaunchAgent's exact `Label` and
 single-element `ProgramArguments`, then binds launchd's effective loaded
 program and arguments to the same fixed gateway executable.
+It also requires launchd's effective state to be `running`, inspects the last
+exit code when the agent is stopped, and requires launchd run history for the
+restart-state check; a loaded but crashed LaunchAgent is not reported running.
 The complete installed service-definition and executable inspection runs in a
 deadline-isolated child; service-manager commands remain under the same parent
 deadline.
