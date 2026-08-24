@@ -171,6 +171,28 @@ func TestOpenStorePinsPersistenceAcrossParentAliasRetarget(t *testing.T) {
 	}
 }
 
+func TestOpenStoreExcludesWriterThroughRenamedStateDirectory(t *testing.T) {
+	root := t.TempDir()
+	directory := filepath.Join(root, "state")
+	if err := os.Mkdir(directory, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(directory, "state.json")
+	first, err := OpenStore(path, DefaultConfig())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = first.Close() }()
+	movedDirectory := filepath.Join(root, "state-renamed")
+	if err := os.Rename(directory, movedDirectory); err != nil {
+		t.Fatal(err)
+	}
+	second, err := OpenStore(filepath.Join(movedDirectory, "state.json"), DefaultConfig())
+	if !errors.Is(err, ErrStateStoreLocked) || second != nil {
+		t.Fatalf("OpenStore() through renamed directory = %#v, %v; want ErrStateStoreLocked", second, err)
+	}
+}
+
 func TestOpenStoreRecoversPreexistingStateLockSymlink(t *testing.T) {
 	statePath := filepath.Join(t.TempDir(), "state.json")
 	lockPath, err := stateStoreLockPath(statePath)

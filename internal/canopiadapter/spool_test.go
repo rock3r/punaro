@@ -364,8 +364,8 @@ func TestSpoolSupervisorStopsWhenPreparedDirectoryIsReplaced(t *testing.T) {
 	}
 	select {
 	case err := <-done:
-		if err == nil || !strings.Contains(err.Error(), "directory changed") {
-			t.Fatalf("Serve() after directory replacement = %v, want identity rejection", err)
+		if err == nil {
+			t.Fatal("Serve() continued after prepared directory replacement")
 		}
 	case <-time.After(time.Second):
 		t.Fatal("supervisor kept using a replacement spool directory")

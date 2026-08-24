@@ -31,7 +31,10 @@ const (
 )
 
 // ErrSpoolFull reports that the bounded durable adapter queue is full.
-var ErrSpoolFull = errors.New("canopi adapter spool is full")
+var (
+	ErrSpoolFull          = errors.New("canopi adapter spool is full")
+	errInvalidQueuedSpool = errors.New("invalid queued Canopi event")
+)
 
 // Spool durably queues privacy-safe normalized events before detached delivery.
 type Spool struct {
@@ -816,24 +819,33 @@ func (s Spool) syncSpoolFile(file *os.File) error {
 
 func readPrivateSpoolFile(path string, maxBytes int64) ([]byte, error) {
 	before, err := os.Lstat(path)
-	if err != nil || !privateSpoolFile(path, before) {
-		return nil, errors.New("queued Canopi event must be a private current-user-owned regular file")
+	if err != nil {
+		return nil, err
+	}
+	if !privateSpoolFile(path, before) {
+		return nil, errInvalidQueuedSpool
 	}
 	file, err := openSpoolEventFile(path)
 	if err != nil {
-		return nil, errors.New("queued Canopi event must be a private current-user-owned regular file")
+		return nil, err
 	}
 	defer func() { _ = file.Close() }()
 	after, err := file.Stat()
 	if err != nil || !os.SameFile(before, after) || !privateSpoolFile(path, after) {
-		return nil, errors.New("queued Canopi event changed while opening")
+		if err != nil {
+			return nil, err
+		}
+		return nil, errInvalidQueuedSpool
 	}
 	if after.Size() > maxBytes {
-		return nil, errors.New("queued Canopi event exceeds size limit")
+		return nil, errInvalidQueuedSpool
 	}
 	payload, err := io.ReadAll(io.LimitReader(file, maxBytes+1))
-	if err != nil || int64(len(payload)) > maxBytes {
-		return nil, errors.New("invalid queued Canopi event")
+	if err != nil {
+		return nil, err
+	}
+	if int64(len(payload)) > maxBytes {
+		return nil, errInvalidQueuedSpool
 	}
 	return payload, nil
 }
@@ -849,10 +861,15 @@ func (s Spool) removeInvalidQueuedSpoolFile(ctx context.Context, path string) er
 		}
 		payload, readErr := readPrivateSpoolFile(path, maxSpoolEventBytes)
 		if readErr == nil {
-			_, readErr = protocol.DecodeEvent(bytes.NewReader(payload), maxSpoolEventBytes)
+			if _, decodeErr := protocol.DecodeEvent(bytes.NewReader(payload), maxSpoolEventBytes); decodeErr != nil {
+				readErr = errInvalidQueuedSpool
+			}
 		}
 		if readErr == nil {
 			return nil
+		}
+		if !errors.Is(readErr, errInvalidQueuedSpool) {
+			return readErr
 		}
 		removed, err := removeSpoolFileIfSame(path, before)
 		if err != nil || !removed {

@@ -189,6 +189,19 @@ func TestOpenStoreRejectsStateFileBeyondConfiguredBoundBeforeReading(t *testing.
 	}
 }
 
+func TestOpenStoreRejectsMalformedUnicodeBeforeDecoding(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "state.json")
+	payload := []byte("{\"revision\":0,\"records\":[],\"seen_event_ids\":[\"")
+	payload = append(payload, 0xff)
+	payload = append(payload, []byte("\"]}")...)
+	if err := os.WriteFile(path, payload, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := OpenStore(path, DefaultConfig()); err == nil || !strings.Contains(err.Error(), "encoding") {
+		t.Fatalf("OpenStore() malformed Unicode error = %v, want encoding rejection", err)
+	}
+}
+
 func TestApplyRejectsAggregateStateBeyondByteBudgetWithoutMutation(t *testing.T) {
 	now := time.Date(2026, 8, 23, 12, 0, 0, 0, time.UTC)
 	config := DefaultConfig()

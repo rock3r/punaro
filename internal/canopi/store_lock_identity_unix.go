@@ -3,7 +3,10 @@
 package canopi
 
 import (
+	"fmt"
+	"os"
 	"path/filepath"
+	"syscall"
 )
 
 func canonicalStatePath(path string) (string, error) {
@@ -15,5 +18,13 @@ func canonicalStatePath(path string) (string, error) {
 }
 
 func canonicalStateLockIdentity(path string) (string, error) {
-	return canonicalStatePath(path)
+	directory, err := os.Stat(filepath.Dir(path))
+	if err != nil {
+		return "", err
+	}
+	stat, ok := directory.Sys().(*syscall.Stat_t)
+	if !ok {
+		return "", fmt.Errorf("inspect Canopi state directory identity")
+	}
+	return fmt.Sprintf("%d:%d:%s", stat.Dev, stat.Ino, filepath.Base(path)), nil
 }

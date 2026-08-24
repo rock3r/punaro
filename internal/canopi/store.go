@@ -234,6 +234,9 @@ func OpenStore(path string, config Config) (*Store, error) {
 	if int64(len(payload)) > limit {
 		return nil, errors.New("persisted Canopi state exceeds limit")
 	}
+	if err := protocol.ValidateJSONEncoding(payload); err != nil {
+		return nil, fmt.Errorf("validate Canopi state encoding: %w", err)
+	}
 	var persisted persistedStore
 	decoder := json.NewDecoder(bytes.NewReader(payload))
 	decoder.DisallowUnknownFields()

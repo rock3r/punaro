@@ -4,6 +4,7 @@ package canopi
 
 import (
 	"errors"
+	"fmt"
 	"path/filepath"
 	"strings"
 
@@ -11,11 +12,20 @@ import (
 )
 
 func canonicalStateLockIdentity(path string) (string, error) {
-	canonical, err := canonicalStatePath(path)
+	name, err := windows.UTF16PtrFromString(filepath.Dir(path))
 	if err != nil {
 		return "", err
 	}
-	return strings.ToLower(canonical), nil
+	handle, err := windows.CreateFile(name, windows.FILE_READ_ATTRIBUTES, windows.FILE_SHARE_READ|windows.FILE_SHARE_WRITE|windows.FILE_SHARE_DELETE, nil, windows.OPEN_EXISTING, windows.FILE_FLAG_BACKUP_SEMANTICS, 0)
+	if err != nil {
+		return "", err
+	}
+	defer func() { _ = windows.CloseHandle(handle) }()
+	var info windows.ByHandleFileInformation
+	if err := windows.GetFileInformationByHandle(handle, &info); err != nil {
+		return "", err
+	}
+	return fmt.Sprintf("%d:%d:%d:%s", info.VolumeSerialNumber, info.FileIndexHigh, info.FileIndexLow, strings.ToLower(filepath.Base(path))), nil
 }
 
 func canonicalStatePath(path string) (string, error) {
