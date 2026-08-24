@@ -336,6 +336,42 @@ func TestSpoolSupervisorDeliversEventEnqueuedAfterStartup(t *testing.T) {
 	}
 }
 
+func TestSpoolSupervisorStopsWhenPreparedDirectoryIsReplaced(t *testing.T) {
+	root := t.TempDir()
+	directory := filepath.Join(root, "spool")
+	spool := preparedTestSpool(t, Spool{Directory: directory, MaxEvents: 2})
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	done := make(chan error, 1)
+	go func() {
+		done <- spool.Serve(ctx, func(context.Context, protocol.Event) error { return nil })
+	}()
+	deadline := time.Now().Add(time.Second)
+	for {
+		if _, err := os.Stat(filepath.Join(directory, ".supervisor.lock")); err == nil {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("supervisor did not acquire its prepared-directory lock")
+		}
+		time.Sleep(time.Millisecond)
+	}
+	if err := os.Rename(directory, filepath.Join(root, "spool-old")); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Mkdir(directory, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case err := <-done:
+		if err == nil || !strings.Contains(err.Error(), "directory changed") {
+			t.Fatalf("Serve() after directory replacement = %v, want identity rejection", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("supervisor kept using a replacement spool directory")
+	}
+}
+
 func TestEnqueueWaitsForActiveLockAndPersistsAfterRelease(t *testing.T) {
 	directory := t.TempDir()
 	spool := preparedTestSpool(t, Spool{Directory: directory, MaxEvents: 1})

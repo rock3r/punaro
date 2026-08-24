@@ -275,11 +275,14 @@ func TestOpenStoreRejectsPersistenceAfterStateDirectoryReplacement(t *testing.T)
 		t.Fatal(err)
 	}
 	now := time.Now().UTC()
-	if result, err := store.Apply(event("event-1", "agent", protocol.StateWorking, now)); err == nil || result != (ApplyResult{}) {
-		t.Fatalf("Apply() after state-directory replacement = %+v, %v; want durability rejection", result, err)
+	if result, err := store.Apply(event("event-1", "agent", protocol.StateWorking, now)); err != nil || !result.Applied {
+		t.Fatalf("Apply() after state-directory replacement = %+v, %v", result, err)
 	}
 	if _, err := os.Stat(path); !errors.Is(err, os.ErrNotExist) {
 		t.Fatalf("replacement state directory was written: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(root, "state-old", "state.json")); err != nil {
+		t.Fatalf("pinned state directory was not written: %v", err)
 	}
 }
 

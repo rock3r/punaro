@@ -169,12 +169,24 @@ func OpenStore(path string, config Config) (*Store, error) {
 	if err != nil {
 		return nil, fmt.Errorf("identify Canopi state directory: %w", err)
 	}
+	pinnedDirectoryHandle, err := os.Open(pinnedDirectory) // #nosec G304 -- this is the validated, canonical state directory retained for the store lifetime.
+	if err != nil {
+		return nil, fmt.Errorf("open pinned Canopi state directory: %w", err)
+	}
+	closePinnedDirectory := func() { _ = pinnedDirectoryHandle.Close() }
+	retainDirectory := true
+	defer func() {
+		if retainDirectory {
+			closePinnedDirectory()
+		}
+	}()
+	openedDirectoryIdentity, err := pinnedDirectoryHandle.Stat()
+	if err != nil || !os.SameFile(directoryIdentity, openedDirectoryIdentity) {
+		return nil, errors.New("Canopi state directory changed while opening")
+	}
 	store := NewStore(normalized)
 	store.persist = func(state persistedStore) error {
-		if err := validateStateDirectoryIdentity(pinnedDirectory, directoryIdentity); err != nil {
-			return fmt.Errorf("revalidate Canopi state directory: %w", err)
-		}
-		return persistStore(pinnedPath, state, normalized.MaxStateBytes)
+		return persistStoreInPinnedDirectory(pinnedDirectoryHandle, filepath.Base(pinnedPath), state, normalized.MaxStateBytes)
 	}
 	release, err := acquireStateStoreLock(pinnedPath)
 	if err != nil {
@@ -184,7 +196,11 @@ func OpenStore(path string, config Config) (*Store, error) {
 		_ = release()
 		return nil, fmt.Errorf("revalidate locked Canopi state directory: %w", err)
 	}
-	store.release = release
+	store.release = func() error {
+		defer closePinnedDirectory()
+		return release()
+	}
+	retainDirectory = false
 	keepOpen := false
 	defer func() {
 		if !keepOpen {

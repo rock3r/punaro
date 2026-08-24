@@ -417,20 +417,25 @@ func (s Spool) Drain(ctx context.Context, deliver func(context.Context, protocol
 	if err := config.ensureDirectory(); err != nil {
 		return err
 	}
+	return config.drainPrepared(ctx, deliver)
+}
+
+func (s Spool) drainPrepared(ctx context.Context, deliver func(context.Context, protocol.Event) error) error {
 	for {
-		release, acquired, err := tryAcquireDrainLock(filepath.Join(config.Directory, ".drain.lock"))
+		release, acquired, err := tryAcquireDrainLock(filepath.Join(s.Directory, ".drain.lock"))
 		if err != nil {
 			return err
 		}
 		if !acquired {
 			return nil
 		}
-		err = config.drainLocked(ctx, deliver)
+		err = s.drainLocked(ctx, deliver)
 		release()
 		if err != nil {
 			return err
 		}
-		pending, err := config.Pending()
+		files, err := s.eventFiles(ctx)
+		pending := len(files)
 		if err != nil || pending == 0 {
 			return err
 		}
@@ -451,13 +456,20 @@ func (s Spool) Serve(ctx context.Context, deliver func(context.Context, protocol
 	if err := config.ensureDirectory(); err != nil {
 		return err
 	}
+	directoryIdentity, err := spoolDirectoryIdentity(config.Directory)
+	if err != nil {
+		return err
+	}
 	release, acquired, err := tryAcquireSupervisorLock(filepath.Join(config.Directory, ".supervisor.lock"))
 	if err != nil || !acquired {
 		return err
 	}
 	defer release()
 	for {
-		if err := config.Drain(ctx, deliver); err != nil {
+		if err := validateSpoolDirectoryIdentity(config.Directory, directoryIdentity); err != nil {
+			return fmt.Errorf("Canopi spool directory changed while supervisor was running: %w", err)
+		}
+		if err := config.drainPrepared(ctx, deliver); err != nil {
 			return err
 		}
 		timer := time.NewTimer(supervisorPoll)
@@ -539,12 +551,28 @@ func (s Spool) ensureDirectory() error {
 }
 
 func (s Spool) requirePreparedDirectory() error {
-	info, err := os.Lstat(s.Directory)
+	_, err := spoolDirectoryIdentity(s.Directory)
+	return err
+}
+
+func spoolDirectoryIdentity(path string) (os.FileInfo, error) {
+	info, err := os.Lstat(path)
 	if err != nil {
-		return fmt.Errorf("canopi spool is not prepared: %w", err)
+		return nil, fmt.Errorf("canopi spool is not prepared: %w", err)
 	}
-	if !info.IsDir() || info.Mode()&os.ModeSymlink != 0 || !privateSpoolDirectory(s.Directory, info) {
-		return errors.New("canopi spool is not a prepared private real directory")
+	if !info.IsDir() || info.Mode()&os.ModeSymlink != 0 || !privateSpoolDirectory(path, info) {
+		return nil, errors.New("canopi spool is not a prepared private real directory")
+	}
+	return info, nil
+}
+
+func validateSpoolDirectoryIdentity(path string, expected os.FileInfo) error {
+	current, err := spoolDirectoryIdentity(path)
+	if err != nil {
+		return err
+	}
+	if !os.SameFile(expected, current) {
+		return errors.New("prepared Canopi spool directory was replaced")
 	}
 	return nil
 }
