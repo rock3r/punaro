@@ -311,8 +311,8 @@ func TestAdapterDoctorEmitsStrictHealthyReport(t *testing.T) {
 		result.Attached = true
 		return result, nil
 	}
-	adapterDoctorServiceProbe = func(context.Context, adapterConfig) serviceDoctorResult {
-		return serviceDoctorResult{Installed: true, Enabled: true, Running: true, Executable: true, ExitStatus: true, RestartState: true}
+	adapterDoctorServiceProbe = func(context.Context, adapterConfig) (serviceDoctorResult, error) {
+		return serviceDoctorResult{Installed: true, Enabled: true, Running: true, Executable: true, ExitStatus: true, RestartState: true}, nil
 	}
 	adapterBuildRelease = "v0.1.0-alpha.1"
 	adapterDoctorBootstrapReleaseProbe = func(context.Context) string { return "v0.1.0-alpha.0" }
@@ -399,8 +399,8 @@ func TestAdapterDoctorReportsIndependentRelayFailures(t *testing.T) {
 	adapterDoctorEndpointProbe = func(context.Context, adapterConfig, string) (adapter.DoctorProbeResult, error) {
 		return adapter.DoctorProbeResult{Transport: true, Origin: true, Access: true, Enrolled: true, Protocol: true, Attached: true}, nil
 	}
-	adapterDoctorServiceProbe = func(context.Context, adapterConfig) serviceDoctorResult {
-		return serviceDoctorResult{Installed: true, Enabled: true, Running: true, Executable: true, ExitStatus: true, RestartState: true}
+	adapterDoctorServiceProbe = func(context.Context, adapterConfig) (serviceDoctorResult, error) {
+		return serviceDoctorResult{Installed: true, Enabled: true, Running: true, Executable: true, ExitStatus: true, RestartState: true}, nil
 	}
 	var stdout, stderr bytes.Buffer
 	if code := runAdapterDoctor(nil, &stdout, &stderr); code != 1 || stderr.Len() != 0 {
@@ -433,7 +433,7 @@ func TestAdapterDoctorRejectsStaleMachineAttachmentForCurrentEndpoint(t *testing
 	adapterDoctorEndpointProbe = func(context.Context, adapterConfig, string) (adapter.DoctorProbeResult, error) {
 		return adapter.DoctorProbeResult{Transport: true, Origin: true, Access: true, Enrolled: true, Protocol: true}, nil
 	}
-	adapterDoctorServiceProbe = func(context.Context, adapterConfig) serviceDoctorResult { return serviceDoctorResult{} }
+	adapterDoctorServiceProbe = func(context.Context, adapterConfig) (serviceDoctorResult, error) { return serviceDoctorResult{}, nil }
 	var stdout bytes.Buffer
 	if code := runAdapterDoctor(nil, &stdout, io.Discard); code != 1 {
 		t.Fatalf("code=%d report=%s", code, stdout.String())
@@ -912,6 +912,87 @@ func TestInspectAdapterBootstrapReleaseExecutesInstalledIdentity(t *testing.T) {
 	}
 	if release := inspectAdapterBootstrapRelease(t.Context(), executable); release != "v0.1.0-alpha.0" {
 		t.Fatalf("bootstrap release=%q", release)
+	}
+}
+
+func TestAdapterBootstrapReleaseIsolationHonorsDeadline(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("POSIX blocking executable fixture")
+	}
+	blocker := filepath.Join(t.TempDir(), "blocked-bootstrap-release-doctor")
+	if err := os.WriteFile(blocker, []byte("#!/bin/sh\nexec sleep 10\n"), 0o700); err != nil { // #nosec G306 -- private executable deadline fixture.
+		t.Fatal(err)
+	}
+	previous := adapterDoctorBootstrapReleaseExecutable
+	adapterDoctorBootstrapReleaseExecutable = func() (string, error) { return blocker, nil }
+	t.Cleanup(func() { adapterDoctorBootstrapReleaseExecutable = previous })
+	ctx, cancel := context.WithTimeout(t.Context(), 20*time.Millisecond)
+	defer cancel()
+	started := time.Now()
+	if release := inspectAdapterBootstrapReleaseIsolated(ctx, defaultAdapterBootstrapExecutable()); release != "" || time.Since(started) > time.Second {
+		t.Fatalf("isolated bootstrap release=%q elapsed=%s", release, time.Since(started))
+	}
+}
+
+func TestAdapterBootstrapReleaseHelperReturnsInstalledIdentity(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("shell fixture is Unix-only")
+	}
+	executable := filepath.Join(t.TempDir(), "punaro-bootstrap")
+	if err := os.WriteFile(executable, []byte("#!/bin/sh\n[ \"$1\" = version ] || exit 2\nprintf '%s\\n' v0.1.0-alpha.0\n"), 0o700); err != nil { // #nosec G306 -- private executable fixture.
+		t.Fatal(err)
+	}
+	var stdout bytes.Buffer
+	if code := runAdapterBootstrapReleaseInspect([]string{"--executable", executable}, &stdout); code != 0 {
+		t.Fatalf("bootstrap release helper code=%d output=%q", code, stdout.String())
+	}
+	var result bootstrapReleaseDoctorResult
+	if json.Unmarshal(stdout.Bytes(), &result) != nil || result.Release != "v0.1.0-alpha.0" {
+		t.Fatalf("bootstrap release helper=%#v", result)
+	}
+}
+
+func TestAdapterServiceIsolationHonorsDeadline(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("POSIX blocking executable fixture")
+	}
+	blocker := filepath.Join(t.TempDir(), "blocked-adapter-service-doctor")
+	if err := os.WriteFile(blocker, []byte("#!/bin/sh\nexec sleep 10\n"), 0o700); err != nil { // #nosec G306 -- private executable deadline fixture.
+		t.Fatal(err)
+	}
+	previous := adapterDoctorServiceExecutable
+	adapterDoctorServiceExecutable = func() (string, error) { return blocker, nil }
+	t.Cleanup(func() { adapterDoctorServiceExecutable = previous })
+	ctx, cancel := context.WithTimeout(t.Context(), 20*time.Millisecond)
+	defer cancel()
+	started := time.Now()
+	if result, err := inspectAdapterServiceIsolated(ctx, adapterConfig{}); err == nil || result != (serviceDoctorResult{}) || time.Since(started) > time.Second {
+		t.Fatalf("isolated service=%#v error=%v elapsed=%s", result, err, time.Since(started))
+	}
+}
+
+func TestAdapterServiceHelperReturnsStrictSnapshot(t *testing.T) {
+	var stdout bytes.Buffer
+	if code := runAdapterServiceInspect(nil, &stdout); code != 0 {
+		t.Fatalf("adapter service helper code=%d output=%q", code, stdout.String())
+	}
+	decoder := json.NewDecoder(bytes.NewReader(stdout.Bytes()))
+	decoder.DisallowUnknownFields()
+	var result serviceDoctorResult
+	if decoder.Decode(&result) != nil || decoder.Decode(&struct{}{}) != io.EOF {
+		t.Fatalf("adapter service helper returned invalid snapshot: %q", stdout.String())
+	}
+}
+
+func TestAdapterServiceHelperFailureMakesEveryServiceCheckUnavailable(t *testing.T) {
+	checks := adapterServiceDoctorChecks(serviceDoctorResult{}, errors.New("deadline"))
+	if len(checks) != 6 {
+		t.Fatalf("service checks=%d", len(checks))
+	}
+	for _, check := range checks {
+		if check.Status != punarodiagnostic.StatusUnavailable {
+			t.Fatalf("service check %#v is not unavailable", check)
+		}
 	}
 }
 

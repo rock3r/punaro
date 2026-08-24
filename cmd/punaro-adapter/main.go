@@ -107,6 +107,10 @@ func main() {
 		os.Exit(runAdapterPluginInspect(os.Args[2:], os.Stdout))
 	case os.Args[1] == "doctor-mailbox-inspect":
 		os.Exit(runAdapterMailboxInspect(os.Args[2:], os.Stdout))
+	case os.Args[1] == "doctor-service-inspect":
+		os.Exit(runAdapterServiceInspect(os.Args[2:], os.Stdout))
+	case os.Args[1] == "doctor-bootstrap-release-inspect":
+		os.Exit(runAdapterBootstrapReleaseInspect(os.Args[2:], os.Stdout))
 	case os.Args[1] == "version":
 		if adapterBuildRelease == "" {
 			os.Exit(1)

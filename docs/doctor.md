@@ -259,13 +259,18 @@ Service, release, and plugin state: `adapter_service_installed`,
 requires the exact bytes of both POSIX/Windows launchers and both MCP
 registration files to match the digest embedded by the release builder.
 
-The adapter runs `version` on the fixed installer-owned `punaro-bootstrap`
-executable under the shared diagnostic deadline and passes that identity into
-the bootstrap compatibility checks. It does not substitute the adapter's
-release identity for `minimum_bootstrap_release`. On Linux, the executable
-check also binds systemd's effective `ExecStart`, including drop-ins, to the
-exact bootstrap run command. On Windows, it structurally parses the scheduled
-task and requires one exact PowerShell action whose `-File` target is the
+The adapter inspects and runs `version` on the fixed installer-owned
+`punaro-bootstrap` executable in a deadline-isolated child and passes that
+identity into the bootstrap compatibility checks. A stalled executable path
+therefore cannot outlive the shared diagnostic deadline. It does not substitute
+the adapter's release identity for `minimum_bootstrap_release`.
+
+The complete installed adapter service-definition inspection, including its
+first filesystem lookup and the service-manager queries, also runs in a
+deadline-isolated child. On Linux, the executable check binds systemd's
+effective `ExecStart`, including drop-ins, to the exact bootstrap run command.
+On Windows, it structurally parses the scheduled task and requires one exact
+PowerShell action whose `-File` target is the
 protected installed runner, and the complete runner content must match the
 release-bound canonical script (LF and CRLF are equivalent). Comments, dead
 branches, extra commands, or altered exit handling therefore fail the executable

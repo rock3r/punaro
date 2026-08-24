@@ -31,21 +31,27 @@ import (
 )
 
 const (
-	defaultAdapterDoctorTimeout   = 15 * time.Second
-	maximumAdapterDoctorTimeout   = 30 * time.Second
-	maximumMailboxDoctorOutput    = 64 << 10
-	maximumMailboxDoctorBytes     = 64 << 20
-	maximumMailboxDoctorEndpoints = 256
-	maximumBootstrapVersionOutput = 256
+	defaultAdapterDoctorTimeout         = 15 * time.Second
+	maximumAdapterDoctorTimeout         = 30 * time.Second
+	maximumMailboxDoctorOutput          = 64 << 10
+	maximumMailboxDoctorBytes           = 64 << 20
+	maximumMailboxDoctorEndpoints       = 256
+	maximumBootstrapVersionOutput       = 256
+	maximumBootstrapReleaseDoctorOutput = 512
+	maximumAdapterServiceDoctorOutput   = 4 << 10
 )
 
 type serviceDoctorResult struct {
-	Installed    bool
-	Enabled      bool
-	Running      bool
-	Executable   bool
-	ExitStatus   bool
-	RestartState bool
+	Installed    bool `json:"installed"`
+	Enabled      bool `json:"enabled"`
+	Running      bool `json:"running"`
+	Executable   bool `json:"executable"`
+	ExitStatus   bool `json:"exit_status"`
+	RestartState bool `json:"restart_state"`
+}
+
+type bootstrapReleaseDoctorResult struct {
+	Release string `json:"release"`
 }
 
 type pluginDoctorResult struct {
@@ -123,11 +129,13 @@ var (
 	}
 	adapterDoctorMailboxProbe          = inspectAdapterMailboxIsolated
 	adapterDoctorMailboxExecutable     = os.Executable
-	adapterDoctorServiceProbe          = inspectAdapterService
+	adapterDoctorServiceProbe          = inspectAdapterServiceIsolated
+	adapterDoctorServiceExecutable     = os.Executable
 	adapterDoctorBootstrapReleaseProbe = func(ctx context.Context) string {
-		return inspectAdapterBootstrapRelease(ctx, defaultAdapterBootstrapExecutable())
+		return inspectAdapterBootstrapReleaseIsolated(ctx, defaultAdapterBootstrapExecutable())
 	}
-	adapterDoctorBootstrapProbe = func(ctx context.Context, directory, bootstrapRelease string) (punarodiagnostic.Report, error) {
+	adapterDoctorBootstrapReleaseExecutable = os.Executable
+	adapterDoctorBootstrapProbe             = func(ctx context.Context, directory, bootstrapRelease string) (punarodiagnostic.Report, error) {
 		return bootstrap.IsolatedDoctor(ctx, bootstrap.DoctorRequest{Directory: directory, BootstrapRelease: bootstrapRelease})
 	}
 	adapterDoctorPluginProbe = inspectAdapterPluginIsolated
@@ -243,15 +251,8 @@ func runAdapterDoctor(args []string, stdout, stderr io.Writer) int {
 		checks = append(checks, punarodiagnostic.Pass("mailbox_executable"), punarodiagnostic.Pass("mailbox_state_directory"), punarodiagnostic.Pass("mailbox_mcp"))
 	}
 
-	service := adapterDoctorServiceProbe(ctx, config)
-	checks = append(checks,
-		boolDoctorCheck(service.Installed, "adapter_service_installed", "install_adapter_service"),
-		boolDoctorCheck(service.Enabled, "adapter_service_enabled", "enable_adapter_service"),
-		boolDoctorCheck(service.Running, "adapter_service_running", "start_adapter_service"),
-		boolDoctorCheck(service.Executable, "adapter_service_executable", "repair_adapter_service_binding"),
-		boolDoctorCheck(service.ExitStatus, "adapter_service_last_exit", "inspect_adapter_service_exit"),
-		boolDoctorCheck(service.RestartState, "adapter_service_restart_state", "repair_adapter_service_restart"),
-	)
+	service, serviceErr := adapterDoctorServiceProbe(ctx, config)
+	checks = append(checks, adapterServiceDoctorChecks(service, serviceErr)...)
 
 	bootstrapRelease := adapterDoctorBootstrapReleaseProbe(ctx)
 	bootstrapReport, bootstrapErr := adapterDoctorBootstrapProbe(ctx, *bootstrapDirectory, bootstrapRelease)
@@ -379,6 +380,27 @@ func boolDoctorCheck(ok bool, code, remediation string) punarodiagnostic.Check {
 		return punarodiagnostic.Pass(code)
 	}
 	return punarodiagnostic.Fail(code, remediation)
+}
+
+func adapterServiceDoctorChecks(result serviceDoctorResult, err error) []punarodiagnostic.Check {
+	if err != nil {
+		return []punarodiagnostic.Check{
+			punarodiagnostic.Unavailable("adapter_service_installed", "install_adapter_service"),
+			punarodiagnostic.Unavailable("adapter_service_enabled", "enable_adapter_service"),
+			punarodiagnostic.Unavailable("adapter_service_running", "start_adapter_service"),
+			punarodiagnostic.Unavailable("adapter_service_executable", "repair_adapter_service_binding"),
+			punarodiagnostic.Unavailable("adapter_service_last_exit", "inspect_adapter_service_exit"),
+			punarodiagnostic.Unavailable("adapter_service_restart_state", "repair_adapter_service_restart"),
+		}
+	}
+	return []punarodiagnostic.Check{
+		boolDoctorCheck(result.Installed, "adapter_service_installed", "install_adapter_service"),
+		boolDoctorCheck(result.Enabled, "adapter_service_enabled", "enable_adapter_service"),
+		boolDoctorCheck(result.Running, "adapter_service_running", "start_adapter_service"),
+		boolDoctorCheck(result.Executable, "adapter_service_executable", "repair_adapter_service_binding"),
+		boolDoctorCheck(result.ExitStatus, "adapter_service_last_exit", "inspect_adapter_service_exit"),
+		boolDoctorCheck(result.RestartState, "adapter_service_restart_state", "repair_adapter_service_restart"),
+	}
 }
 
 func privateDoctorDirectory(path string) bool {
@@ -713,6 +735,44 @@ func inspectAdapterBootstrapRelease(ctx context.Context, executable string) stri
 	return release
 }
 
+func inspectAdapterBootstrapReleaseIsolated(ctx context.Context, bootstrapExecutable string) string {
+	if ctx == nil || ctx.Err() != nil || bootstrapExecutable == "" || !filepath.IsAbs(bootstrapExecutable) {
+		return ""
+	}
+	executable, err := adapterDoctorBootstrapReleaseExecutable()
+	if err != nil {
+		return ""
+	}
+	command := exec.CommandContext(ctx, executable, "doctor-bootstrap-release-inspect", "--executable", bootstrapExecutable) // #nosec G204,G702 -- os.Executable self helper with one fixed-path data argument.
+	command.Stdin = nil
+	command.Stderr = io.Discard
+	output := boundedDoctorOutput{maximum: maximumBootstrapReleaseDoctorOutput}
+	command.Stdout = &output
+	if command.Run() != nil || ctx.Err() != nil || output.overflow {
+		return ""
+	}
+	decoder := json.NewDecoder(strings.NewReader(output.buffer.String()))
+	decoder.DisallowUnknownFields()
+	var result bootstrapReleaseDoctorResult
+	if decoder.Decode(&result) != nil || decoder.Decode(&struct{}{}) != io.EOF {
+		return ""
+	}
+	return result.Release
+}
+
+func runAdapterBootstrapReleaseInspect(args []string, stdout io.Writer) int {
+	flags := flag.NewFlagSet("punaro-adapter doctor-bootstrap-release-inspect", flag.ContinueOnError)
+	flags.SetOutput(io.Discard)
+	executable := flags.String("executable", "", "fixed installer-owned bootstrap executable")
+	if flags.Parse(args) != nil || flags.NArg() != 0 || *executable == "" || !filepath.IsAbs(*executable) || filepath.Clean(*executable) != *executable {
+		return 2
+	}
+	if json.NewEncoder(stdout).Encode(bootstrapReleaseDoctorResult{Release: inspectAdapterBootstrapRelease(context.Background(), *executable)}) != nil {
+		return 1
+	}
+	return 0
+}
+
 func writeMCPDoctorRequest(writer *bufio.Writer, id int, method string, params any) error {
 	if err := json.NewEncoder(writer).Encode(map[string]any{"jsonrpc": "2.0", "id": id, "method": method, "params": params}); err != nil {
 		return err
@@ -755,7 +815,44 @@ func readMCPDoctorResponse(decoder *json.Decoder, id int, requireTools bool) boo
 	return false
 }
 
-func inspectAdapterService(ctx context.Context, _ adapterConfig) serviceDoctorResult {
+func inspectAdapterServiceIsolated(ctx context.Context, _ adapterConfig) (serviceDoctorResult, error) {
+	if ctx == nil || ctx.Err() != nil {
+		return serviceDoctorResult{}, errors.New("adapter service diagnostic is unavailable")
+	}
+	executable, err := adapterDoctorServiceExecutable()
+	if err != nil {
+		return serviceDoctorResult{}, errors.New("adapter service diagnostic is unavailable")
+	}
+	command := exec.CommandContext(ctx, executable, "doctor-service-inspect") // #nosec G204,G702 -- os.Executable self helper without untrusted arguments.
+	command.Stdin = nil
+	command.Stderr = io.Discard
+	output := boundedDoctorOutput{maximum: maximumAdapterServiceDoctorOutput}
+	command.Stdout = &output
+	if command.Run() != nil || ctx.Err() != nil || output.overflow {
+		return serviceDoctorResult{}, errors.New("adapter service diagnostic is unavailable")
+	}
+	decoder := json.NewDecoder(strings.NewReader(output.buffer.String()))
+	decoder.DisallowUnknownFields()
+	var result serviceDoctorResult
+	if decoder.Decode(&result) != nil || decoder.Decode(&struct{}{}) != io.EOF {
+		return serviceDoctorResult{}, errors.New("adapter service diagnostic is unavailable")
+	}
+	return result, nil
+}
+
+func runAdapterServiceInspect(args []string, stdout io.Writer) int {
+	flags := flag.NewFlagSet("punaro-adapter doctor-service-inspect", flag.ContinueOnError)
+	flags.SetOutput(io.Discard)
+	if flags.Parse(args) != nil || flags.NArg() != 0 {
+		return 2
+	}
+	if json.NewEncoder(stdout).Encode(inspectAdapterService(context.Background())) != nil {
+		return 1
+	}
+	return 0
+}
+
+func inspectAdapterService(ctx context.Context) serviceDoctorResult {
 	home, err := os.UserHomeDir()
 	if err != nil {
 		return serviceDoctorResult{}
