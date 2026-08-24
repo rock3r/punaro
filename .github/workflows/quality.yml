@@ -34,7 +34,7 @@ jobs:
       - run: CGO_ENABLED=0 go run github.com/securego/gosec/v2/cmd/gosec@v2.22.10 -exclude-generated ./...
       - run: go run github.com/zricethezav/gitleaks/v8@v8.27.2 detect --source . --no-git
       - run: make fuzz
-      - run: ./scripts/verify-release-gates.sh
+      - run: make release-gates
 
   postgres:
     name: PostgreSQL integration
