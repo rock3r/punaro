@@ -6,6 +6,7 @@ import (
 	"crypto/sha256"
 	"encoding/binary"
 	"encoding/json"
+	"encoding/xml"
 	"errors"
 	"flag"
 	"fmt"
@@ -741,10 +742,15 @@ func inspectAdapterService(ctx context.Context, _ adapterConfig) serviceDoctorRe
 			result.Executable = adapterServiceFileBound(runtime.GOOS, string(body))
 		}
 	}
+	if runtime.GOOS == "linux" && result.Executable {
+		effective, ok := adapterServiceCommand(ctx, "systemctl", "--user", "show", "--property=ExecStart", "--value", "punaro-adapter.service")
+		result.Executable = ok && adapterSystemdExecStartBound(effective, home)
+	}
 	result.Enabled, result.Running, result.ExitStatus, result.RestartState = inspectAdapterServiceManager(ctx, runtime.GOOS)
 	if runtime.GOOS == "windows" && result.Executable {
 		task, ok := adapterServiceCommand(ctx, "schtasks.exe", "/Query", "/TN", "Punaro Adapter", "/XML")
-		result.Executable = ok && adapterWindowsTaskBound(task)
+		powershell := filepath.Join(strings.TrimSpace(os.Getenv("SystemRoot")), "System32", "WindowsPowerShell", "v1.0", "powershell.exe")
+		result.Executable = ok && adapterWindowsTaskBound(task, powershell, installedPath)
 	}
 	return result
 }
@@ -789,8 +795,61 @@ func adapterServiceCommand(ctx context.Context, executable string, arguments ...
 	return output.buffer.String(), true
 }
 
-func adapterWindowsTaskBound(xml string) bool {
-	return len(xml) <= 64<<10 && strings.Count(strings.ToLower(xml), "powershell.exe") == 1 && strings.Count(xml, "Run-PunaroAdapter.ps1") == 1 && strings.Contains(xml, "-NoProfile") && strings.Contains(xml, "-NonInteractive")
+func adapterWindowsTaskBound(body, powershell, runner string) bool {
+	if len(body) > 64<<10 || powershell == "" || runner == "" {
+		return false
+	}
+	var task struct {
+		Actions []struct {
+			Exec []struct {
+				Command   []string `xml:"Command"`
+				Arguments []string `xml:"Arguments"`
+			} `xml:"Exec"`
+		} `xml:"Actions"`
+	}
+	decoder := xml.NewDecoder(strings.NewReader(body))
+	if decoder.Decode(&task) != nil || len(task.Actions) != 1 || len(task.Actions[0].Exec) != 1 {
+		return false
+	}
+	for {
+		token, err := decoder.Token()
+		if errors.Is(err, io.EOF) {
+			break
+		}
+		text, whitespace := token.(xml.CharData)
+		if err != nil || !whitespace || strings.TrimSpace(string(text)) != "" {
+			return false
+		}
+	}
+	action := task.Actions[0].Exec[0]
+	if len(action.Command) != 1 || len(action.Arguments) != 1 || !strings.EqualFold(strings.TrimSpace(action.Command[0]), powershell) {
+		return false
+	}
+	wantArguments := `-NoProfile -NonInteractive -WindowStyle Hidden -ExecutionPolicy Bypass -File "` + runner + `"`
+	return strings.TrimSpace(action.Arguments[0]) == wantArguments
+}
+
+func adapterSystemdExecStartBound(body, home string) bool {
+	if home == "" || !filepath.IsAbs(home) || filepath.Clean(home) != home || len(body) > 64<<10 {
+		return false
+	}
+	canonical := strings.TrimSpace(body)
+	if len(canonical) < 2 || canonical[0] != '{' || canonical[len(canonical)-1] != '}' || strings.Count(canonical, "{") != 1 || strings.Count(canonical, "}") != 1 || strings.ContainsAny(canonical, "\r\n\x00") {
+		return false
+	}
+	fields := map[string]string{}
+	seen := map[string]bool{}
+	for _, field := range strings.Split(canonical[1:len(canonical)-1], ";") {
+		name, value, found := strings.Cut(strings.TrimSpace(field), "=")
+		if !found || name == "" || seen[name] {
+			return false
+		}
+		seen[name] = true
+		fields[name] = strings.TrimSpace(value)
+	}
+	executable := filepath.Join(home, ".local", "bin", "punaro-bootstrap")
+	directory := filepath.Join(home, ".local", "state", "punaro-bootstrap")
+	return fields["path"] == executable && fields["argv[]"] == executable+" run --directory "+directory
 }
 
 func adapterServiceFileBound(goos, body string) bool {

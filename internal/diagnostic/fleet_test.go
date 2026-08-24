@@ -86,6 +86,25 @@ func TestFleetRejectsMissingProtocolIdentity(t *testing.T) {
 	}
 }
 
+func TestFleetRejectsMissingServerStorageSchemaIdentity(t *testing.T) {
+	report := mustFleetInput(t, ComponentServer, Identity{MachineID: "punaro-lxc", Release: "v0.1.0-alpha.2", ReleaseSequence: 2, Protocol: 1, Platform: "linux-arm64"})
+	fleet, err := AggregateFleet([]Report{report}, FleetPolicy{
+		Expected:        []FleetTarget{{MachineID: "punaro-lxc", Component: ComponentServer}},
+		CatalogSequence: 2,
+		Catalog:         map[string]int64{"v0.1.0-alpha.2": 2},
+		ProtocolMin:     1,
+		ProtocolMax:     1,
+		SchemaMin:       44,
+		SchemaMax:       44,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if fleetStatus(fleet, "schema_skew") != StatusFail || fleet.Healthy {
+		t.Fatalf("missing server storage schema identity accepted: %#v", fleet)
+	}
+}
+
 const (
 	digestA = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
 	digestB = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"

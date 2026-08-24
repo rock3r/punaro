@@ -1635,18 +1635,39 @@ func TestAdapterServiceBindingRejectsStalePlatformDefinitions(t *testing.T) {
 }
 
 func TestAdapterWindowsTaskRequiresExactProtectedRunner(t *testing.T) {
-	valid := `<Task><Actions><Exec><Command>C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe</Command><Arguments>-NoProfile -NonInteractive -WindowStyle Hidden -ExecutionPolicy Bypass -File "C:\Users\Seb\AppData\Local\Punaro\Run-PunaroAdapter.ps1"</Arguments></Exec></Actions></Task>`
-	if !adapterWindowsTaskBound(valid) {
+	powershell := `C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe`
+	runner := `C:\Users\Seb\AppData\Local\Punaro\Run-PunaroAdapter.ps1`
+	valid := `<Task><Actions><Exec><Command>` + powershell + `</Command><Arguments>-NoProfile -NonInteractive -WindowStyle Hidden -ExecutionPolicy Bypass -File "` + runner + `"</Arguments></Exec></Actions></Task>`
+	if !adapterWindowsTaskBound(valid, powershell, runner) {
 		t.Fatal("valid scheduled task rejected")
 	}
 	for _, stale := range []string{
 		strings.Replace(valid, "Run-PunaroAdapter.ps1", "attacker.ps1", 1),
 		strings.Replace(valid, "-NoProfile ", "", 1),
 		strings.Replace(valid, "-NonInteractive ", "", 1),
+		strings.Replace(valid, `<Command>`+powershell+`</Command>`, `<Command>C:\evil.exe</Command><Arguments>`+powershell+`</Arguments>`, 1),
 		valid + valid,
 	} {
-		if adapterWindowsTaskBound(stale) {
+		if adapterWindowsTaskBound(stale, powershell, runner) {
 			t.Fatal("stale scheduled task accepted")
+		}
+	}
+}
+
+func TestAdapterSystemdExecStartRequiresExactEffectiveBootstrapCommand(t *testing.T) {
+	home := "/home/seb"
+	valid := "{ path=/home/seb/.local/bin/punaro-bootstrap ; argv[]=/home/seb/.local/bin/punaro-bootstrap run --directory /home/seb/.local/state/punaro-bootstrap ; ignore_errors=no ; start_time=[n/a] ; stop_time=[n/a] ; pid=0 ; code=(null) ; status=0/0 }\n"
+	if !adapterSystemdExecStartBound(valid, home) {
+		t.Fatal("valid effective adapter ExecStart rejected")
+	}
+	for _, stale := range []string{
+		strings.Replace(valid, "/home/seb/.local/bin/punaro-bootstrap", "/tmp/punaro-bootstrap", 1),
+		strings.Replace(valid, "run --directory", "doctor --directory", 1),
+		valid + valid,
+		"",
+	} {
+		if adapterSystemdExecStartBound(stale, home) {
+			t.Fatalf("stale effective adapter ExecStart accepted: %q", stale)
 		}
 	}
 }

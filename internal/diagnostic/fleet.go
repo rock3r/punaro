@@ -63,6 +63,7 @@ func AggregateFleet(reports []Report, policy FleetPolicy) (Report, error) {
 	allHealthy := true
 	catalogOK := true
 	protocolCompatible := true
+	schemaCompatible := true
 	pluginOK := true
 	skillOK := true
 	for _, report := range reports {
@@ -90,8 +91,10 @@ func AggregateFleet(reports []Report, policy FleetPolicy) (Report, error) {
 		if report.Identity.StorageSchema > 0 {
 			schemas[report.Identity.StorageSchema] = struct{}{}
 			if policy.SchemaMin > 0 && (report.Identity.StorageSchema < policy.SchemaMin || report.Identity.StorageSchema > policy.SchemaMax) {
-				schemas[0] = struct{}{}
+				schemaCompatible = false
 			}
+		} else if report.Component == ComponentServer {
+			schemaCompatible = false
 		}
 		if report.Component == ComponentAdapter {
 			if report.Identity.PluginVersion == "" {
@@ -129,7 +132,7 @@ func AggregateFleet(reports []Report, policy FleetPolicy) (Report, error) {
 		fleetBoolCheck(len(releases) == 1, "release_skew", "complete_fleet_update"),
 		fleetBoolCheck(len(protocols) <= 1, "protocol_skew", "install_compatible_release"),
 		fleetBoolCheck(protocolCompatible, "protocol_compatibility", "install_compatible_release"),
-		fleetBoolCheck(len(schemas) <= 1, "schema_skew", "complete_server_update"),
+		fleetBoolCheck(schemaCompatible && len(schemas) <= 1, "schema_skew", "complete_server_update"),
 		fleetBoolCheck(supportedFleetEdges(releases, policy.SupportedFrom), "upgrade_edges", "follow_supported_upgrade_edge"),
 		fleetBoolCheck(pluginOK && len(plugins) <= 1, "plugin_skew", "install_matching_plugin"),
 		fleetBoolCheck(skillOK && len(skills) <= 1, "skill_set_skew", "install_matching_skill_set"),

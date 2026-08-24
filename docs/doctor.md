@@ -226,7 +226,11 @@ Service, release, and plugin state: `adapter_service_installed`,
 The adapter runs `version` on the fixed installer-owned `punaro-bootstrap`
 executable under the shared diagnostic deadline and passes that identity into
 the bootstrap compatibility checks. It does not substitute the adapter's
-release identity for `minimum_bootstrap_release`.
+release identity for `minimum_bootstrap_release`. On Linux, the executable
+check also binds systemd's effective `ExecStart`, including drop-ins, to the
+exact bootstrap run command. On Windows, it structurally parses the scheduled
+task and requires one exact PowerShell action whose `-File` target is the
+protected installed runner.
 
 ### Bootstrap
 
@@ -278,7 +282,9 @@ Durable state and liveness: `state_integrity`, `conversation_route_integrity`,
 `plugin_skew`, `skill_set_skew`.
 Every component report must carry a non-zero protocol identity; an omitted
 identity fails `protocol_compatibility` instead of being excluded from the
-comparison.
+comparison. Every server report must likewise carry a non-zero storage schema
+identity inside the signed policy range; omission or incompatibility fails
+`schema_skew`.
 
 ## Stable remediation registry
 
