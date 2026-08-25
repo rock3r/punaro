@@ -5,6 +5,8 @@ package main
 import (
 	"bytes"
 	"context"
+	"crypto/ed25519"
+	"crypto/sha256"
 	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
@@ -22,6 +24,7 @@ import (
 	"github.com/rock3r/punaro/internal/adapter"
 	"github.com/rock3r/punaro/internal/clientidentity"
 	"github.com/rock3r/punaro/internal/clienttransport"
+	"github.com/rock3r/punaro/internal/legacyexchange"
 )
 
 const (
@@ -131,6 +134,7 @@ func runPrepare(args []string, stdout, stderr io.Writer) int {
 	stateDir := flags.String("state-dir", "", "absolute private enrollment state directory")
 	allowLANHTTP := flags.Bool("allow-lan-http", false, "explicitly allow plaintext credentials on the pinned trusted LAN")
 	trustedLANCIDR := flags.String("trusted-lan-cidr", "", "private or link-local CIDR containing the literal HTTP origin")
+	legacyMachineID := flags.String("legacy-machine-id", "", "registered legacy machine identity to exchange")
 	if flags.Parse(args) != nil || flags.NArg() != 0 || *stateDir == "" {
 		return invalid(stderr)
 	}
@@ -147,11 +151,11 @@ func runPrepare(args []string, stdout, stderr io.Writer) int {
 		if policy.AllowLANHTTP {
 			version = clientidentity.LANVersion
 		}
-		state = clientidentity.State{Version: version, Origin: canonical, ClientBinding: binding, AllowLANHTTP: policy.AllowLANHTTP, TrustedLANCIDR: policy.TrustedLANCIDR}
+		state = clientidentity.State{Version: version, Origin: canonical, ClientBinding: binding, LegacyMachineID: strings.TrimSpace(*legacyMachineID), AllowLANHTTP: policy.AllowLANHTTP, TrustedLANCIDR: policy.TrustedLANCIDR}
 		if err := writePrivateAtomicNew(identityPath, mustEncodeIdentity(state)); err != nil {
 			return enrollmentError(stderr, "state preparation failed", 2)
 		}
-	} else if err != nil || state.Match(canonical, state.ClientBinding, "") != nil || state.LegacyMachineID != "" || state.TransportPolicy() != policy {
+	} else if err != nil || state.Match(canonical, state.ClientBinding, strings.TrimSpace(*legacyMachineID)) != nil || state.TransportPolicy() != policy {
 		return enrollmentError(stderr, "state preparation failed", 2)
 	}
 	if err := syncPrivateDirectory(*stateDir); err != nil {
@@ -167,6 +171,7 @@ func runRedeem(args []string, stdout, stderr io.Writer, recoveryOnly bool) int {
 	materialPath := flags.String("enrollment-file", "", "absolute protected enrollment material file")
 	credentialPath := flags.String("credential-file", "", "absolute private credential destination under state-dir")
 	accessPath := flags.String("access-file", "", "absolute protected Cloudflare Access service-token file")
+	legacyKeyPath := flags.String("legacy-private-key-file", "", "absolute protected legacy Ed25519 private-key file")
 	if flags.Parse(args) != nil || flags.NArg() != 0 || *stateDir == "" || *credentialPath == "" || (!recoveryOnly && *materialPath == "") || (recoveryOnly && *materialPath != "") {
 		return invalid(stderr)
 	}
@@ -174,8 +179,15 @@ func runRedeem(args []string, stdout, stderr io.Writer, recoveryOnly bool) int {
 		return enrollmentError(stderr, "private enrollment state is unsafe", 2)
 	}
 	state, err := loadIdentity(filepath.Join(*stateDir, identityFileName))
-	if err != nil || state.LegacyMachineID != "" {
+	if err != nil || (state.LegacyMachineID == "") != (*legacyKeyPath == "") {
 		return enrollmentError(stderr, "private enrollment state is unsafe", 2)
+	}
+	var legacyPrivateKey ed25519.PrivateKey
+	if *legacyKeyPath != "" {
+		legacyPrivateKey, err = loadLegacyPrivateKey(*legacyKeyPath)
+		if err != nil {
+			return enrollmentError(stderr, "legacy machine credential is invalid", 2)
+		}
 	}
 	unlock, err := lockEnrollmentState(*stateDir)
 	if err != nil {
@@ -239,7 +251,7 @@ func runRedeem(args []string, stdout, stderr io.Writer, recoveryOnly bool) int {
 	if err := syncPrivateDirectory(*stateDir); err != nil {
 		return enrollmentError(stderr, "enrollment recovery could not be made durable; retry this command", 1)
 	}
-	response, result := postRedemption(state.Origin, journal, accessToken, state.TransportPolicy())
+	response, result := postRedemption(state.Origin, journal, accessToken, state.TransportPolicy(), legacyPrivateKey)
 	if result == redemptionRejected {
 		if err := removeJournalIfCurrent(journalPath, journal); err != nil {
 			return enrollmentError(stderr, "enrollment was rejected; remove the private recovery file before requesting a new enrollment", 1)
@@ -454,6 +466,21 @@ func loadAccessToken(path string) (adapter.AccessServiceToken, error) {
 	return adapter.AccessServiceToken{ClientID: value.ClientID, ClientSecret: value.ClientSecret}, nil
 }
 
+func loadLegacyPrivateKey(path string) (ed25519.PrivateKey, error) {
+	if !filepath.IsAbs(path) || filepath.Clean(path) != path {
+		return nil, errors.New("unsafe legacy machine credential")
+	}
+	raw, err := readPrivate(path, maxEnrollmentFile)
+	if err != nil {
+		return nil, err
+	}
+	decoded, err := base64.RawURLEncoding.Strict().DecodeString(strings.TrimSpace(string(raw)))
+	if err != nil || len(decoded) != ed25519.PrivateKeySize || base64.RawURLEncoding.EncodeToString(decoded) != strings.TrimSpace(string(raw)) {
+		return nil, errors.New("invalid legacy machine credential")
+	}
+	return ed25519.PrivateKey(decoded), nil
+}
+
 func validAccessValue(value string) bool {
 	return value != "" && !strings.ContainsAny(value, " \t\r\n")
 }
@@ -617,12 +644,31 @@ const (
 	redemptionSucceeded
 )
 
-func postRedemption(origin string, journal redemptionJournal, accessToken adapter.AccessServiceToken, policy clienttransport.Policy) (redemptionResponse, redemptionResult) {
-	body, err := json.Marshal(redemptionRequest{EnrollmentID: journal.EnrollmentID, ClientBinding: journal.ClientBinding, Code: journal.Code, IdempotencyKey: journal.IdempotencyKey})
+func postRedemption(origin string, journal redemptionJournal, accessToken adapter.AccessServiceToken, policy clienttransport.Policy, legacyPrivateKey ed25519.PrivateKey) (redemptionResponse, redemptionResult) {
+	requestValue := any(redemptionRequest{EnrollmentID: journal.EnrollmentID, ClientBinding: journal.ClientBinding, Code: journal.Code, IdempotencyKey: journal.IdempotencyKey})
+	path := "/v1/enrollments/redeem"
+	if len(legacyPrivateKey) == ed25519.PrivateKeySize {
+		code, err := base64.RawURLEncoding.Strict().DecodeString(journal.Code)
+		if err != nil {
+			return redemptionResponse{}, redemptionUnavailable
+		}
+		digest := sha256.Sum256(code)
+		signature := ed25519.Sign(legacyPrivateKey, legacyexchange.Transcript(journal.EnrollmentID, journal.ClientBinding, journal.IdempotencyKey, digest))
+		requestValue = struct {
+			EnrollmentID   string `json:"enrollment_id"`
+			ClientBinding  string `json:"client_binding"`
+			Code           string `json:"code"`
+			IdempotencyKey string `json:"idempotency_key"`
+			PublicKey      string `json:"legacy_public_key"`
+			Signature      string `json:"legacy_signature"`
+		}{EnrollmentID: journal.EnrollmentID, ClientBinding: journal.ClientBinding, Code: journal.Code, IdempotencyKey: journal.IdempotencyKey, PublicKey: base64.RawURLEncoding.EncodeToString(legacyPrivateKey.Public().(ed25519.PublicKey)), Signature: base64.RawURLEncoding.EncodeToString(signature)}
+		path = "/v1/legacy-enrollments/redeem"
+	}
+	body, err := json.Marshal(requestValue)
 	if err != nil {
 		return redemptionResponse{}, redemptionUnavailable
 	}
-	request, err := http.NewRequestWithContext(context.Background(), http.MethodPost, origin+"/v1/enrollments/redeem", bytes.NewReader(body))
+	request, err := http.NewRequestWithContext(context.Background(), http.MethodPost, origin+path, bytes.NewReader(body))
 	if err != nil {
 		return redemptionResponse{}, redemptionUnavailable
 	}

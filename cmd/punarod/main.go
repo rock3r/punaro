@@ -364,6 +364,7 @@ func registerDeviceRoutes(mux *http.ServeMux, deviceHandler http.Handler) {
 		return
 	}
 	mux.Handle("/v1/enrollments/redeem", deviceHandler)
+	mux.Handle("/v1/legacy-enrollments/redeem", deviceHandler)
 	mux.Handle("/v1/device/session", deviceHandler)
 	mux.Handle("/v1/device/session/revoke", deviceHandler)
 }

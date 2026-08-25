@@ -2,6 +2,10 @@ package main
 
 import (
 	"bytes"
+	"crypto/ed25519"
+	"crypto/rand"
+	"crypto/sha256"
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -15,6 +19,7 @@ import (
 	"time"
 
 	"github.com/rock3r/punaro/internal/clientidentity"
+	"github.com/rock3r/punaro/internal/legacyexchange"
 	punaropostgres "github.com/rock3r/punaro/internal/postgres"
 )
 
@@ -73,6 +78,63 @@ func TestPrepareThenRedeemKeepsSecretsOutOfOutputAndRecoversIdempotently(t *test
 	}
 	if _, err := os.Lstat(filepath.Join(stateDir, redemptionJournalName)); !os.IsNotExist(err) {
 		t.Fatalf("recovery journal remains: %v", err)
+	}
+}
+
+func TestLegacyPrepareAndRedeemUsesProofBoundExchangeRoute(t *testing.T) {
+	stateDir := filepath.Join(t.TempDir(), "legacy-state")
+	public, private, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var prepared publicEnrollment
+	credential := "22222222-2222-4222-8222-222222222222." + strings.Repeat("A", 43)
+	server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost || r.URL.Path != "/v1/legacy-enrollments/redeem" {
+			t.Fatalf("request=%s %s", r.Method, r.URL.Path)
+		}
+		var request struct {
+			EnrollmentID   string `json:"enrollment_id"`
+			ClientBinding  string `json:"client_binding"`
+			Code           string `json:"code"`
+			IdempotencyKey string `json:"idempotency_key"`
+			PublicKey      string `json:"legacy_public_key"`
+			Signature      string `json:"legacy_signature"`
+		}
+		if json.NewDecoder(r.Body).Decode(&request) != nil || request.ClientBinding != prepared.ClientBinding {
+			t.Fatal("legacy redemption body is invalid")
+		}
+		gotPublic, publicErr := base64.RawURLEncoding.Strict().DecodeString(request.PublicKey)
+		signature, signatureErr := base64.RawURLEncoding.Strict().DecodeString(request.Signature)
+		code, codeErr := base64.RawURLEncoding.Strict().DecodeString(request.Code)
+		digest := sha256.Sum256(code)
+		if publicErr != nil || signatureErr != nil || codeErr != nil || !bytes.Equal(gotPublic, public) || !ed25519.Verify(public, legacyexchange.Transcript(request.EnrollmentID, request.ClientBinding, request.IdempotencyKey, digest), signature) {
+			t.Fatal("legacy redemption proof is invalid")
+		}
+		w.Header().Set("Cache-Control", "no-store")
+		w.WriteHeader(http.StatusCreated)
+		_, _ = io.WriteString(w, `{"principal_id":"11111111-1111-4111-8111-111111111111","lookup_id":"22222222-2222-4222-8222-222222222222","credential":"`+credential+`","generation":1}`)
+	}))
+	defer server.Close()
+	var prepareOut, prepareErr bytes.Buffer
+	if code := run([]string{"prepare", "--origin", server.URL, "--state-dir", stateDir, "--legacy-machine-id", "legacy-a"}, &prepareOut, &prepareErr); code != 0 {
+		t.Fatalf("prepare code=%d stderr=%q", code, prepareErr.String())
+	}
+	if err := json.Unmarshal(prepareOut.Bytes(), &prepared); err != nil {
+		t.Fatal(err)
+	}
+	keyFile := filepath.Join(stateDir, "legacy.key")
+	if err := os.WriteFile(keyFile, []byte(base64.RawURLEncoding.EncodeToString(private)), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	material := writeTestMaterial(t, `{"enrollment_id":"33333333-3333-4333-8333-333333333333","client_binding":"`+prepared.ClientBinding+`","code":"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"}`)
+	credentialFile := filepath.Join(stateDir, "device.credential")
+	original := newEnrollmentHTTPClient
+	newEnrollmentHTTPClient = func() *http.Client { return server.Client() }
+	t.Cleanup(func() { newEnrollmentHTTPClient = original })
+	var redeemOut, redeemErr bytes.Buffer
+	if code := run([]string{"redeem", "--state-dir", stateDir, "--enrollment-file", material, "--credential-file", credentialFile, "--legacy-private-key-file", keyFile}, &redeemOut, &redeemErr); code != 0 || redeemErr.Len() != 0 || strings.Contains(redeemOut.String(), credential) {
+		t.Fatalf("redeem code=%d stdout=%q stderr=%q", code, redeemOut.String(), redeemErr.String())
 	}
 }
 

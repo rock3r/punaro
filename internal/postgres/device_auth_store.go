@@ -16,6 +16,7 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/rock3r/punaro/internal/legacyexchange"
 )
 
 var (
@@ -454,7 +455,7 @@ FROM auth.pending_enrollments WHERE id = $1 FOR UPDATE`, redeem.EnrollmentID).Sc
 		var registeredPublicKey []byte
 		var legacyState string
 		var migratedLookupID sql.NullString
-		if err := tx.QueryRowContext(ctx, `SELECT public_key, state, migrated_credential_lookup_id::text FROM auth.legacy_machines WHERE principal_id = $1`, requiredLegacy.String).Scan(&registeredPublicKey, &legacyState, &migratedLookupID); err != nil || subtle.ConstantTimeCompare(registeredPublicKey, legacyProof.PublicKey) != 1 || !ed25519.Verify(legacyProof.PublicKey, legacyExchangeTranscript(redeem, codeDigest), legacyProof.Signature) {
+		if err := tx.QueryRowContext(ctx, `SELECT public_key, state, migrated_credential_lookup_id::text FROM auth.legacy_machines WHERE principal_id = $1`, requiredLegacy.String).Scan(&registeredPublicKey, &legacyState, &migratedLookupID); err != nil || subtle.ConstantTimeCompare(registeredPublicKey, legacyProof.PublicKey) != 1 || !ed25519.Verify(legacyProof.PublicKey, legacyexchange.Transcript(redeem.EnrollmentID, redeem.ClientBinding, redeem.IdempotencyKey, codeDigest), legacyProof.Signature) {
 			return DeviceCredential{}, ErrInvalidEnrollment
 		}
 		if redemptionKey.Valid {
@@ -1094,10 +1095,6 @@ func lockEnrollmentMutations(ctx context.Context, tx *sql.Tx) error {
 
 func encodeDeviceCredential(lookupID string, secret []byte) string {
 	return lookupID + "." + base64.RawURLEncoding.EncodeToString(secret)
-}
-
-func legacyExchangeTranscript(redeem RedeemEnrollment, codeDigest [sha256.Size]byte) []byte {
-	return []byte("punaro-legacy-exchange-v1\n" + redeem.EnrollmentID + "\n" + redeem.ClientBinding + "\n" + redeem.IdempotencyKey + "\n" + hex.EncodeToString(codeDigest[:]))
 }
 
 func deriveEnrollmentCredentialSecret(redeem RedeemEnrollment, code []byte) [sha256.Size]byte {

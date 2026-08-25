@@ -587,6 +587,12 @@ revokes only its authenticating client and accepts no target. Forwarded headers
 never qualify a direct request for TLS or trusted-LAN admission. The older
 `client add` spelling remains an alias during the transition.
 
+For a pending registered legacy principal, create the invitation with the exact
+`--legacy-principal-id` and use `punaro-enroll`'s legacy preparation and
+redemption options. The client sends the six-field proof object only to
+`POST /v1/legacy-enrollments/redeem`; the server verifies possession of the
+registered Ed25519 key before atomically marking that inventory row migrated.
+
 ### Consistent backup and clean-stack restore
 
 M-6 supports local, verified recovery points for the staged PostgreSQL

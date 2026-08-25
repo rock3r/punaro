@@ -3,6 +3,9 @@ package devicehttp
 import (
 	"bytes"
 	"context"
+	"crypto/ed25519"
+	"crypto/rand"
+	"encoding/base64"
 	"errors"
 	"net/http"
 	"net/http/httptest"
@@ -20,7 +23,13 @@ type fakeStore struct {
 	auth                 punaropostgres.AuthenticatedDevice
 	selfRevokeCredential string
 	selfRevokeKey        string
+	legacyProof          punaropostgres.LegacyExchangeProof
 	err                  error
+}
+
+func (f *fakeStore) RedeemLegacyEnrollment(_ context.Context, proof punaropostgres.LegacyExchangeProof, redeem punaropostgres.RedeemEnrollment) (punaropostgres.DeviceCredential, error) {
+	f.legacyProof = proof
+	return f.RedeemEnrollment(context.Background(), redeem)
 }
 
 type blockingStore struct{ started chan struct{} }
@@ -130,6 +139,34 @@ func TestRedeemEnrollmentUsesStrictBoundedRequest(t *testing.T) {
 	handler.ServeHTTP(w, large)
 	if w.Code != http.StatusRequestEntityTooLarge {
 		t.Fatalf("oversize status=%d", w.Code)
+	}
+}
+
+func TestRedeemLegacyEnrollmentCarriesExactProofWithoutSecretOutput(t *testing.T) {
+	public, _, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	signature := make([]byte, ed25519.SignatureSize)
+	store := &fakeStore{}
+	handler := New(store, testPolicy(t))
+	body := `{"enrollment_id":"11111111-1111-4111-8111-111111111111","client_binding":"22222222-2222-4222-8222-222222222222","code":"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA","idempotency_key":"33333333-3333-4333-8333-333333333333","legacy_public_key":"` + base64.RawURLEncoding.EncodeToString(public) + `","legacy_signature":"` + base64.RawURLEncoding.EncodeToString(signature) + `"}`
+	request := httptest.NewRequestWithContext(t.Context(), http.MethodPost, "/v1/legacy-enrollments/redeem", strings.NewReader(body))
+	request.Header.Set("Content-Type", "application/json")
+	request.RemoteAddr = "192.168.1.20:1234"
+	response := httptest.NewRecorder()
+	handler.ServeHTTP(response, request)
+	if response.Code != http.StatusCreated || store.redeem.EnrollmentID == "" || !bytes.Equal(store.legacyProof.PublicKey, public) || !bytes.Equal(store.legacyProof.Signature, signature) || strings.Contains(response.Body.String(), "AAAAAAAA") {
+		t.Fatalf("status=%d body=%q proof=%#v", response.Code, response.Body.String(), store.legacyProof)
+	}
+	duplicate := strings.Replace(body, `"legacy_signature":`, `"legacy_signature":"`+base64.RawURLEncoding.EncodeToString(signature)+`","legacy_signature":`, 1)
+	rejected := httptest.NewRequestWithContext(t.Context(), http.MethodPost, "/v1/legacy-enrollments/redeem", strings.NewReader(duplicate))
+	rejected.Header.Set("Content-Type", "application/json")
+	rejected.RemoteAddr = "192.168.1.20:1234"
+	rejectedResponse := httptest.NewRecorder()
+	handler.ServeHTTP(rejectedResponse, rejected)
+	if rejectedResponse.Code != http.StatusBadRequest {
+		t.Fatalf("duplicate status=%d body=%q", rejectedResponse.Code, rejectedResponse.Body.String())
 	}
 }
 

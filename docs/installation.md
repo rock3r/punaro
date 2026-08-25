@@ -502,6 +502,16 @@ punaro-enroll prepare \
   --state-dir "$HOME/.config/punaro/device-enrollment"
 ```
 
+For a registered legacy adapter or gateway, bind preparation to its exact
+existing machine ID:
+
+```sh
+punaro-enroll prepare \
+  --origin https://punaro.example \
+  --state-dir "$HOME/.config/punaro/device-enrollment" \
+  --legacy-machine-id EXISTING_MACHINE_ID
+```
+
 The command prints only the canonical origin and an opaque `client_binding`.
 Give that public value to the server owner. The owner previews and creates the
 least-privilege grant with `punaro-admin client invite --machine-id ID`; the
@@ -513,6 +523,9 @@ unchanged through an approved protected channel into a current-user-only regular
 file on that client. Do not paste it
 into terminal commands, shell history, environment variables, diagnostic
 bundles, or source-controlled configuration.
+For a legacy exchange the owner also supplies the exact content-free
+`--legacy-principal-id` from `punaro-admin legacy list`; the new machine ID must
+remain the existing registered machine ID.
 
 Redeem that protected file on the client:
 
@@ -522,6 +535,23 @@ punaro-enroll redeem \
   --enrollment-file /absolute/private/enrollment-material.json \
   --credential-file "$HOME/.config/punaro/device-enrollment/device.credential"
 ```
+
+For the legacy state prepared above, add only the absolute protected old-key
+file path. The client signs a transcript binding the one-time material,
+idempotency key, and decoded code digest, and sends the public key and signature
+to the dedicated exchange route; it never sends or prints the private key:
+
+```sh
+punaro-enroll redeem \
+  --state-dir "$HOME/.config/punaro/device-enrollment" \
+  --enrollment-file /absolute/private/enrollment-material.json \
+  --credential-file "$HOME/.config/punaro/device-enrollment/device.credential" \
+  --legacy-private-key-file /absolute/private/existing-machine.key
+```
+
+Repeat the same legacy-key-file option with `recover` after an interrupted
+exchange. A wrong key, unregistered key, stale material, or already retired
+identity returns the same content-free rejection.
 
 If the public origin is protected by Cloudflare Access, create a distinct
 service token for this device and have its secret manager write the paired

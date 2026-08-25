@@ -190,6 +190,13 @@ local destination before calling the existing strict
 retains it until the response is durably committed. An exact retry must recover
 the same credential after a lost response.
 
+A registered legacy installation instead uses the strict
+`POST /v1/legacy-enrollments/redeem` route. It adds only its canonical public
+key and an Ed25519 signature over the enrollment ID, client binding,
+idempotency key, and decoded code digest. PostgreSQL verifies that proof against
+the exact pending legacy inventory record in the same redemption transaction;
+the private key never crosses the client boundary.
+
 The credential is written atomically beneath the platform's existing protected
 client directory. The invitation secret is removed only after the credential
 and installed identity metadata are durable. Installation does not enable the
