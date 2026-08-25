@@ -21,6 +21,7 @@ import (
 
 	"github.com/rock3r/punaro/internal/adapter"
 	"github.com/rock3r/punaro/internal/clienttransport"
+	"github.com/rock3r/punaro/internal/memoryclient"
 	"github.com/rock3r/punaro/internal/relay"
 	"github.com/rock3r/punaro/internal/telegram"
 )
@@ -28,19 +29,21 @@ import (
 const defaultTelegramAPIURL = "https://api.telegram.org"
 
 type config struct {
-	relayURL        string
-	machineID       string
-	privateKey      ed25519.PrivateKey
-	botToken        string
-	allowedUserID   int64
-	endpoint        string
-	stateDir        string
-	apiURL          string
-	accessToken     adapter.AccessServiceToken
-	transportPolicy clienttransport.Policy
-	privateKeyFile  string
-	botTokenFile    string
-	accessTokenFile string
+	relayURL             string
+	machineID            string
+	privateKey           ed25519.PrivateKey
+	deviceCredential     string
+	botToken             string
+	allowedUserID        int64
+	endpoint             string
+	stateDir             string
+	apiURL               string
+	accessToken          adapter.AccessServiceToken
+	transportPolicy      clienttransport.Policy
+	privateKeyFile       string
+	deviceCredentialFile string
+	botTokenFile         string
+	accessTokenFile      string
 }
 
 type routeRequest struct {
@@ -152,7 +155,7 @@ func runAdopt(args []string) error {
 		return err
 	}
 	defer func() { _ = state.Close() }()
-	relayClient, err := adapter.NewHTTPRelayClientWithPolicy(cfg.relayURL, cfg.machineID, cfg.privateKey, nil, cfg.accessToken, cfg.transportPolicy)
+	relayClient, err := newTelegramRelayClient(cfg)
 	if err != nil {
 		return err
 	}
@@ -169,7 +172,7 @@ func run() error {
 		return err
 	}
 	defer func() { _ = state.Close() }()
-	relayClient, err := adapter.NewHTTPRelayClientWithPolicy(cfg.relayURL, cfg.machineID, cfg.privateKey, nil, cfg.accessToken, cfg.transportPolicy)
+	relayClient, err := newTelegramRelayClient(cfg)
 	if err != nil {
 		return err
 	}
@@ -335,21 +338,37 @@ func loadConfig() (config, error) {
 	}
 	cfg.allowedUserID = allowedUserID
 	keyFile := strings.TrimSpace(os.Getenv("PUNARO_MACHINE_PRIVATE_KEY_FILE"))
-	if keyFile == "" {
-		return config{}, fmt.Errorf("PUNARO_MACHINE_PRIVATE_KEY_FILE is required")
+	credentialFile := strings.TrimSpace(os.Getenv("PUNARO_DEVICE_CREDENTIAL_FILE"))
+	if (keyFile == "") == (credentialFile == "") {
+		return config{}, fmt.Errorf("exactly one of PUNARO_MACHINE_PRIVATE_KEY_FILE or PUNARO_DEVICE_CREDENTIAL_FILE is required")
 	}
 	cfg.privateKeyFile = keyFile
-	privateKey, err := loadPrivateKey(keyFile)
+	cfg.deviceCredentialFile = credentialFile
+	var privateKey ed25519.PrivateKey
+	var credential string
+	if keyFile != "" {
+		privateKey, err = loadPrivateKey(keyFile)
+	} else {
+		credential, err = memoryclient.LoadCredential(credentialFile)
+	}
 	if err != nil {
-		return config{}, err
+		return config{}, fmt.Errorf("machine credential file is invalid")
 	}
 	cfg.privateKey = privateKey
+	cfg.deviceCredential = credential
 	absolute, err := filepath.Abs(cfg.stateDir)
 	if err != nil {
 		return config{}, fmt.Errorf("resolve telegram state directory: %w", err)
 	}
 	cfg.stateDir = absolute
 	return cfg, nil
+}
+
+func newTelegramRelayClient(cfg config) (*adapter.HTTPRelayClient, error) {
+	if cfg.deviceCredential != "" {
+		return adapter.NewDeviceHTTPRelayClientWithPolicy(cfg.relayURL, cfg.machineID, cfg.deviceCredential, nil, cfg.accessToken, cfg.transportPolicy)
+	}
+	return adapter.NewHTTPRelayClientWithPolicy(cfg.relayURL, cfg.machineID, cfg.privateKey, nil, cfg.accessToken, cfg.transportPolicy)
 }
 
 func parseLANHTTP(raw string) (bool, error) {

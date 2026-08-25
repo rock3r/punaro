@@ -161,6 +161,44 @@ func TestHTTPRelayClientDoctorProbeRequiresConfirmedOriginProtocol(t *testing.T)
 	}
 }
 
+func TestDeviceHTTPRelayClientUsesBearerCredentialAndCorrelation(t *testing.T) {
+	credential := "11111111-1111-4111-8111-111111111111.AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
+	requests := 0
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requests++
+		correlation := r.Header.Get(relay.RequestCorrelationHeader)
+		if r.Header.Get("Authorization") != "Bearer "+credential || correlation == "" {
+			t.Fatal("device credential or correlation is missing")
+		}
+		for _, name := range []string{"X-Punaro-Machine", "X-Punaro-Timestamp", "X-Punaro-Nonce", "X-Punaro-Signature"} {
+			if r.Header.Get(name) != "" {
+				t.Fatalf("bearer request included signed header %s", name)
+			}
+		}
+		w.Header().Set(relay.ResponseNonceHeader, correlation)
+		w.Header().Set(relay.ProtocolHeader, strconv.Itoa(relay.ProtocolVersion))
+		if r.Method == http.MethodHead {
+			w.WriteHeader(http.StatusNoContent)
+			return
+		}
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	defer server.Close()
+	client, err := NewDeviceHTTPRelayClientWithPolicy(server.URL, "machine-a", credential, server.Client(), AccessServiceToken{}, clienttransport.Policy{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result, err := client.Doctor(t.Context()); err != nil || !result.Protocol || !result.Enrolled || !result.Origin {
+		t.Fatalf("doctor result=%#v err=%v", result, err)
+	}
+	if err := client.Advertise(t.Context(), []string{"agent/a/session"}); err != nil {
+		t.Fatal(err)
+	}
+	if requests != 2 {
+		t.Fatalf("requests=%d", requests)
+	}
+}
+
 func TestHTTPRelayClientDoctorEndpointBindsAssertionToSignature(t *testing.T) {
 	public, private, err := ed25519.GenerateKey(rand.Reader)
 	if err != nil {

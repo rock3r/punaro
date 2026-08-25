@@ -25,24 +25,27 @@ import (
 	"github.com/rock3r/punaro/internal/bootstrap"
 	"github.com/rock3r/punaro/internal/clientidentity"
 	"github.com/rock3r/punaro/internal/clienttransport"
+	"github.com/rock3r/punaro/internal/memoryclient"
 	"github.com/rock3r/punaro/internal/relay"
 )
 
 type adapterConfig struct {
-	relayURL        string
-	machineID       string
-	privateKey      ed25519.PrivateKey
-	attachedGroup   string
-	mailboxBinary   string
-	mailboxState    string
-	dataDir         string
-	pollInterval    time.Duration
-	accessToken     adapter.AccessServiceToken
-	transportPolicy clienttransport.Policy
-	invokerCommand  string
-	profileFile     string
-	privateKeyFile  string
-	identityFile    string
+	relayURL             string
+	machineID            string
+	privateKey           ed25519.PrivateKey
+	deviceCredential     string
+	attachedGroup        string
+	mailboxBinary        string
+	mailboxState         string
+	dataDir              string
+	pollInterval         time.Duration
+	accessToken          adapter.AccessServiceToken
+	transportPolicy      clienttransport.Policy
+	invokerCommand       string
+	profileFile          string
+	privateKeyFile       string
+	deviceCredentialFile string
+	identityFile         string
 }
 
 const (
@@ -54,6 +57,7 @@ var adapterProfileKeys = map[string]struct{}{
 	"PUNARO_ADAPTER_RELAY_URL":        {},
 	"PUNARO_MACHINE_ID":               {},
 	"PUNARO_MACHINE_PRIVATE_KEY_FILE": {},
+	"PUNARO_DEVICE_CREDENTIAL_FILE":   {},
 	"PUNARO_ATTACHED_GROUP":           {},
 	"PUNARO_ADAPTER_DATA_DIR":         {},
 	"PUNARO_MAILBOX_STATE_DIR":        {},
@@ -284,7 +288,7 @@ func runMemberControl(request memberControlRequest) error {
 	if err != nil {
 		return fmt.Errorf("configuration: %w", err)
 	}
-	client, err := adapter.NewHTTPRelayClientWithPolicy(config.relayURL, config.machineID, config.privateKey, nil, config.accessToken, config.transportPolicy)
+	client, err := newAdapterRelayClient(config)
 	if err != nil {
 		return err
 	}
@@ -409,7 +413,7 @@ func runInvoke(args []string) error {
 	if err != nil {
 		return fmt.Errorf("configuration: %w", err)
 	}
-	client, err := adapter.NewHTTPRelayClientWithPolicy(config.relayURL, config.machineID, config.privateKey, nil, config.accessToken, config.transportPolicy)
+	client, err := newAdapterRelayClient(config)
 	if err != nil {
 		return err
 	}
@@ -430,7 +434,7 @@ func runCreate(args []string) error {
 	if err != nil {
 		return fmt.Errorf("configuration: %w", err)
 	}
-	client, err := adapter.NewHTTPRelayClientWithPolicy(config.relayURL, config.machineID, config.privateKey, nil, config.accessToken, config.transportPolicy)
+	client, err := newAdapterRelayClient(config)
 	if err != nil {
 		return err
 	}
@@ -472,7 +476,7 @@ func runRename(args []string) error {
 	if err != nil {
 		return fmt.Errorf("configuration: %w", err)
 	}
-	client, err := adapter.NewHTTPRelayClientWithPolicy(config.relayURL, config.machineID, config.privateKey, nil, config.accessToken, config.transportPolicy)
+	client, err := newAdapterRelayClient(config)
 	if err != nil {
 		return err
 	}
@@ -510,7 +514,7 @@ func runBindRole(args []string) error {
 	if err != nil {
 		return fmt.Errorf("configuration: %w", err)
 	}
-	client, err := adapter.NewHTTPRelayClientWithPolicy(config.relayURL, config.machineID, config.privateKey, nil, config.accessToken, config.transportPolicy)
+	client, err := newAdapterRelayClient(config)
 	if err != nil {
 		return err
 	}
@@ -555,7 +559,7 @@ func runRegisterRole(args []string) error {
 	if !relay.CanonicalRoleForMachine(request.role, config.machineID) {
 		return fmt.Errorf("role must be owned by this machine")
 	}
-	client, err := adapter.NewHTTPRelayClientWithPolicy(config.relayURL, config.machineID, config.privateKey, nil, config.accessToken, config.transportPolicy)
+	client, err := newAdapterRelayClient(config)
 	if err != nil {
 		return err
 	}
@@ -638,7 +642,7 @@ func newRelayClient() (*adapter.HTTPRelayClient, error) {
 	if err != nil {
 		return nil, fmt.Errorf("configuration: %w", err)
 	}
-	return adapter.NewHTTPRelayClientWithPolicy(config.relayURL, config.machineID, config.privateKey, nil, config.accessToken, config.transportPolicy)
+	return newAdapterRelayClient(config)
 }
 
 func writeJSONLine(value any) error {
@@ -731,7 +735,7 @@ func runClaim(args []string) error {
 	if err != nil {
 		return fmt.Errorf("configuration: %w", err)
 	}
-	client, err := adapter.NewHTTPRelayClientWithPolicy(config.relayURL, config.machineID, config.privateKey, nil, config.accessToken, config.transportPolicy)
+	client, err := newAdapterRelayClient(config)
 	if err != nil {
 		return err
 	}
@@ -766,7 +770,7 @@ func runGet(args []string) error {
 	if err != nil {
 		return fmt.Errorf("configuration: %w", err)
 	}
-	client, err := adapter.NewHTTPRelayClientWithPolicy(config.relayURL, config.machineID, config.privateKey, nil, config.accessToken, config.transportPolicy)
+	client, err := newAdapterRelayClient(config)
 	if err != nil {
 		return err
 	}
@@ -854,7 +858,7 @@ func runSend(args []string) error {
 	if err != nil {
 		return err
 	}
-	client, err := adapter.NewHTTPRelayClientWithPolicy(config.relayURL, config.machineID, config.privateKey, nil, config.accessToken, config.transportPolicy)
+	client, err := newAdapterRelayClient(config)
 	if err != nil {
 		return err
 	}
@@ -968,7 +972,7 @@ func runAttachmentNotify(args []string) error {
 	if err := outbox.EnqueueV3OfferNotice(context.Background(), request.conversationID, request.fromEndpoint, offer, request.idempotencyKey); err != nil {
 		return err
 	}
-	client, err := adapter.NewHTTPRelayClientWithPolicy(config.relayURL, config.machineID, config.privateKey, nil, config.accessToken, config.transportPolicy)
+	client, err := newAdapterRelayClient(config)
 	if err != nil {
 		return err
 	}
@@ -1009,7 +1013,7 @@ func run() error {
 	if err != nil {
 		return err
 	}
-	relayClient, err := adapter.NewHTTPRelayClientWithPolicy(config.relayURL, config.machineID, config.privateKey, nil, config.accessToken, config.transportPolicy)
+	relayClient, err := newAdapterRelayClient(config)
 	if err != nil {
 		return err
 	}
@@ -1106,8 +1110,9 @@ func loadConfig() (adapterConfig, error) {
 	relayURL := settings["PUNARO_ADAPTER_RELAY_URL"]
 	machineID := settings["PUNARO_MACHINE_ID"]
 	keyFile := settings["PUNARO_MACHINE_PRIVATE_KEY_FILE"]
+	credentialFile := settings["PUNARO_DEVICE_CREDENTIAL_FILE"]
 	group := settings["PUNARO_ATTACHED_GROUP"]
-	if relayURL == "" || machineID == "" || keyFile == "" || group == "" {
+	if relayURL == "" || machineID == "" || (keyFile == "") == (credentialFile == "") || group == "" {
 		return adapterConfig{}, errors.New("adapter configuration is incomplete")
 	}
 	allowLANHTTP, err := parseLANHTTPSetting(settings["PUNARO_ADAPTER_ALLOW_LAN_HTTP"])
@@ -1121,9 +1126,15 @@ func loadConfig() (adapterConfig, error) {
 	if err := loadClientIdentity(settings, relayURL, machineID, transportPolicy); err != nil {
 		return adapterConfig{}, err
 	}
-	key, err := loadPrivateKey(keyFile)
+	var key ed25519.PrivateKey
+	var credential string
+	if keyFile != "" {
+		key, err = loadPrivateKey(keyFile)
+	} else {
+		credential, err = memoryclient.LoadCredential(credentialFile)
+	}
 	if err != nil {
-		return adapterConfig{}, err
+		return adapterConfig{}, errors.New("machine credential file is invalid")
 	}
 	dataDir := settings["PUNARO_ADAPTER_DATA_DIR"]
 	if dataDir == "" {
@@ -1150,7 +1161,21 @@ func loadConfig() (adapterConfig, error) {
 	if (accessToken.ClientID == "") != (accessToken.ClientSecret == "") {
 		return adapterConfig{}, fmt.Errorf("both PUNARO_CF_ACCESS_CLIENT_ID and PUNARO_CF_ACCESS_CLIENT_SECRET are required together")
 	}
-	return adapterConfig{relayURL: relayURL, machineID: machineID, privateKey: key, attachedGroup: group, mailboxBinary: mailboxBinary, mailboxState: settings["PUNARO_MAILBOX_STATE_DIR"], dataDir: dataDir, pollInterval: pollInterval, accessToken: accessToken, transportPolicy: transportPolicy, invokerCommand: settings["PUNARO_INVOKER_COMMAND"], profileFile: selectedAdapterProfilePath(), privateKeyFile: keyFile, identityFile: settings["PUNARO_CLIENT_IDENTITY_FILE"]}, nil
+	return adapterConfig{relayURL: relayURL, machineID: machineID, privateKey: key, deviceCredential: credential, attachedGroup: group, mailboxBinary: mailboxBinary, mailboxState: settings["PUNARO_MAILBOX_STATE_DIR"], dataDir: dataDir, pollInterval: pollInterval, accessToken: accessToken, transportPolicy: transportPolicy, invokerCommand: settings["PUNARO_INVOKER_COMMAND"], profileFile: selectedAdapterProfilePath(), privateKeyFile: keyFile, deviceCredentialFile: credentialFile, identityFile: settings["PUNARO_CLIENT_IDENTITY_FILE"]}, nil
+}
+
+func newAdapterRelayClient(config adapterConfig) (*adapter.HTTPRelayClient, error) {
+	if config.deviceCredential != "" {
+		return adapter.NewDeviceHTTPRelayClientWithPolicy(config.relayURL, config.machineID, config.deviceCredential, nil, config.accessToken, config.transportPolicy)
+	}
+	return adapter.NewHTTPRelayClientWithPolicy(config.relayURL, config.machineID, config.privateKey, nil, config.accessToken, config.transportPolicy)
+}
+
+func (config adapterConfig) machineCredentialFile() string {
+	if config.deviceCredentialFile != "" {
+		return config.deviceCredentialFile
+	}
+	return config.privateKeyFile
 }
 
 func parseLANHTTPSetting(raw string) (bool, error) {

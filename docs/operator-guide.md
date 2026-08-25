@@ -224,6 +224,13 @@ inspecting or preparing SQLite. Then stop ordinary operator changes, confirm eve
 punaro mail cutover --directory /absolute/private/punaro --dry-run
 ```
 
+The preview includes a content-free `preflight` object and `ready` boolean.
+`ready` is false when the PostgreSQL mail target contains unintended rows, any
+legacy machine remains pending, or an incomplete epoch requires recovery. Do
+not execute until `ready` is true and server doctor passes
+`mail_cutover_target`, `mail_cutover_legacy_inventory`, and
+`mail_cutover_recovery`. The preview never changes either authority.
+
 Record the printed `source_fingerprint` and `target_identity`. Prepare one
 protected JSON file containing the complete public static relay enrollment;
 private keys and device bearer credentials must never appear in it. Choose one

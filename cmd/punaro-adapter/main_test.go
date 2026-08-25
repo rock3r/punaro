@@ -1274,6 +1274,41 @@ func TestLoadConfigLoadsPrivateKeyWithoutLoggingIt(t *testing.T) {
 	}
 }
 
+func TestLoadConfigLoadsProtectedDeviceCredentialExclusively(t *testing.T) {
+	clearAdapterEnvironment(t)
+	t.Setenv("HOME", t.TempDir())
+	credentialDirectory, err := os.MkdirTemp(".", ".adapter-device-credential-*")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(credentialDirectory) })
+	if err := os.Chmod(credentialDirectory, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	credentialDirectory, err = filepath.Abs(credentialDirectory)
+	if err != nil {
+		t.Fatal(err)
+	}
+	credentialFile := filepath.Join(credentialDirectory, "device.credential")
+	credential := "11111111-1111-4111-8111-111111111111.AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
+	if err := os.WriteFile(credentialFile, []byte(credential+"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PUNARO_ADAPTER_RELAY_URL", "https://relay.example")
+	t.Setenv("PUNARO_MACHINE_ID", "machine-a")
+	t.Setenv("PUNARO_DEVICE_CREDENTIAL_FILE", credentialFile)
+	t.Setenv("PUNARO_ATTACHED_GROUP", "group/punaro")
+	t.Setenv("PUNARO_ADAPTER_DATA_DIR", t.TempDir())
+	config, err := loadConfig()
+	if err != nil || config.deviceCredential != credential || len(config.privateKey) != 0 || config.machineCredentialFile() != credentialFile {
+		t.Fatalf("unexpected device configuration err=%v", err)
+	}
+	t.Setenv("PUNARO_MACHINE_PRIVATE_KEY_FILE", credentialFile)
+	if _, err := loadConfig(); err == nil {
+		t.Fatal("adapter accepted two machine credential modes")
+	}
+}
+
 func TestLoadConfigRequiresCompleteExplicitLANPolicy(t *testing.T) {
 	clearAdapterEnvironment(t)
 	t.Setenv("HOME", t.TempDir())

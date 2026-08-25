@@ -43,6 +43,7 @@ type Source interface {
 // Destination is the schema-owner PostgreSQL cutover surface.
 type Destination interface {
 	CheckMailCutoverSchemaReadiness(context.Context) error
+	InspectMailCutoverPreflight(context.Context) (postgres.MailCutoverPreflight, error)
 	Identity(context.Context) (string, error)
 	BeginMailCutover(context.Context, string, postgres.MailCutoverRequest) (postgres.MailCutoverEpoch, error)
 	MailCutoverStatus(context.Context, string, string) (postgres.MailCutoverEpoch, error)
@@ -78,11 +79,13 @@ type Request struct {
 
 // Plan is a read-only dry-run view.
 type Plan struct {
-	SourceID          string                      `json:"source_id"`
-	SourcePhase       relay.MigrationSourcePhase  `json:"source_phase"`
-	SourceFingerprint string                      `json:"source_fingerprint"`
-	TargetIdentity    string                      `json:"target_identity"`
-	Counts            relay.MigrationSourceCounts `json:"counts"`
+	SourceID          string                        `json:"source_id"`
+	SourcePhase       relay.MigrationSourcePhase    `json:"source_phase"`
+	SourceFingerprint string                        `json:"source_fingerprint"`
+	TargetIdentity    string                        `json:"target_identity"`
+	Counts            relay.MigrationSourceCounts   `json:"counts"`
+	Preflight         postgres.MailCutoverPreflight `json:"preflight"`
+	Ready             bool                          `json:"ready"`
 }
 
 // Result is the durable final authority binding.
@@ -109,7 +112,12 @@ func (e Executor) DryRun(ctx context.Context) (Plan, error) {
 	if err != nil {
 		return Plan{}, err
 	}
-	return Plan{SourceID: manifest.SourceID, SourcePhase: manifest.Phase, SourceFingerprint: manifest.Fingerprint, TargetIdentity: target, Counts: manifest.Counts}, nil
+	preflight, err := e.Destination.InspectMailCutoverPreflight(ctx)
+	if err != nil {
+		return Plan{}, err
+	}
+	ready := preflight.TargetRows == 0 && preflight.LegacyPending == 0 && preflight.IncompleteEpochs == 0
+	return Plan{SourceID: manifest.SourceID, SourcePhase: manifest.Phase, SourceFingerprint: manifest.Fingerprint, TargetIdentity: target, Counts: manifest.Counts, Preflight: preflight, Ready: ready}, nil
 }
 
 // Execute resumes from every durable boundary. It retires SQLite only after
@@ -133,6 +141,20 @@ func (e Executor) Execute(ctx context.Context, request Request) (Result, error) 
 	manifest, err := e.Source.Inspect(ctx)
 	if err != nil {
 		return Result{}, err
+	}
+	if manifest.Phase == relay.MigrationSourceActive {
+		preflight, err := e.Destination.InspectMailCutoverPreflight(ctx)
+		if err != nil {
+			return Result{}, err
+		}
+		switch {
+		case preflight.IncompleteEpochs != 0:
+			return Result{}, errors.New("mail cutover recovery is required")
+		case preflight.TargetRows != 0:
+			return Result{}, errors.New("mail cutover target is not empty")
+		case preflight.LegacyPending != 0:
+			return Result{}, errors.New("legacy authentication still has pending machines")
+		}
 	}
 	if err := e.Source.CheckEnrollmentCoverage(ctx, e.Enrollment); err != nil {
 		return Result{}, err

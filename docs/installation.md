@@ -562,6 +562,18 @@ replacement material is not blocked. After success, remove the transferred mater
 through its approved secret-handling process; the identity sidecar remains
 non-secret and the recovery journal is removed.
 
+For a legacy adapter or Telegram gateway, switch the installed private profile
+only after redemption succeeds. Replace
+`PUNARO_MACHINE_PRIVATE_KEY_FILE=...` with exactly one absolute
+`PUNARO_DEVICE_CREDENTIAL_FILE=/absolute/private/device.credential` entry, keep
+the same `PUNARO_MACHINE_ID`, relay origin, Access pair, and endpoint authority,
+then restart the service and require its doctor report to pass. Never retain
+both credential entries. The adapter and gateway load the bearer only from the
+protected file, send it only in the `Authorization` header, and never place it
+in argv, environment values, reports, or logs. Keep the old private key until
+the owner confirms the legacy inventory is `migrated` and the new doctor probe
+passes; remove it later through the approved secret-retirement process.
+
 The server owner lists and permanently revokes installed clients with
 `punaro-admin client list` and `punaro-admin client revoke`, using only
 content-free lifecycle inventory. Credential rotation remains available through

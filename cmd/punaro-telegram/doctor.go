@@ -87,14 +87,14 @@ var (
 	telegramDoctorConfigLoad = loadConfig
 	telegramDoctorNow        = time.Now
 	telegramDoctorRelayProbe = func(ctx context.Context, cfg config) (adapter.DoctorProbeResult, error) {
-		client, err := adapter.NewHTTPRelayClientWithPolicy(cfg.relayURL, cfg.machineID, cfg.privateKey, nil, cfg.accessToken, cfg.transportPolicy)
+		client, err := newTelegramRelayClient(cfg)
 		if err != nil {
 			return adapter.DoctorProbeResult{}, errors.New("relay doctor unavailable")
 		}
 		return client.DoctorEndpoint(ctx, cfg.endpoint)
 	}
 	telegramDoctorNotificationProbe = func(ctx context.Context, cfg config) (adapter.DoctorProbeResult, error) {
-		client, err := adapter.NewHTTPRelayClientWithPolicy(cfg.relayURL, cfg.machineID, cfg.privateKey, nil, cfg.accessToken, cfg.transportPolicy)
+		client, err := newTelegramRelayClient(cfg)
 		if err != nil {
 			return adapter.DoctorProbeResult{}, errors.New("relay notification doctor unavailable")
 		}

@@ -116,6 +116,44 @@ type MailCutoverEpoch struct {
 	AbortedAt   sql.NullTime
 }
 
+// MailCutoverPreflight is a content-free readiness inventory for a read-only
+// cutover preview and doctor report.
+type MailCutoverPreflight struct {
+	TargetRows       int64 `json:"target_rows"`
+	LegacyPending    int64 `json:"legacy_pending"`
+	LegacyMigrated   int64 `json:"legacy_migrated"`
+	LegacyRetired    int64 `json:"legacy_retired"`
+	IncompleteEpochs int64 `json:"incomplete_epochs"`
+	ActiveEpochs     int64 `json:"active_epochs"`
+}
+
+// InspectMailCutoverPreflight reports bounded aggregate readiness without
+// exposing machine labels, keys, credentials, or mail content.
+func (a *Administration) InspectMailCutoverPreflight(ctx context.Context) (MailCutoverPreflight, error) {
+	if a == nil || a.db == nil {
+		return MailCutoverPreflight{}, errors.New("mail cutover preflight is unavailable")
+	}
+	tx, err := a.db.BeginTx(ctx, &sql.TxOptions{Isolation: sql.LevelRepeatableRead, ReadOnly: true})
+	if err != nil {
+		return MailCutoverPreflight{}, errors.New("mail cutover preflight is unavailable")
+	}
+	defer func() { _ = tx.Rollback() }()
+	var result MailCutoverPreflight
+	if err := tx.QueryRowContext(ctx, mailCutoverEmptyTargetCountSQL).Scan(&result.TargetRows); err != nil {
+		return MailCutoverPreflight{}, errors.New("mail cutover target readiness is unavailable")
+	}
+	if err := tx.QueryRowContext(ctx, `SELECT count(*) FILTER (WHERE state='pending'),count(*) FILTER (WHERE state='migrated'),count(*) FILTER (WHERE state='retired') FROM auth.legacy_machines`).Scan(&result.LegacyPending, &result.LegacyMigrated, &result.LegacyRetired); err != nil {
+		return MailCutoverPreflight{}, errors.New("legacy inventory readiness is unavailable")
+	}
+	if err := tx.QueryRowContext(ctx, `SELECT count(*) FILTER (WHERE phase IN ('importing','verified')),count(*) FILTER (WHERE phase='active') FROM relay.mail_cutover_epochs`).Scan(&result.IncompleteEpochs, &result.ActiveEpochs); err != nil || result.TargetRows < 0 || result.LegacyPending < 0 || result.LegacyMigrated < 0 || result.LegacyRetired < 0 || result.IncompleteEpochs < 0 || result.IncompleteEpochs > 1 || result.ActiveEpochs < 0 || result.ActiveEpochs > 1 {
+		return MailCutoverPreflight{}, errors.New("mail cutover preflight is unavailable")
+	}
+	if err := tx.Commit(); err != nil {
+		return MailCutoverPreflight{}, errors.New("mail cutover preflight is unavailable")
+	}
+	return result, nil
+}
+
 // CheckMailCutoverSchemaReadiness requires the exact current schema before the
 // source can be inspected or prepared for an irreversible cutover.
 func (a *Administration) CheckMailCutoverSchemaReadiness(ctx context.Context) error {

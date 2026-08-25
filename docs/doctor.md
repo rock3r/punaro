@@ -209,6 +209,15 @@ Database, storage, and update recovery: `database_connection`,
 `owner_credential_file`, `application_credential_file`,
 `attachment_blob_directory`, `blob_storage_private`.
 
+Mail cutover readiness: `mail_cutover_legacy_inventory`,
+`mail_cutover_recovery`, `mail_cutover_target`. Before activation these checks
+require no pending legacy machines, no incomplete epoch, and an empty target;
+after activation the bound active target is accepted. The content-free
+remediations are `configure_mail_cutover`, `inspect_legacy_inventory`,
+`inspect_mail_cutover_recovery`, `inspect_mail_cutover_target`,
+`migrate_or_retire_pending_legacy_machines`, `resume_or_abort_mail_cutover`,
+and `empty_unintended_mail_cutover_target`.
+
 `postgres_major` passes only when the running server reports the exact major
 compiled into that release and used by its release manifest; accepting any
 newer generic PostgreSQL floor would hide restore or partial-upgrade drift.
@@ -254,6 +263,9 @@ Installer-path alias resolution, private data-directory validation, and the
 mailbox snapshot/MCP inspection run together in a deadline-isolated child.
 Stalled installer-selected storage therefore makes these checks unavailable
 without extending the adapter doctor's total timeout.
+`machine_credential_file` accepts exactly one protected legacy Ed25519 key file
+or migrated device-credential file. Both configured together, an unsafe file,
+or a credential in an environment value fails configuration before transport.
 
 Relay and attachment state: `relay_transport`, `relay_origin`, `relay_access`,
 `relay_enrollment`, `relay_protocol`, `notification_transport`,
@@ -337,6 +349,8 @@ Configuration, service, and upstreams: `telegram_configuration`,
 `relay_transport`, `relay_origin`, `relay_access`, `relay_enrollment`,
 `relay_protocol`, `notification_transport`, `notification_origin`,
 `notification_access`, `notification_enrollment`, `notification_protocol`.
+The gateway applies the same exactly-one protected legacy-key or migrated
+device-credential-file rule as the adapter.
 On Linux, `gateway_service_executable` verifies both the installed unit and
 systemd's effective `ExecStart`, so a drop-in cannot redirect the running
 service while leaving the base unit apparently valid. On macOS, it

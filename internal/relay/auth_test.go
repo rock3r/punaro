@@ -8,6 +8,7 @@ import (
 	"encoding/base64"
 	"errors"
 	"net/http"
+	"net/http/httptest"
 	"path/filepath"
 	"testing"
 	"time"
@@ -274,6 +275,28 @@ func TestTransitionAuthenticatorPreservesExactMachineAuthorityForMigratedCredent
 	}
 	if !auth.AllowsEndpoint(session.MachineID, "agent/a/session") || !auth.AllowsEndpoint(session.MachineID, "claude/exact") || auth.AllowsEndpoint(session.MachineID, "agent/b/session") || auth.AllowsEndpoint(session.MachineID, "claude/exact-more") {
 		t.Fatal("migrated credential did not inherit the exact configured machine authority")
+	}
+}
+
+func TestTransitionAuthenticatorAcceptsMigratedCredentialForReadOnlyDoctor(t *testing.T) {
+	public, _, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	auth, err := NewTransitionAuthenticator(nonceStoreFunc(func(string, string, time.Time, time.Time) error { return nil }), []Machine{{ID: "machine-a", PublicKey: public, EndpointPrefixes: []string{"agent/a/"}}}, transitionAuthorityFunc(func(_ context.Context, credential string, legacyKey ed25519.PublicKey) (TransitionAuthorization, error) {
+		if credential != testTransitionToken || legacyKey != nil {
+			return TransitionAuthorization{}, ErrForbidden
+		}
+		return TransitionAuthorization{PrincipalID: "11111111-1111-4111-8111-111111111111", CredentialLookupID: "22222222-2222-4222-8222-222222222222", CredentialGeneration: 1, LegacyPublicKey: public, Current: func(context.Context) error { return nil }}, nil
+	}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	request := httptest.NewRequest(http.MethodHead, DoctorPath, nil)
+	request.Header.Set("Authorization", "Bearer "+testTransitionToken)
+	session, err := auth.AuthenticateReadOnlyDoctor(request, nil, time.Now().UTC())
+	if err != nil || session.MachineID != "machine-a" || session.CredentialLookupID == "" {
+		t.Fatalf("session=%#v err=%v", session, err)
 	}
 }
 
