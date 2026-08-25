@@ -2,7 +2,7 @@
 
 Punaro is a self-hosted relay layer for agents and people. It has an **alpha,
 loopback-hosted text relay**: enrolled machines can advertise local
-`agent-mailbox` attachments, send durable text, receive it through a local
+Waypost attachments, send durable text, receive it through a local
 adapter, and optionally bridge explicitly mapped Telegram topics. Attachments
 use the authenticated trusted-relay surface and native client; the old v2/v3
 data plane is retired from production.
@@ -15,9 +15,9 @@ Punaro has three deliberately separate roles:
   and, for remote access, protects the loopback origin with Cloudflare Tunnel
   and Access.
 - Each machine owner runs the client installer as the user who owns that
-  machine's `agent-mailbox`. The installer creates one cryptographic machine
+  machine's Waypost state. The installer creates one cryptographic machine
   identity, local adapter service, and the trusted-attachment client.
-- Agents use their existing local `agent-mailbox` MCP. They do not receive
+- Agents use their existing local Waypost MCP. They do not receive
   relay, Cloudflare, Keychain, or attachment-authority credentials.
 
 The [installation guide](installation.md) is the complete setup path. For a
@@ -50,7 +50,7 @@ arguments. See the [operator guide](operator-guide.md#native-memory-client).
 
 Developers can run the local health check and alpha relay described in the
 [operator guide](operator-guide.md). The adapter resolves currently attached
-sessions from an `agent-mailbox` `group/...` address; detached members are not
+sessions from a Waypost `group/...` address; detached members are not
 advertised. Inbound text is delivered to the local mailbox as an inert JSON
 envelope containing the relay message and conversation IDs.
 
@@ -93,7 +93,8 @@ Examples:
   Recipients may be offline. The body has not necessarily reached a local
   mailbox.
 - Mailbox acknowledgement: the receiving adapter injected the inert envelope
-  and the local agent claimed it with `mailbox_recv` then `mailbox_ack`. This
+  and the local agent claimed it with `waypost_recv` then `waypost_ack` using
+  the exact returned delivery ID and lease token. This
   still does not mean a model read the body or ran a tool.
 - Agent action: whatever the receiving runtime did after seeing the envelope.
   Punaro does not observe or certify that step. There is no delivered, read, or
@@ -107,9 +108,14 @@ receiving agent host.
 
 ## Active and idle agents
 
-An active agent must poll or wait on its local mailbox with bounded
-`mailbox_wait` / `mailbox_recv` / `mailbox_ack` cycles, repeating those waits
-during long-running work. Payload-free WebSocket wakes can only accelerate an
+An active agent must call `waypost_status` once, claim with non-blocking
+`waypost_recv`, and settle with `waypost_ack`. A blocking wait uses only the
+CLI binary and state directory returned by
+`waypost_status(include_cli_context=true)`, with a bounded `wait --for ...
+--timeout ... --json`, before claiming through MCP. A complete legacy
+`mailbox_*` tool family remains supported during rolling migration, but one
+claim never mixes families. Repeat bounded waits during long-running work.
+Payload-free WebSocket wakes can only accelerate an
 already-running adapter's poll; they do not create a model turn or resume an
 idle runtime.
 

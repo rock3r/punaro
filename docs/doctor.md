@@ -33,7 +33,13 @@ transactionally consistent private SQLite snapshot. Normal concurrent writes
 continue against the live mailbox without creating a false diagnostic failure;
 the snapshot is acquired through a read-only live connection, and any
 application-state write attempted by the probe is contained in the disposable
-snapshot and removed afterward.
+snapshot and removed afterward. Doctor accepts Waypost's `waypost.db`,
+paginated group-membership document, and required `waypost_status` /
+`waypost_recv` / `waypost_ack` MCP surface. During a rolling migration it also
+accepts the legacy `mailbox.db`, flat membership array, and complete
+`mailbox_status` / `mailbox_recv` / `mailbox_ack` surface. Both database names
+in one configured state directory are ambiguous and fail closed; doctor never
+runs migration or chooses one on the operator's behalf.
 Backup contents, mailbox state, and nested skill trees are traversed in bounded
 directory batches with total-entry ceilings and deadline checks between reads.
 Skill-set digests length-prefix every relative path and file body so arbitrary

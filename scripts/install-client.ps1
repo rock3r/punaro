@@ -2,8 +2,8 @@
 param(
     [Parameter(Mandatory = $true)][string]$RelayUrl,
     [Parameter(Mandatory = $true)][string]$MachineId,
-    [string]$AgentMailboxBin = 'agent-mailbox.exe',
-    [string]$MailboxStateDir = (Join-Path $env:LOCALAPPDATA 'ai-agent\mailbox'),
+    [Alias('AgentMailboxBin')][string]$WaypostBin = '',
+    [string]$MailboxStateDir = '',
     [string]$AttachedGroup = 'group/punaro-attached',
     [string]$AgentGuidanceDir,
     [switch]$AllowLanHttp,
@@ -318,10 +318,27 @@ foreach ($retiredPath in @(
 }
 
 try {
-    $mailboxCommand = Get-Command $AgentMailboxBin -CommandType Application -ErrorAction Stop
+    $mailboxCommand = $null
+    if ([string]::IsNullOrWhiteSpace($WaypostBin)) {
+        foreach ($candidate in @('waypost.exe', 'agent-mailbox.exe')) {
+            $mailboxCommand = Get-Command $candidate -CommandType Application -ErrorAction SilentlyContinue
+            if ($null -ne $mailboxCommand) { break }
+        }
+    } else {
+        $mailboxCommand = Get-Command $WaypostBin -CommandType Application -ErrorAction Stop
+    }
+    if ($null -eq $mailboxCommand) { Stop-Install 'Waypost is required; install it before onboarding this machine' }
     $mailbox = if (-not [string]::IsNullOrWhiteSpace($mailboxCommand.Path)) { $mailboxCommand.Path } else { $mailboxCommand.Source }
-    if ([string]::IsNullOrWhiteSpace($mailbox)) { Stop-Install 'agent-mailbox is required; install it before onboarding this machine' }
-} catch { Stop-Install 'agent-mailbox is required; install it before onboarding this machine' }
+    if ([string]::IsNullOrWhiteSpace($mailbox)) { Stop-Install 'Waypost is required; install it before onboarding this machine' }
+} catch { Stop-Install 'Waypost is required; install it before onboarding this machine' }
+if ([string]::IsNullOrWhiteSpace($MailboxStateDir)) {
+    $mailboxName = [System.IO.Path]::GetFileNameWithoutExtension($mailbox)
+    $MailboxStateDir = if ($mailboxName.Equals('waypost', [System.StringComparison]::OrdinalIgnoreCase)) {
+        Join-Path $env:LOCALAPPDATA 'waypost'
+    } else {
+        Join-Path $env:LOCALAPPDATA 'ai-agent\mailbox'
+    }
+}
 $MailboxStateDir = Get-FullPath $MailboxStateDir
 
 $adapterTaskName = 'Punaro Adapter'

@@ -179,11 +179,11 @@ def validate_mcp() -> dict[str, Any]:
         raise ValidationError("mcp.json must use the closed Agent Plugins 1.0.0 shape")
     servers = config.get("mcpServers")
     expected = {
-        "agent-mailbox": {
+        "waypost": {
             "type": "stdio",
             "command": "./scripts/punaro-plugin-mcp",
         },
-        "agent-mailbox-windows": {
+        "waypost-windows": {
             "type": "stdio",
             "command": "./scripts/punaro-plugin-mcp.cmd",
         },

@@ -519,9 +519,19 @@ func mailboxDoctorSnapshot(ctx context.Context, root string) (string, error) {
 	if ctx == nil || !privateDoctorDirectory(root) {
 		return "", errors.New("mailbox state is unavailable")
 	}
-	source := filepath.Join(root, "mailbox.db")
-	info, err := os.Lstat(source) // #nosec G703 -- installer-selected private mailbox database.
-	if err != nil || !info.Mode().IsRegular() || info.Mode()&os.ModeSymlink != 0 || info.Size() < 0 || info.Size() > maximumMailboxDoctorBytes {
+	var source string
+	for _, name := range []string{"waypost.db", "mailbox.db"} {
+		candidate := filepath.Join(root, name)
+		info, err := os.Lstat(candidate) // #nosec G703 -- installer-selected private mailbox database.
+		if errors.Is(err, os.ErrNotExist) {
+			continue
+		}
+		if err != nil || source != "" || !info.Mode().IsRegular() || info.Mode()&os.ModeSymlink != 0 || info.Size() < 0 || info.Size() > maximumMailboxDoctorBytes {
+			return "", errors.New("mailbox database is unsafe")
+		}
+		source = candidate
+	}
+	if source == "" {
 		return "", errors.New("mailbox database is unsafe")
 	}
 	snapshot, err := os.MkdirTemp("", "punaro-mailbox-doctor-*")
@@ -534,7 +544,7 @@ func mailboxDoctorSnapshot(ctx context.Context, root string) (string, error) {
 			_ = os.RemoveAll(snapshot)
 		}
 	}()
-	destination := filepath.Join(snapshot, "mailbox.db")
+	destination := filepath.Join(snapshot, filepath.Base(source))
 	uri := (&url.URL{Scheme: "file", Path: source, RawQuery: "mode=ro"}).String()
 	database, err := sql.Open("sqlite", uri)
 	if err != nil {
@@ -564,37 +574,66 @@ func probeMailboxAttachments(ctx context.Context, config adapterConfig) ([]strin
 	if err != nil {
 		return nil, err
 	}
-	command := exec.CommandContext(ctx, binary, "--state-dir", config.mailboxState, "group", "members", "--group", config.attachedGroup, "--json") // #nosec G204,G702 -- fixed read-only mailbox command using installer configuration.
-	output := &boundedDoctorOutput{maximum: maximumMailboxDoctorOutput}
-	command.Stdout = output
-	command.Stderr = io.Discard
-	if err := command.Run(); err != nil || output.overflow {
-		return nil, errors.New("mailbox attachments are unavailable")
-	}
-	var memberships []struct {
+	type membership struct {
 		Person string `json:"person"`
 		Active bool   `json:"active"`
 	}
-	if json.Unmarshal([]byte(output.buffer.String()), &memberships) != nil || len(memberships) > maximumMailboxDoctorEndpoints {
-		return nil, errors.New("mailbox attachments are invalid")
-	}
-	attached := make([]string, 0, len(memberships))
-	seen := make(map[string]struct{}, len(memberships))
-	for _, membership := range memberships {
-		if !membership.Active {
-			continue
+	attached := make([]string, 0, maximumMailboxDoctorEndpoints)
+	seen := make(map[string]struct{}, maximumMailboxDoctorEndpoints)
+	cursor := ""
+	count := 0
+	for range 8 {
+		args := []string{"--state-dir", config.mailboxState, "group", "members", "--group", config.attachedGroup, "--json"}
+		if cursor != "" {
+			args = append(args, "--cursor", cursor)
 		}
-		if !relay.ValidEndpoint(membership.Person) {
+		command := exec.CommandContext(ctx, binary, args...) // #nosec G204,G702 -- fixed read-only mailbox command using installer configuration.
+		output := &boundedDoctorOutput{maximum: maximumMailboxDoctorOutput}
+		command.Stdout = output
+		command.Stderr = io.Discard
+		if err := command.Run(); err != nil || output.overflow {
+			return nil, errors.New("mailbox attachments are unavailable")
+		}
+		body := []byte(output.buffer.String())
+		var memberships []membership
+		nextCursor := ""
+		if err := json.Unmarshal(body, &memberships); err != nil {
+			var page struct {
+				Items      []membership `json:"items"`
+				NextCursor string       `json:"next_cursor"`
+			}
+			if json.Unmarshal(body, &page) != nil || page.Items == nil {
+				return nil, errors.New("mailbox attachments are invalid")
+			}
+			memberships, nextCursor = page.Items, page.NextCursor
+		}
+		count += len(memberships)
+		if count > maximumMailboxDoctorEndpoints {
 			return nil, errors.New("mailbox attachments are invalid")
 		}
-		if _, duplicate := seen[membership.Person]; duplicate {
+		for _, membership := range memberships {
+			if !membership.Active {
+				continue
+			}
+			if !relay.ValidEndpoint(membership.Person) {
+				return nil, errors.New("mailbox attachments are invalid")
+			}
+			if _, duplicate := seen[membership.Person]; duplicate {
+				return nil, errors.New("mailbox attachments are invalid")
+			}
+			seen[membership.Person] = struct{}{}
+			attached = append(attached, membership.Person)
+		}
+		if nextCursor == "" {
+			sort.Strings(attached)
+			return attached, nil
+		}
+		if nextCursor == cursor || len(nextCursor) > maximumMailboxDoctorOutput || strings.ContainsAny(nextCursor, "\r\n\x00") {
 			return nil, errors.New("mailbox attachments are invalid")
 		}
-		seen[membership.Person] = struct{}{}
-		attached = append(attached, membership.Person)
+		cursor = nextCursor
 	}
-	sort.Strings(attached)
-	return attached, nil
+	return nil, errors.New("mailbox attachments are invalid")
 }
 
 func adapterEndpointsAttached(ctx context.Context, config adapterConfig, endpoints []string) bool {
@@ -808,9 +847,33 @@ func readMCPDoctorResponse(decoder *json.Decoder, id int, requireTools bool) boo
 			return true
 		}
 		var result struct {
-			Tools []json.RawMessage `json:"tools"`
+			Tools []struct {
+				Name string `json:"name"`
+			} `json:"tools"`
 		}
-		return json.Unmarshal(response.Result, &result) == nil && result.Tools != nil
+		return json.Unmarshal(response.Result, &result) == nil && mailboxToolSurfaceSupported(result.Tools)
+	}
+	return false
+}
+
+func mailboxToolSurfaceSupported(tools []struct {
+	Name string `json:"name"`
+}) bool {
+	present := make(map[string]struct{}, len(tools))
+	for _, tool := range tools {
+		present[tool.Name] = struct{}{}
+	}
+	for _, prefix := range []string{"waypost_", "mailbox_"} {
+		supported := true
+		for _, operation := range []string{"status", "recv", "ack"} {
+			if _, ok := present[prefix+operation]; !ok {
+				supported = false
+				break
+			}
+		}
+		if supported {
+			return true
+		}
 	}
 	return false
 }

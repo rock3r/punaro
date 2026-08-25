@@ -1,7 +1,7 @@
 # Telegram gateway
 
 `punaro-telegram` is a separately enrolled bridge between one Telegram bot and
-the central Punaro relay. It deliberately does not access an agent-mailbox
+the central Punaro relay. It deliberately does not access local Waypost state
 database. A Punaro conversation **is** the topic: claiming it creates one
 private-chat forum topic, persists one `topic_routes` row, and materializes the
 built-in participant `user-telegram`. Agents send to that label. They never

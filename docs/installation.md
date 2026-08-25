@@ -94,8 +94,8 @@ package image without creating users, changing systemd, or starting services.
 
 ## 2. Install one client machine
 
-Install `agent-mailbox` first. Then, as the same unprivileged user that owns
-that mailbox state, run from the reviewed Punaro checkout:
+Install Waypost 0.8 or newer first. Then, as the same unprivileged user that
+owns that mailbox state, run from the reviewed Punaro checkout:
 
 ```sh
 ./scripts/install-client.sh \
@@ -117,6 +117,12 @@ enrollment JSON record. launchd declares it as a background process;
 systemd disables terminal input and sends output only to the journal. It does
 not start the adapter yet.
 
+New installs auto-detect `waypost` before the legacy `agent-mailbox` binary and
+use `~/.local/state/waypost` for Waypost state. Use `--waypost-bin` and
+`--mailbox-state-dir` when the reviewed executable or state lives elsewhere.
+`--agent-mailbox-bin` remains a deprecated option alias so an existing legacy
+installation can be reinstalled without changing its mailbox boundary.
+
 When the signed release catalog is available, install it into the managed slot
 and keep the fixed bootstrap-owned service lifecycle:
 
@@ -124,7 +130,7 @@ and keep the fixed bootstrap-owned service lifecycle:
 punaro-bootstrap update \
   --directory "$HOME/.local/state/punaro-bootstrap" \
   --keys-file /absolute/private/punaro-release.pub \
-  --release v0.1.0-alpha.3
+  --release v0.1.0-alpha.4
 punaro-bootstrap doctor \
   --directory "$HOME/.local/state/punaro-bootstrap" \
   --keys-file /absolute/private/punaro-release.pub \
@@ -140,7 +146,7 @@ the service. See [GitHub Releases](github-releases.md) and
 
 ### Windows 10/11 client
 
-Install `agent-mailbox.exe` and Go first. Run this from the reviewed checkout
+Install `waypost.exe` 0.8 or newer and Go first. Run this from the reviewed checkout
 in a normal interactive PowerShell session for the Windows user that owns that
 mailbox:
 
@@ -150,6 +156,11 @@ powershell -NoProfile -File .\scripts\install-client.ps1 `
   -MachineId windows-review `
   -AgentGuidanceDir C:\src\agent-project
 ```
+
+The Windows installer auto-detects `waypost.exe` before a legacy
+`agent-mailbox.exe` and uses `%LOCALAPPDATA%\waypost` for new Waypost state.
+Use `-WaypostBin` and `-MailboxStateDir` for explicit reviewed locations;
+`-AgentMailboxBin` remains a deprecated PowerShell alias.
 
 The installer writes private state below `%LOCALAPPDATA%\Punaro`, applies an
 exclusive ACL for the current user, and registers the hidden **Punaro Adapter**
@@ -194,9 +205,46 @@ if you decline it during client setup.
 
 Agents with plugin support can instead load the repository's
 [Punaro agent plugin](agent-plugin.md). It provides the same three skills plus
-the local `agent-mailbox` MCP declaration without modifying a project's
+the local Waypost MCP declaration without modifying a project's
 guidance files. Use one skill-installation method for a project so the same
 skills are not discovered twice.
+
+### Migrate an existing agent-mailbox state to Waypost
+
+This is an operator migration, not an agent-message action. Stop the Punaro
+adapter and every agent application or MCP process using the legacy mailbox,
+then take an owner-only recovery copy of the complete legacy state directory.
+Run Waypost's durable migration with both custom paths explicit:
+
+```sh
+waypost --state-dir "$HOME/.local/state/waypost" migrate \
+  --from "$HOME/.local/state/ai-agent/mailbox"
+```
+
+On Windows, stop the **Punaro Adapter** Scheduled Task and every client using
+the mailbox, then run:
+
+```powershell
+& waypost.exe --state-dir "$env:LOCALAPPDATA\waypost" migrate `
+  --from "$env:LOCALAPPDATA\ai-agent\mailbox"
+```
+
+Waypost refuses overlapping paths, an existing unrelated destination, or an
+ambiguous interrupted copy. Rerun the same command to resume only a migration
+it owns. Windows cross-volume migration may deliberately retain the old source
+as a recovery copy; do not delete it until the rollout and rollback drill are
+complete.
+
+With the service still stopped, edit only `PUNARO_AGENT_MAILBOX_BIN` and
+`PUNARO_MAILBOX_STATE_DIR` in the owner-only Punaro `adapter.env` to the exact
+reviewed Waypost executable and migrated directory. Preserve mode `0600` on
+Unix or the current-user-only Windows ACL, and never print or rewrite the
+Access secret lines. Rerun the client installer with the same machine/relay and
+the explicit `--waypost-bin` / `--mailbox-state-dir` (or `-WaypostBin` /
+`-MailboxStateDir`) values, enable the service, then run adapter doctor with the
+installed plugin root. Rollback restores the complete private backup and both
+profile paths together; never point a legacy binary at `waypost.db` or Waypost
+at an unmigrated `mailbox.db`.
 
 ## 3. Approve and configure the client
 
@@ -269,12 +317,12 @@ skills are not discovered twice.
    namespace, then attach it to the local group. For example:
 
    ```sh
-   agent-mailbox group add-member \
+   waypost group add-member \
      --group group/punaro-attached \
      --person agent/laptop-review/agent-a
    ```
 
-   Use `mailbox_bind` in the local `agent-mailbox` MCP to create the explicit
+   Use `waypost_bind` in the local Waypost MCP to create the explicit
    address first. The installer cannot infer which agent sessions should be
    reachable.
 4. Re-run the same client command with `--enable`, then verify the user
@@ -558,11 +606,16 @@ shared ACLs, and replacement races fail closed.
 
 ## Agent mailbox behavior
 
-Agents use the local `agent-mailbox` MCP, not a remote Punaro MCP. Call
-`mailbox_status` once, then use bounded `mailbox_wait` calls to block until
-mail is available. Call `mailbox_recv` to claim it and `mailbox_ack` after
-handling it. Repeat bounded waits during long-running work. A WebSocket wake
-accelerates adapter polling only; it does not itself create a model turn. The
-durable fetch/ack path remains correct through sleep, reconnect, or missed wake
-events. A successful `punaro-adapter send` proves relay acceptance only
+Agents use the local Waypost MCP, not a remote Punaro MCP. Call
+`waypost_status` once, then call non-blocking `waypost_recv` to claim mail and
+`waypost_ack` with the exact returned delivery ID and lease token after
+handling it. For a bounded blocking wait, call
+`waypost_status(include_cli_context=true)`, then run only the reported CLI and
+state directory with `wait --for BOUND_ADDRESS --timeout 5m --json`; claim the
+result through `waypost_recv`. Repeat bounded waits during long-running work.
+A complete legacy `mailbox_status` / `mailbox_wait` / `mailbox_recv` /
+`mailbox_ack` MCP surface remains supported during rolling migration, but one
+claim must never mix tool families. A WebSocket wake
+accelerates adapter polling only; it does not itself create a model turn. The durable fetch/ack path
+remains correct through sleep, reconnect, or missed wake events. A successful `punaro-adapter send` proves relay acceptance only
 (`accepted/queued`); it is not a mailbox acknowledgement or an agent action.

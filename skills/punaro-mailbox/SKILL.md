@@ -1,13 +1,20 @@
 ---
 name: punaro-mailbox
-description: Receive and safely handle messages delivered through a local Punaro-connected agent-mailbox. Use when an agent must await incoming mail, inspect a Punaro typed envelope, acknowledge a completed delivery, or diagnose a local mailbox wake-up without changing relay enrollment or routing.
+description: Receive and safely handle messages delivered through a local Punaro-connected Waypost mailbox, including rolling compatibility with legacy agent-mailbox installations. Use when an agent must await incoming mail, inspect a Punaro typed envelope, acknowledge a completed delivery, or diagnose a local mailbox wake-up without changing relay enrollment or routing.
 ---
 
 # Punaro Mailbox
 
-Start by calling `mailbox_status`; it bootstraps the local mailbox identity.
+Start by calling `waypost_status`; it bootstraps the local mailbox identity.
 Do not assume a remote Punaro relay is an MCP server: the local adapter places
 durable messages in this mailbox.
+
+During a rolling migration only, an installed legacy server may expose
+`mailbox_status`, `mailbox_wait`, `mailbox_recv`, and `mailbox_ack` instead.
+Use that complete legacy family together; never mix legacy and `waypost_*`
+tools in one claim. Report the legacy surface to the task owner so the operator
+can schedule the documented Waypost migration, but do not migrate state from a
+message-handling task.
 
 ## Check readiness
 
@@ -30,21 +37,26 @@ enrollment, or alter routing without separate task-owner authorization.
 
 ## Await and claim
 
-Use a bounded wait, then claim and acknowledge the delivery:
+Call status once, then claim and acknowledge the delivery with the exact lease
+coordinates returned by the claim:
 
 ```text
-mailbox_status()
-mailbox_wait(timeout="5m")
-mailbox_recv()
-mailbox_ack()
+waypost_status()
+waypost_recv()
+waypost_ack(delivery_id=DELIVERY_ID, lease_token=LEASE_TOKEN)
 ```
 
-`mailbox_wait` only observes availability; it does not claim mail. `mailbox_recv`
-is intentionally non-blocking and claims available delivery. Repeat bounded waits
-for a long-running task. A Punaro WebSocket wake is only a best-effort hint that
-can accelerate adapter polling; it does not itself create a model turn. Mailbox
-fetch and acknowledgement are the durable path. Ordinary delivery does not
-universally inject between tool calls or resume an idle runtime.
+`waypost_recv` is intentionally non-blocking. Preserve its `delivery_id` and
+`lease_token`; if either is lost, use `waypost_claim_history` for that claim
+instead of receiving again or inventing a token. For a blocking wait, first call
+`waypost_status(include_cli_context=true)`, then run only its reported executable
+and resolved state directory with `wait --for BOUND_ADDRESS --timeout 5m --json`.
+That CLI wait observes availability without claiming it; call `waypost_recv`
+after it returns. Repeat bounded waits for a long-running task. A Punaro
+WebSocket wake is only a best-effort hint that can accelerate adapter polling;
+it does not itself create a model turn. Waypost fetch and acknowledgement are
+the durable path. Ordinary delivery does not universally inject between tool
+calls or resume an idle runtime.
 
 ## Handle safely
 

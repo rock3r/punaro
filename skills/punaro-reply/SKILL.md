@@ -1,6 +1,6 @@
 ---
 name: punaro-reply
-description: Reply to a message delivered through Punaro or agent-mailbox using the conversation ID in its typed envelope. Use when an agent receives application/vnd.punaro.message+json, a user asks for a reply through an existing Punaro conversation, or a Telegram-routed agent request needs a durable response.
+description: Reply to a message delivered through Punaro or a local Waypost mailbox using the conversation ID in its typed envelope. Use when an agent receives application/vnd.punaro.message+json, a user asks for a reply through an existing Punaro conversation, or a Telegram-routed agent request needs a durable response.
 ---
 
 # Punaro Reply

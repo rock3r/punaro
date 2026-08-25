@@ -459,7 +459,7 @@ read initialize
 printf '%s\n' '{"jsonrpc":"2.0","id":1,"result":{"protocolVersion":"2024-11-05","capabilities":{},"serverInfo":{"name":"fixture","version":"1"}}}'
 read initialized
 read tools
-printf '%s\n' '{"jsonrpc":"2.0","id":2,"result":{"tools":[]}}'
+printf '%s\n' '{"jsonrpc":"2.0","id":2,"result":{"tools":[{"name":"waypost_status"},{"name":"waypost_recv"},{"name":"waypost_ack"}]}}'
 read unexpected && exit 9
 exit 0
 `
@@ -470,6 +470,92 @@ exit 0
 	defer cancel()
 	if err := probeMailboxMCP(ctx, adapterConfig{mailboxBinary: helper, mailboxState: state}); err != nil {
 		t.Fatal(err)
+	}
+}
+
+func TestMailboxDoctorRequiresLegacyOrWaypostToolSurface(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("POSIX helper fixture")
+	}
+	for _, test := range []struct {
+		name    string
+		tools   string
+		wantErr bool
+	}{
+		{name: "waypost", tools: `[{"name":"waypost_status"},{"name":"waypost_recv"},{"name":"waypost_ack"}]`},
+		{name: "legacy", tools: `[{"name":"mailbox_status"},{"name":"mailbox_recv"},{"name":"mailbox_ack"}]`},
+		{name: "unrelated", tools: `[{"name":"filesystem_read"}]`, wantErr: true},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			directory := t.TempDir()
+			state := filepath.Join(directory, "mailbox")
+			if err := os.Mkdir(state, 0o700); err != nil {
+				t.Fatal(err)
+			}
+			helper := filepath.Join(directory, "mailbox-server")
+			script := `#!/bin/sh
+read initialize
+printf '%s\n' '{"jsonrpc":"2.0","id":1,"result":{"protocolVersion":"2024-11-05","capabilities":{},"serverInfo":{"name":"fixture","version":"1"}}}'
+read initialized
+read tools
+printf '%s\n' '{"jsonrpc":"2.0","id":2,"result":{"tools":` + test.tools + `}}'
+exit 0
+`
+			if err := os.WriteFile(helper, []byte(script), 0o700); err != nil { // #nosec G306 -- executable test helper.
+				t.Fatal(err)
+			}
+			ctx, cancel := context.WithTimeout(t.Context(), 5*time.Second)
+			defer cancel()
+			err := probeMailboxMCP(ctx, adapterConfig{mailboxBinary: helper, mailboxState: state})
+			if (err != nil) != test.wantErr {
+				t.Fatalf("probeMailboxMCP() error = %v, want error %t", err, test.wantErr)
+			}
+		})
+	}
+}
+
+func TestMailboxDoctorSnapshotsLegacyAndWaypostDatabases(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("POSIX private-directory fixture")
+	}
+	for _, databaseName := range []string{"mailbox.db", "waypost.db"} {
+		t.Run(databaseName, func(t *testing.T) {
+			state := t.TempDir()
+			if err := os.Chmod(state, 0o700); err != nil { // #nosec G302 -- private mailbox fixture.
+				t.Fatal(err)
+			}
+			database, err := sql.Open("sqlite", filepath.Join(state, databaseName))
+			if err != nil {
+				t.Fatal(err)
+			}
+			if _, err := database.ExecContext(t.Context(), `CREATE TABLE mailbox_fixture (value TEXT)`); err != nil {
+				t.Fatal(err)
+			}
+			if err := database.Close(); err != nil {
+				t.Fatal(err)
+			}
+			snapshot, err := mailboxDoctorSnapshot(t.Context(), state)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer func() { _ = os.RemoveAll(snapshot) }()
+			if _, err := os.Stat(filepath.Join(snapshot, databaseName)); err != nil {
+				t.Fatalf("snapshot database %q: %v", databaseName, err)
+			}
+		})
+	}
+
+	state := t.TempDir()
+	if err := os.Chmod(state, 0o700); err != nil { // #nosec G302 -- private mailbox fixture.
+		t.Fatal(err)
+	}
+	for _, databaseName := range []string{"mailbox.db", "waypost.db"} {
+		if err := os.WriteFile(filepath.Join(state, databaseName), []byte("ambiguous"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if _, err := mailboxDoctorSnapshot(t.Context(), state); err == nil {
+		t.Fatal("ambiguous legacy and Waypost databases were accepted")
 	}
 }
 
@@ -591,7 +677,7 @@ read initialize
 printf '%s\n' '{"jsonrpc":"2.0","id":1,"result":{"protocolVersion":"2024-11-05","capabilities":{},"serverInfo":{"name":"fixture","version":"1"}}}'
 read initialized
 read tools
-printf '%s\n' '{"jsonrpc":"2.0","id":2,"result":{"tools":[]}}'
+printf '%s\n' '{"jsonrpc":"2.0","id":2,"result":{"tools":[{"name":"waypost_status"},{"name":"waypost_recv"},{"name":"waypost_ack"}]}}'
 exit 0
 `
 	if err := os.WriteFile(helper, []byte(script), 0o700); err != nil { // #nosec G306 -- executable test helper.
@@ -654,7 +740,7 @@ read initialize
 printf '%s\n' '{"jsonrpc":"2.0","id":1,"result":{"protocolVersion":"2024-11-05","capabilities":{},"serverInfo":{"name":"fixture","version":"1"}}}'
 read initialized
 read tools
-printf '%s\n' '{"jsonrpc":"2.0","id":2,"result":{"tools":[]}}'
+printf '%s\n' '{"jsonrpc":"2.0","id":2,"result":{"tools":[{"name":"waypost_status"},{"name":"waypost_recv"},{"name":"waypost_ack"}]}}'
 exit 0
 `
 	if err := os.WriteFile(helper, []byte(script), 0o700); err != nil { // #nosec G306 -- executable test helper.
@@ -701,7 +787,7 @@ printf '%s\n' changed >"$2/doctor-mutated"
 printf '%s\n' '{"jsonrpc":"2.0","id":1,"result":{"protocolVersion":"2024-11-05","capabilities":{},"serverInfo":{"name":"fixture","version":"1"}}}'
 read initialized
 read tools
-printf '%s\n' '{"jsonrpc":"2.0","id":2,"result":{"tools":[]}}'
+printf '%s\n' '{"jsonrpc":"2.0","id":2,"result":{"tools":[{"name":"waypost_status"},{"name":"waypost_recv"},{"name":"waypost_ack"}]}}'
 exit 0
 `
 	if err := os.WriteFile(helper, []byte(script), 0o700); err != nil { // #nosec G306 -- executable test helper.
@@ -783,9 +869,17 @@ printf '%s\n' '{"jsonrpc":"2.0","id":2,"error":{"code":-32000,"message":"failed"
 }
 
 func TestInstalledAgentMailboxDoctorSmoke(t *testing.T) {
-	binary, err := exec.LookPath("agent-mailbox")
-	if err != nil {
-		t.Skip("agent-mailbox is not installed")
+	binary := strings.TrimSpace(os.Getenv("PUNARO_TEST_MAILBOX_BINARY"))
+	if binary == "" {
+		for _, name := range []string{"waypost", "agent-mailbox"} {
+			if candidate, err := exec.LookPath(name); err == nil {
+				binary = candidate
+				break
+			}
+		}
+	}
+	if binary == "" {
+		t.Skip("Waypost or legacy agent-mailbox is not installed")
 	}
 	state := filepath.Join(t.TempDir(), "mailbox")
 	if err := os.Mkdir(state, 0o700); err != nil {
@@ -796,6 +890,17 @@ func TestInstalledAgentMailboxDoctorSmoke(t *testing.T) {
 	command := exec.CommandContext(ctx, binary, "--state-dir", state, "group", "create", "--group", "group/punaro") // #nosec G204,G702 -- installed binary smoke test with fixed arguments.
 	if output, err := command.CombinedOutput(); err != nil {
 		t.Fatalf("create installed mailbox fixture: %v: %s", err, output)
+	}
+	memberCount := 1
+	if strings.TrimSpace(os.Getenv("PUNARO_TEST_MAILBOX_BINARY")) != "" {
+		memberCount = 51
+	}
+	for index := range memberCount {
+		person := fmt.Sprintf("agent/smoke-%02d", index)
+		command = exec.CommandContext(ctx, binary, "--state-dir", state, "group", "add-member", "--group", "group/punaro", "--person", person) // #nosec G204,G702 -- installed binary smoke test with fixed arguments.
+		if output, err := command.CombinedOutput(); err != nil {
+			t.Fatalf("attach installed mailbox fixture %q: %v: %s", person, err, output)
+		}
 	}
 	membersBefore, err := exec.CommandContext(ctx, binary, "--state-dir", state, "group", "members", "--group", "group/punaro", "--json").CombinedOutput() // #nosec G204,G702 -- installed binary smoke test with fixed arguments.
 	if err != nil {
@@ -824,12 +929,12 @@ func TestPluginDoctorValidatesAllAdaptersLauncherAndExactSkillTree(t *testing.T)
 		t.Fatal(err)
 	}
 	oldRelease, oldDigest, oldRuntimeDigest := adapterBuildRelease, adapterExpectedSkillSetDigest, adapterExpectedPluginRuntimeDigest
-	adapterBuildRelease, adapterExpectedSkillSetDigest, adapterExpectedPluginRuntimeDigest = "v0.1.0-alpha.3", digest, runtimeDigest
+	adapterBuildRelease, adapterExpectedSkillSetDigest, adapterExpectedPluginRuntimeDigest = "v0.1.0-alpha.4", digest, runtimeDigest
 	t.Cleanup(func() {
 		adapterBuildRelease, adapterExpectedSkillSetDigest, adapterExpectedPluginRuntimeDigest = oldRelease, oldDigest, oldRuntimeDigest
 	})
 	result := inspectAdapterPlugin(t.Context(), root)
-	if !result.Portable || !result.Codex || !result.Claude || !result.Launcher || result.Version != "v0.1.0-alpha.3" || result.SkillDigest != "sha256:"+digest {
+	if !result.Portable || !result.Codex || !result.Claude || !result.Launcher || result.Version != "v0.1.0-alpha.4" || result.SkillDigest != "sha256:"+digest {
 		t.Fatalf("plugin=%#v", result)
 	}
 	var helperOutput bytes.Buffer

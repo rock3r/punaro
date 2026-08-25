@@ -18,7 +18,8 @@ Options:
   --machine-id ID             Unique machine ID; becomes agent/ID/ (required)
   --allow-lan-http            Acknowledge plaintext credentials on a trusted LAN
   --trusted-lan-cidr CIDR     Private/link-local CIDR containing the literal HTTP origin
-  --agent-mailbox-bin PATH    agent-mailbox executable (default: agent-mailbox)
+  --waypost-bin PATH          Waypost executable (default: auto-detect waypost, then legacy agent-mailbox)
+  --agent-mailbox-bin PATH    Deprecated alias for --waypost-bin
   --mailbox-state-dir PATH    Local mailbox state directory
   --attached-group ADDRESS    Local group (default: group/punaro-attached)
   --agent-guidance-dir PATH   Add Punaro guidance and skills to this project
@@ -67,7 +68,8 @@ regular_private_file() {
 
 relay_url=
 machine_id=
-mailbox_bin=agent-mailbox
+mailbox_bin=
+mailbox_bin_explicit=0
 mailbox_state_dir=
 attached_group=group/punaro-attached
 agent_guidance_dir=
@@ -82,7 +84,13 @@ while [ "$#" -gt 0 ]; do
 		--machine-id) [ "$#" -ge 2 ] || fail '--machine-id requires a value'; machine_id=$2; shift 2 ;;
 		--allow-lan-http) allow_lan_http=true; shift ;;
 		--trusted-lan-cidr) [ "$#" -ge 2 ] || fail '--trusted-lan-cidr requires a value'; trusted_lan_cidr=$2; shift 2 ;;
-		--agent-mailbox-bin) [ "$#" -ge 2 ] || fail '--agent-mailbox-bin requires a value'; mailbox_bin=$2; shift 2 ;;
+		--waypost-bin|--agent-mailbox-bin)
+			[ "$#" -ge 2 ] || fail "$1 requires a value"
+			[ "$mailbox_bin_explicit" -eq 0 ] || fail 'specify only one Waypost executable option'
+			mailbox_bin=$2
+			mailbox_bin_explicit=1
+			shift 2
+			;;
 		--mailbox-state-dir) [ "$#" -ge 2 ] || fail '--mailbox-state-dir requires a value'; mailbox_state_dir=$2; shift 2 ;;
 		--attached-group) [ "$#" -ge 2 ] || fail '--attached-group requires a value'; attached_group=$2; shift 2 ;;
 		--agent-guidance-dir) [ "$#" -ge 2 ] || fail '--agent-guidance-dir requires a value'; agent_guidance_dir=$2; shift 2 ;;
@@ -93,7 +101,7 @@ while [ "$#" -gt 0 ]; do
 	esac
 done
 
-[ "$(id -u)" -ne 0 ] || fail 'run this installer as the unprivileged account that owns agent-mailbox'
+[ "$(id -u)" -ne 0 ] || fail 'run this installer as the unprivileged account that owns Waypost'
 [ -n "$HOME" ] && [ "${HOME#/}" != "$HOME" ] || fail 'HOME must be an absolute path'
 
 case "$machine_id" in
@@ -108,16 +116,10 @@ case "$relay_url" in
 	*) fail 'relay URL must use https:// or explicitly acknowledged trusted-LAN http://' ;;
 esac
 
-if [ -z "$mailbox_state_dir" ]; then
-	mailbox_state_dir="$HOME/.local/state/ai-agent/mailbox"
-fi
-mailbox_bin_input=$mailbox_bin
-mailbox_state_dir_input=$mailbox_state_dir
-
 require_safe_relay_url "$relay_url"
 require_safe_value "$HOME" 'HOME'
-require_safe_value "$mailbox_bin" 'agent-mailbox path'
-require_safe_value "$mailbox_state_dir" 'mailbox state directory'
+if [ -n "$mailbox_bin" ]; then require_safe_value "$mailbox_bin" 'Waypost path'; fi
+if [ -n "$mailbox_state_dir" ]; then require_safe_value "$mailbox_state_dir" 'mailbox state directory'; fi
 require_safe_value "$attached_group" 'attached group'
 if [ -n "$trusted_lan_cidr" ]; then require_safe_value "$trusted_lan_cidr" 'trusted LAN CIDR'; fi
 if [ -n "$keys_file" ]; then
@@ -153,13 +155,24 @@ else
 		go run ./cmd/punaro-adapter validate-relay-transport --relay-url "$relay_url" >/dev/null 2>&1
 	) || fail 'relay transport policy is invalid'
 fi
-if [ "$mailbox_bin" = agent-mailbox ]; then
-	mailbox_bin=$(command -v agent-mailbox) || fail 'agent-mailbox is required; install it before onboarding this machine'
+mailbox_bin_input=$mailbox_bin
+if [ -z "$mailbox_bin" ]; then
+	mailbox_bin=$(command -v waypost 2>/dev/null || command -v agent-mailbox 2>/dev/null) || fail 'Waypost is required; install it before onboarding this machine'
+elif [ "$mailbox_bin" = waypost ] || [ "$mailbox_bin" = agent-mailbox ]; then
+	mailbox_bin=$(command -v "$mailbox_bin") || fail 'the configured Waypost executable is unavailable'
 elif [ ! -x "$mailbox_bin" ]; then
-	fail 'agent-mailbox path is not executable'
+	fail 'Waypost path is not executable'
 fi
-mailbox_bin_dir=$(CDPATH= cd -- "$(dirname -- "$mailbox_bin")" && pwd -P) || fail 'agent-mailbox path is unavailable'
+mailbox_bin_dir=$(CDPATH= cd -- "$(dirname -- "$mailbox_bin")" && pwd -P) || fail 'Waypost path is unavailable'
 mailbox_bin="$mailbox_bin_dir/$(basename -- "$mailbox_bin")"
+if [ -z "$mailbox_state_dir" ]; then
+	if [ "$(basename -- "$mailbox_bin")" = waypost ]; then
+		mailbox_state_dir="$HOME/.local/state/waypost"
+	else
+		mailbox_state_dir="$HOME/.local/state/ai-agent/mailbox"
+	fi
+fi
+mailbox_state_dir_input=$mailbox_state_dir
 
 config_dir="$HOME/.config/punaro"
 state_dir="$HOME/.local/state/punaro-adapter"
