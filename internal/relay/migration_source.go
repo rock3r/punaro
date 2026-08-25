@@ -125,7 +125,7 @@ func IsLegacyTelegramMigrationSource(manifest MigrationSourceManifest) bool {
 		manifest.Counts.MessageFromRoles == 0 && manifest.TableSHA256.MessageFromRoles == "" &&
 		manifest.Counts.DirectMessageIdempotency == 0 && manifest.TableSHA256.DirectMessageIdempotency == "" &&
 		manifest.Counts.DisplayNameIdempotency == 0 && manifest.TableSHA256.DisplayNameIdempotency == "" &&
-		manifest.Counts.TelegramClaimIdempotency == 0 && manifest.TableSHA256.TelegramClaimIdempotency == ""
+		manifest.Counts.TelegramClaimIdempotency == manifest.Counts.TelegramClaims && validMigrationDigest(manifest.TableSHA256.TelegramClaimIdempotency)
 }
 
 // MigrationSourceTablePresent reports whether one canonical cutover table is
@@ -133,8 +133,11 @@ func IsLegacyTelegramMigrationSource(manifest MigrationSourceManifest) bool {
 func MigrationSourceTablePresent(manifest MigrationSourceManifest, table string) bool {
 	legacyTelegram := IsLegacyTelegramMigrationSource(manifest)
 	if legacyTelegram {
+		if table == "mail_telegram_claim_idempotency" {
+			return true
+		}
 		switch table {
-		case "mail_role_profiles", "mail_role_profile_idempotency", "mail_rate_buckets", "mail_direct_conversations", "mail_message_from_roles", "mail_direct_message_idempotency", "mail_conversation_display_name_idempotency", "mail_telegram_claim_idempotency":
+		case "mail_role_profiles", "mail_role_profile_idempotency", "mail_rate_buckets", "mail_direct_conversations", "mail_message_from_roles", "mail_direct_message_idempotency", "mail_conversation_display_name_idempotency":
 			return false
 		}
 	}
@@ -200,7 +203,8 @@ var v7MigrationTableSpecs = append([]migrationTableSpec(nil), migrationTableSpec
 
 var legacyTelegramV7MigrationTableSpecs = func() []migrationTableSpec {
 	specs := append([]migrationTableSpec(nil), migrationTableSpecs[:14]...)
-	return append(specs, migrationTableSpecs[20:23]...)
+	specs = append(specs, migrationTableSpecs[20:23]...)
+	return append(specs, migrationTableSpecs[24])
 }()
 
 var roleMigrationTableSpecs = withParentConversationAndMessageColumns(func() []migrationTableSpec {
@@ -234,7 +238,7 @@ var legacyMigrationTableSpecs = []migrationTableSpec{
 }
 
 const v7MigrationSourceSchema = "punaro-relay-sqlite-v7:endpoints;conversations;memberships;roles;role_memberships;role_bindings;messages;deliveries;recipient_cursors;idempotency;conversation_idempotency;conversation_controls;conversation_control_idempotency;request_nonces;role_profiles;role_profile_idempotency;rate_buckets;direct_conversations;message_from_roles;direct_message_idempotency;telegram_claims;telegram_participants;telegram_claim_events;conversation_display_name_idempotency"
-const legacyTelegramV7MigrationSourceSchema = "punaro-relay-sqlite-v7-legacy-telegram:endpoints;conversations;memberships;roles;role_memberships;role_bindings;messages;deliveries;recipient_cursors;idempotency;conversation_idempotency;conversation_controls;conversation_control_idempotency;request_nonces;telegram_claims;telegram_participants;telegram_claim_events"
+const legacyTelegramV7MigrationSourceSchema = "punaro-relay-sqlite-v7-legacy-telegram:endpoints;conversations;memberships;roles;role_memberships;role_bindings;messages;deliveries;recipient_cursors;idempotency;conversation_idempotency;conversation_controls;conversation_control_idempotency;request_nonces;telegram_claims;telegram_participants;telegram_claim_events;telegram_claim_idempotency-derived-from-telegram_claims"
 
 const legacyMigrationEndpointRepairsTable = "relay_migration_endpoint_repairs"
 const migrationSourceSchema = v7MigrationSourceSchema + ";telegram_claim_idempotency"
@@ -244,6 +248,13 @@ const v4MigrationSourceSchema = "punaro-relay-sqlite-v4:endpoints;conversations;
 const v3MigrationSourceSchema = "punaro-relay-sqlite-v3:endpoints;conversations;memberships;roles;role_memberships;role_bindings;messages;deliveries;recipient_cursors;idempotency;conversation_idempotency;conversation_controls;conversation_control_idempotency;request_nonces"
 const roleMigrationSourceSchema = "punaro-relay-sqlite-v3:endpoints;conversations;memberships;roles;role_memberships;role_bindings;messages;deliveries;recipient_cursors;idempotency;conversation_idempotency;request_nonces"
 const legacyMigrationSourceSchema = "punaro-relay-sqlite-v1:endpoints;conversations;memberships;messages;deliveries;recipient_cursors;idempotency;conversation_idempotency;request_nonces"
+
+func migrationSourceQuery(spec migrationTableSpec, legacyTelegram bool) (string, string, string) {
+	if legacyTelegram && spec.name == "telegram_claim_idempotency" {
+		return "requested_by_machine AS machine_id,idempotency_key AS key,request_hash,conversation_id,created_at", "telegram_claims", "requested_by_machine,idempotency_key"
+	}
+	return spec.columns, spec.name, spec.order
+}
 
 // InspectMigrationSource reads an existing source without creating, migrating,
 // checkpointing, or changing its logical cutover state.
@@ -765,7 +776,8 @@ func inspectMigrationSource(ctx context.Context, q migrationQueryer) (MigrationS
 	}
 	for _, spec := range tableSpecs {
 		tableHash := sha256.New()
-		query := fmt.Sprintf("SELECT %s FROM %s ORDER BY %s", spec.columns, spec.name, spec.order)
+		selectColumns, sourceTable, order := migrationSourceQuery(spec, legacyTelegram)
+		query := fmt.Sprintf("SELECT %s FROM %s ORDER BY %s", selectColumns, sourceTable, order)
 		rows, err := q.QueryContext(ctx, query) // #nosec G202 -- query fragments come only from the fixed migrationTableSpecs allowlist.
 		if err != nil {
 			return MigrationSourceManifest{}, errors.New("relay migration source rows are unavailable")

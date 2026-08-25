@@ -1025,7 +1025,7 @@ func TestInspectMigrationSourceAcceptsPreparedParentV6WithoutTelegramTables(t *t
 	}
 }
 
-func TestInspectMigrationSourceAcceptsLegacyTelegramBranchSchema(t *testing.T) {
+func TestInspectMigrationSourceAcceptsLegacyTelegramBranchSchemaAndBackfillsClaimReplayBoundary(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()
 	now := time.Date(2026, time.August, 25, 15, 0, 0, 0, time.UTC)
@@ -1038,6 +1038,10 @@ func TestInspectMigrationSourceAcceptsLegacyTelegramBranchSchema(t *testing.T) {
 		_ = store.Close()
 		t.Fatal(err)
 	}
+	if err := store.AdvertiseEndpoints("machine-telegram", []string{TelegramGatewayEndpoint}, now, time.Hour); err != nil {
+		_ = store.Close()
+		t.Fatal(err)
+	}
 	if err := store.Close(); err != nil {
 		t.Fatal(err)
 	}
@@ -1045,6 +1049,9 @@ func TestInspectMigrationSourceAcceptsLegacyTelegramBranchSchema(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	conversationID := "11111111-1111-4111-8111-111111111111"
+	otherConversationID := "22222222-2222-4222-8222-222222222222"
+	requestHash := telegramClaimRequestHash(conversationID)
 	for _, statement := range []string{
 		`DROP INDEX telegram_claims_machine_key`,
 		`DROP TABLE telegram_claim_idempotency`,
@@ -1056,6 +1063,8 @@ func TestInspectMigrationSourceAcceptsLegacyTelegramBranchSchema(t *testing.T) {
 		`DROP TABLE role_profile_idempotency`,
 		`DROP TABLE role_profiles`,
 		`ALTER TABLE messages ADD COLUMN to_role TEXT`,
+		`INSERT INTO conversations(id,next_sequence,created_at,display_name) VALUES('` + conversationID + `',0,1,'legacy')`,
+		`INSERT INTO telegram_claims(conversation_id,status,requested_by_machine,requested_by_endpoint,idempotency_key,request_hash,created_at) VALUES('` + conversationID + `','pending','machine-telegram','` + TelegramGatewayEndpoint + `','legacy-claim-key','` + requestHash + `',1)`,
 	} {
 		if _, err := db.ExecContext(ctx, statement); err != nil {
 			_ = db.Close()
@@ -1066,22 +1075,44 @@ func TestInspectMigrationSourceAcceptsLegacyTelegramBranchSchema(t *testing.T) {
 		t.Fatal(err)
 	}
 	inspected, err := InspectMigrationSource(ctx, path)
-	if err != nil || inspected.Version != 7 || inspected.Phase != MigrationSourceActive || inspected.TableSHA256.TelegramClaims == "" || inspected.TableSHA256.DirectConversations != "" || inspected.TableSHA256.DisplayNameIdempotency != "" {
+	if err != nil || inspected.Version != 7 || inspected.Phase != MigrationSourceActive || inspected.Counts.TelegramClaims != 1 || inspected.Counts.TelegramClaimIdempotency != 1 || inspected.TableSHA256.TelegramClaimIdempotency == "" || inspected.TableSHA256.DirectConversations != "" || inspected.TableSHA256.DisplayNameIdempotency != "" {
 		t.Fatalf("legacy Telegram branch inspect=%#v err=%v", inspected, err)
 	}
 	prepared, err := PrepareMigrationSource(ctx, path, uuid.NewString(), strings.Repeat("d", 64), inspected.Fingerprint, now.Add(time.Minute))
 	if err != nil || prepared.Phase != MigrationSourcePrepared || prepared.Version != 7 {
 		t.Fatalf("legacy Telegram branch prepare=%#v err=%v", prepared, err)
 	}
-	for _, table := range []string{"mail_role_profiles", "mail_rate_buckets", "mail_direct_conversations", "mail_conversation_display_name_idempotency", "mail_telegram_claim_idempotency"} {
+	for _, table := range []string{"mail_role_profiles", "mail_rate_buckets", "mail_direct_conversations", "mail_conversation_display_name_idempotency"} {
 		batch, err := ReadMigrationSourceBatch(ctx, path, table, "", 10)
 		if err != nil || len(batch.Rows) != 0 || !batch.Done {
 			t.Fatalf("legacy Telegram branch absent table %s batch=%#v err=%v", table, batch, err)
 		}
 	}
 	telegram, err := ReadMigrationSourceBatch(ctx, path, "mail_telegram_claims", "", 10)
-	if err != nil || len(telegram.Rows) != 0 || !telegram.Done {
+	if err != nil || len(telegram.Rows) != 1 || !telegram.Done {
 		t.Fatalf("legacy Telegram branch claim batch=%#v err=%v", telegram, err)
+	}
+	derived, err := ReadMigrationSourceBatch(ctx, path, "mail_telegram_claim_idempotency", "", 10)
+	if err != nil || len(derived.Rows) != 1 || !derived.Done {
+		t.Fatalf("legacy Telegram branch derived claim retry batch=%#v err=%v", derived, err)
+	}
+	var payload map[string]any
+	if err := json.Unmarshal(derived.Rows[0].Payload, &payload); err != nil {
+		t.Fatal(err)
+	}
+	if payload["machine_id"] != "machine-telegram" || payload["key"] != "legacy-claim-key" || payload["conversation_id"] != conversationID || payload["request_hash"] != requestHash || payload["request_hash"] == telegramClaimRequestHash(otherConversationID) {
+		t.Fatalf("derived claim retry lost cross-conversation boundary: %#v", payload)
+	}
+	hasher, err := NewMigrationTableHasher("mail_telegram_claim_idempotency")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := hasher.Add(derived.Rows[0]); err != nil {
+		t.Fatal(err)
+	}
+	count, digest := hasher.Evidence()
+	if count != prepared.Counts.TelegramClaimIdempotency || digest != prepared.TableSHA256.TelegramClaimIdempotency {
+		t.Fatalf("derived claim retry evidence count=%d digest=%s manifest=%#v", count, digest, prepared)
 	}
 }
 

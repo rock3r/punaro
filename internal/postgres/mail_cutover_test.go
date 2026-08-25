@@ -99,7 +99,9 @@ func TestMailCutoverRequestValidation(t *testing.T) {
 	legacyTelegramManifest.TableSHA256.MessageFromRoles = ""
 	legacyTelegramManifest.TableSHA256.DirectMessageIdempotency = ""
 	legacyTelegramManifest.TableSHA256.DisplayNameIdempotency = ""
-	legacyTelegramManifest.TableSHA256.TelegramClaimIdempotency = ""
+	legacyTelegramManifest.Counts.TelegramClaimIdempotency = legacyTelegramManifest.Counts.TelegramClaims
+	emptyDigest := sha256.Sum256(nil)
+	legacyTelegramManifest.TableSHA256.TelegramClaimIdempotency = hex.EncodeToString(emptyDigest[:])
 	legacyTelegram.Manifest, _ = json.Marshal(legacyTelegramManifest)
 	legacyTelegramDigest := sha256.Sum256(legacyTelegram.Manifest)
 	legacyTelegram.ManifestSHA256 = hex.EncodeToString(legacyTelegramDigest[:])
