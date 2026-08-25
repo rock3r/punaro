@@ -379,7 +379,7 @@ func loadMaterial(path string) (enrollmentMaterial, error) {
 		return enrollmentMaterial{}, errors.New("invalid enrollment material")
 	}
 	var preview enrollmentPreview
-	if err := decodeExact(records[0], &preview, "template", "preview_hash", "grants"); err != nil || preview.Template != "trusted-agent" || !validPreviewHash(preview.PreviewHash) || !validGrantPreview(preview.Grants) {
+	if err := decodeExact(records[0], &preview, "template", "preview_hash", "grants"); err != nil || !validEnrollmentPreview(preview) {
 		return enrollmentMaterial{}, errors.New("invalid enrollment material")
 	}
 	envelope, err := decodeEnrollmentEnvelope(records[1])
@@ -391,7 +391,7 @@ func loadMaterial(path string) (enrollmentMaterial, error) {
 
 func decodeEnrollmentEnvelope(raw []byte) (enrollmentEnvelope, error) {
 	var envelope enrollmentEnvelope
-	if err := decodeExact(raw, &envelope, "enrollment_id", "client_binding", "code", "expires_at", "preview_hash", "grants"); err != nil || !validMaterial(enrollmentMaterial{EnrollmentID: envelope.EnrollmentID, ClientBinding: envelope.ClientBinding, Code: envelope.Code}) || envelope.ExpiresAt.IsZero() || !validPreviewHash(envelope.PreviewHash) || !validGrantPreview(envelope.Grants) {
+	if err := decodeExact(raw, &envelope, "enrollment_id", "client_binding", "code", "expires_at", "preview_hash", "grants"); err != nil || !validMaterial(enrollmentMaterial{EnrollmentID: envelope.EnrollmentID, ClientBinding: envelope.ClientBinding, Code: envelope.Code}) || envelope.ExpiresAt.IsZero() || !validPreviewHash(envelope.PreviewHash) || !validGrantPreview(envelope.Grants, true) {
 		return enrollmentEnvelope{}, errors.New("invalid enrollment material")
 	}
 	return envelope, nil
@@ -427,9 +427,23 @@ func validPreviewHash(value string) bool {
 	return err == nil && len(decoded) == 32 && hex.EncodeToString(decoded) == value
 }
 
-func validGrantPreview(rawGrants []json.RawMessage) bool {
-	if len(rawGrants) == 0 {
+func validEnrollmentPreview(preview enrollmentPreview) bool {
+	if !validPreviewHash(preview.PreviewHash) {
 		return false
+	}
+	switch preview.Template {
+	case "trusted-agent":
+		return validGrantPreview(preview.Grants, false)
+	case "service":
+		return len(preview.Grants) == 0
+	default:
+		return false
+	}
+}
+
+func validGrantPreview(rawGrants []json.RawMessage, allowEmpty bool) bool {
+	if len(rawGrants) == 0 {
+		return allowEmpty
 	}
 	for _, raw := range rawGrants {
 		var grant enrollmentGrantPreview

@@ -123,6 +123,7 @@ func runClientAdd(args []string, stdout, stderr io.Writer) int {
 	machineID := flags.String("machine-id", "", "unique lowercase client machine ID")
 	binding := flags.String("client-binding", "", "client-generated opaque binding UUID")
 	allProjects := flags.Bool("all-projects", false, "grant dynamic current and future project access")
+	serviceOnly := flags.Bool("service", false, "create an identity with no API capability grants")
 	ttl := flags.Duration("ttl", 10*time.Minute, "single-use enrollment lifetime")
 	legacyPrincipal := flags.String("legacy-principal-id", "", "operator-approved legacy machine principal for exchange")
 	confirmed := flags.Bool("yes", false, "confirm the printed exact grant expansion")
@@ -131,7 +132,19 @@ func runClientAdd(args []string, stdout, stderr io.Writer) int {
 	if flags.Parse(args) != nil || *actor == "" || *name == "" || *machineID == "" || *binding == "" || flags.NArg() != 0 {
 		return 2
 	}
-	grants, previewHash, err := punaropostgres.PreviewTrustedAgentEnrollment(projects, *allProjects)
+	var grants []punaropostgres.GrantSpec
+	var previewHash string
+	var err error
+	template := "trusted-agent"
+	if *serviceOnly {
+		if len(projects) != 0 || *allProjects || *legacyPrincipal != "" {
+			return adminError(stderr, errors.New("service enrollment scope is ambiguous"))
+		}
+		template = "service"
+		grants, previewHash, err = punaropostgres.PreviewServiceEnrollment()
+	} else {
+		grants, previewHash, err = punaropostgres.PreviewTrustedAgentEnrollment(projects, *allProjects)
+	}
 	if err != nil {
 		return adminError(stderr, err)
 	}
@@ -139,7 +152,7 @@ func runClientAdd(args []string, stdout, stderr io.Writer) int {
 		Template    string                     `json:"template"`
 		PreviewHash string                     `json:"preview_hash"`
 		Grants      []punaropostgres.GrantSpec `json:"grants"`
-	}{Template: "trusted-agent", PreviewHash: previewHash, Grants: grants}
+	}{Template: template, PreviewHash: previewHash, Grants: grants}
 	if code := writeJSON(stdout, stderr, preview); code != 0 {
 		return code
 	}
@@ -156,7 +169,7 @@ func runClientAdd(args []string, stdout, stderr io.Writer) int {
 		return adminError(stderr, err)
 	}
 	defer func() { _ = admin.Close() }()
-	pending, err := admin.CreateEnrollment(context.Background(), *actor, punaropostgres.EnrollmentRequest{ClientBinding: *binding, MachineID: *machineID, Label: *name, ProjectIDs: projects, AllProjects: *allProjects, LegacyPrincipalID: *legacyPrincipal, TTL: *ttl}, previewHash)
+	pending, err := admin.CreateEnrollment(context.Background(), *actor, punaropostgres.EnrollmentRequest{ClientBinding: *binding, MachineID: *machineID, Label: *name, ProjectIDs: projects, AllProjects: *allProjects, ServiceOnly: *serviceOnly, LegacyPrincipalID: *legacyPrincipal, TTL: *ttl}, previewHash)
 	if err != nil {
 		return adminError(stderr, err)
 	}

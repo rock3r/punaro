@@ -1609,6 +1609,44 @@ func TestServerDoctorRequiresReleasePostgreSQLMajor(t *testing.T) {
 	}
 }
 
+func TestServerDoctorInspectsRunningImageFromInstallationDirectory(t *testing.T) {
+	directory := t.TempDir()
+	original := serverDoctorRunningImageCommand
+	t.Cleanup(func() { serverDoctorRunningImageCommand = original })
+	var calls int
+	serverDoctorRunningImageCommand = func(_ context.Context, actualDirectory, executable string, arguments ...string) (string, bool) {
+		calls++
+		if actualDirectory != directory || executable != "docker" {
+			t.Fatalf("directory=%q executable=%q", actualDirectory, executable)
+		}
+		switch arguments[0] {
+		case "compose":
+			return "punaro-container\n", true
+		case "inspect":
+			return cliTestImage + "\n", true
+		default:
+			t.Fatalf("arguments=%q", arguments)
+			return "", false
+		}
+	}
+	state := inspectRunningImage(t.Context(), operator.Installation{
+		Directory:        directory,
+		Image:            cliTestImage,
+		OwnerPrincipalID: "11111111-1111-4111-8111-111111111111",
+	})
+	if !state.Known || !state.OK || calls != 2 {
+		t.Fatalf("running image state=%#v calls=%d", state, calls)
+	}
+}
+
+func TestServerDoctorCommandUsesRequestedWorkingDirectory(t *testing.T) {
+	directory := t.TempDir()
+	command := newServerDoctorCommand(t.Context(), directory, "docker", "version")
+	if command.Dir != directory {
+		t.Fatalf("command directory=%q want=%q", command.Dir, directory)
+	}
+}
+
 func TestServerDoctorProfileLoadsOnlyProtectedLeastPrivilegeInputs(t *testing.T) {
 	root := t.TempDir()
 	if runtime.GOOS != "windows" {

@@ -34,7 +34,7 @@ grep -Fq -- '--keys-file' "$repo_dir/scripts/install-adapter.sh" || {
 	printf '%s\n' 'installer must accept --keys-file so signed slots can roll back' >&2
 	exit 1
 }
-grep -Fq 'seed-checkout --directory "$bootstrap_dir" --adapter "$bin_dir/punaro-adapter" --keys-file "$keys_file"' "$repo_dir/scripts/install-adapter.sh" || {
+grep -Fq 'seed-checkout --directory "$bootstrap_dir" --adapter "$bin_dir/punaro-adapter" --trusted-attachment "$build_dir/punaro-trusted-attachment" --memory "$build_dir/punaro-memory" --enroll "$build_dir/punaro-enroll" --keys-file "$keys_file"' "$repo_dir/scripts/install-adapter.sh" || {
 	printf '%s\n' 'installer must persist release keys during seed-checkout' >&2
 	exit 1
 }
@@ -104,8 +104,8 @@ file_mode() {
 
 [ -x "$adapter" ] || { printf '%s\n' 'adapter binary was not installed' >&2; exit 1; }
 [ -x "$bootstrap" ] || { printf '%s\n' 'bootstrap binary was not installed' >&2; exit 1; }
-[ "$("$adapter" version)" = 'v0.1.0-alpha.7' ] || { printf '%s\n' 'adapter binary lacks the source release identity' >&2; exit 1; }
-[ "$("$bootstrap" version)" = 'v0.1.0-alpha.7' ] || { printf '%s\n' 'bootstrap binary lacks the source release identity' >&2; exit 1; }
+[ "$(HOME="$home" "$adapter" version)" = 'v0.1.0-alpha.8' ] || { printf '%s\n' 'adapter binary lacks the source release identity' >&2; exit 1; }
+[ "$("$bootstrap" version)" = 'v0.1.0-alpha.8' ] || { printf '%s\n' 'bootstrap binary lacks the source release identity' >&2; exit 1; }
 [ -d "$home/.local/state/punaro-bootstrap/current" ] || { printf '%s\n' 'bootstrap current slot was not seeded' >&2; exit 1; }
 [ -x "$attachment" ] || { printf '%s\n' 'attachment binary was not installed' >&2; exit 1; }
 [ -x "$memory" ] || { printf '%s\n' 'memory binary was not installed' >&2; exit 1; }
@@ -136,6 +136,11 @@ grep -Fq '"endpoint_prefixes":["agent/macbook/"]' "$enrollment"
 grep -Fq 'group create --group group/punaro-attached' "$mailbox_log"
 HOME="$home" PUNARO_TEST_MAILBOX_LOG="$mailbox_log" "$repo_dir/scripts/punaro-plugin-mcp"
 grep -Fq -- "--state-dir $mailbox_state mcp" "$mailbox_log"
+mv "$adapter" "$adapter.fixed-before-slot-test"
+printf '%s\n' '#!/bin/sh' 'exit 88' >"$adapter"
+chmod 700 "$adapter"
+HOME="$home" PUNARO_TEST_MAILBOX_LOG="$mailbox_log" "$repo_dir/scripts/punaro-plugin-mcp"
+mv "$adapter.fixed-before-slot-test" "$adapter"
 grep -Fq '"id":"macbook"' "$fixture_dir/first.out"
 if grep -Fq 'PUNARO_CF_ACCESS_CLIENT_SECRET' "$fixture_dir/first.out"; then
 	printf '%s\n' 'installer output must not solicit or print Access secrets' >&2

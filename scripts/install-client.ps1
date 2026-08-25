@@ -384,13 +384,30 @@ Build-PunaroBinary -Package (Join-Path $repoDir 'cmd\punaro-trusted-attachment')
 Build-PunaroBinary -Package (Join-Path $repoDir 'cmd\punaro-memory') -Output (Join-Path $binDir 'punaro-memory.exe')
 Build-PunaroBinary -Package (Join-Path $repoDir 'cmd\punaro-enroll') -Output (Join-Path $binDir 'punaro-enroll.exe')
 Build-PunaroBinary -Package (Join-Path $repoDir 'cmd\punaro-keygen') -Output (Join-Path $binDir 'punaro-keygen.exe')
-$seedArguments = @('seed-checkout', '--directory', $bootstrapDir, '--adapter', (Join-Path $binDir 'punaro-adapter.exe'))
+$seedArguments = @(
+    'seed-checkout', '--directory', $bootstrapDir,
+    '--adapter', (Join-Path $binDir 'punaro-adapter.exe'),
+    '--trusted-attachment', (Join-Path $binDir 'punaro-trusted-attachment.exe'),
+    '--memory', (Join-Path $binDir 'punaro-memory.exe'),
+    '--enroll', (Join-Path $binDir 'punaro-enroll.exe')
+)
 if (-not [string]::IsNullOrWhiteSpace($KeysFile)) {
     $resolvedKeys = [System.IO.Path]::GetFullPath($KeysFile)
     Get-RegularFile -Path $resolvedKeys -Label 'release keys file' | Out-Null
     $seedArguments += @('--keys-file', $resolvedKeys)
 }
 Invoke-Program -Program (Join-Path $binDir 'punaro-bootstrap.exe') -Arguments $seedArguments -Description 'bootstrap checkout seed'
+$launcherBuild = Join-Path $root ("punaro-launcher-" + [Guid]::NewGuid().ToString('N') + '.exe')
+try {
+    Build-PunaroBinary -Package (Join-Path $repoDir 'cmd\punaro-launcher') -Output $launcherBuild
+    foreach ($component in @('punaro-adapter.exe', 'punaro-trusted-attachment.exe', 'punaro-memory.exe', 'punaro-enroll.exe')) {
+        $destination = Join-Path $binDir $component
+        [System.IO.File]::Copy($launcherBuild, $destination, $true)
+        Protect-PunaroPath -Path $destination
+    }
+} finally {
+    if (Test-Path -LiteralPath $launcherBuild) { [System.IO.File]::Delete($launcherBuild) }
+}
 foreach ($name in @('Run-PunaroAdapter.ps1', 'Import-PunaroEnvironment.ps1')) {
     $source = Join-Path $repoDir "deploy\windows\$name"
     $destination = Join-Path $root $name

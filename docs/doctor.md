@@ -315,6 +315,7 @@ Service, release, and plugin state: `adapter_service_installed`,
 `adapter_service_executable`, `adapter_service_last_exit`,
 `adapter_service_restart_state`, `bootstrap_selected_artifact`,
 `bootstrap_running_artifact`, `bootstrap_supervisor`, `installed_release`,
+`client_component_launchers`,
 `portable_plugin_registration`, `codex_plugin_registration`,
 `claude_plugin_registration`, `plugin_launcher`, `plugin_version`,
 `skill_set_parity`.
@@ -322,6 +323,11 @@ Service, release, and plugin state: `adapter_service_installed`,
 `plugin_launcher` requires the platform launcher to be a safe executable and
 requires the exact bytes of both POSIX/Windows launchers and both MCP
 registration files to match the digest embedded by the release builder.
+
+`client_component_launchers` requires the stable adapter, enrollment, memory,
+and trusted-attachment dispatchers to be regular executable copies of the same
+installer build. This catches mixed fixed payloads left by older installers;
+the dispatchers always execute the selected signed-slot artifacts.
 
 The adapter inspects and runs `version` on the fixed installer-owned
 `punaro-bootstrap` executable in a deadline-isolated child and passes that
@@ -474,6 +480,7 @@ operator explicitly approves that separate action.
   `repair_mailbox_mcp`, `repair_mailbox_state_directory`,
   `repair_plugin_registration`, `repair_codex_plugin_registration`,
   `repair_claude_plugin_registration`, `repair_plugin_launcher`,
+  `reinstall_client_launchers`,
   `repair_bootstrap_directory`, `repair_bootstrap_lock_state`,
   `repair_bootstrap_state`, and `repair_previous_slot` mean stop and use the
   reviewed installer or documented bootstrap recovery path. Do not weaken

@@ -47,6 +47,30 @@ func TestTrustedAgentGrantPreviewIsExactAndNonAdministrative(t *testing.T) {
 	}
 }
 
+func TestServiceEnrollmentGrantPreviewIsEmptyAndStable(t *testing.T) {
+	first, firstHash, err := PreviewServiceEnrollment()
+	if err != nil {
+		t.Fatal(err)
+	}
+	second, secondHash, err := PreviewServiceEnrollment()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(first) != 0 || len(second) != 0 || firstHash == "" || firstHash != secondHash {
+		t.Fatalf("service previews=%#v %#v hashes=%q %q", first, second, firstHash, secondHash)
+	}
+	request := EnrollmentRequest{
+		ClientBinding: testPrincipalB,
+		MachineID:     "server-doctor",
+		Label:         "server doctor",
+		ServiceOnly:   true,
+		TTL:           10 * time.Minute,
+	}
+	if err := request.Validate(); err != nil {
+		t.Fatalf("service-only request rejected: %v", err)
+	}
+}
+
 func TestDeviceCredentialEncodingHasOpaqueLookupAnd256BitSecret(t *testing.T) {
 	encoded, lookupID, digest, err := newDeviceCredential()
 	if err != nil {

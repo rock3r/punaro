@@ -325,6 +325,7 @@ func TestAdapterDoctorEmitsStrictHealthyReport(t *testing.T) {
 	adapterDoctorPluginProbe = func(context.Context, string) pluginDoctorResult {
 		return pluginDoctorResult{Portable: true, Codex: true, Claude: true, Launcher: true, Version: "v0.1.0-alpha.1", SkillDigest: "sha256:" + strings.Repeat("a", 64)}
 	}
+	adapterDoctorClientLauncherProbe = func(context.Context) bool { return true }
 	var stdout, stderr bytes.Buffer
 	if code := runAdapterDoctor(nil, &stdout, &stderr); code != 0 {
 		t.Fatalf("code=%d stdout=%q stderr=%q", code, stdout.String(), stderr.String())
@@ -968,12 +969,12 @@ func TestPluginDoctorValidatesAllAdaptersLauncherAndExactSkillTree(t *testing.T)
 		t.Fatal(err)
 	}
 	oldRelease, oldDigest, oldRuntimeDigest := adapterBuildRelease, adapterExpectedSkillSetDigest, adapterExpectedPluginRuntimeDigest
-	adapterBuildRelease, adapterExpectedSkillSetDigest, adapterExpectedPluginRuntimeDigest = "v0.1.0-alpha.7", digest, runtimeDigest
+	adapterBuildRelease, adapterExpectedSkillSetDigest, adapterExpectedPluginRuntimeDigest = "v0.1.0-alpha.8", digest, runtimeDigest
 	t.Cleanup(func() {
 		adapterBuildRelease, adapterExpectedSkillSetDigest, adapterExpectedPluginRuntimeDigest = oldRelease, oldDigest, oldRuntimeDigest
 	})
 	result := inspectAdapterPlugin(t.Context(), root)
-	if !result.Portable || !result.Codex || !result.Claude || !result.Launcher || result.Version != "v0.1.0-alpha.7" || result.SkillDigest != "sha256:"+digest {
+	if !result.Portable || !result.Codex || !result.Claude || !result.Launcher || result.Version != "v0.1.0-alpha.8" || result.SkillDigest != "sha256:"+digest {
 		t.Fatalf("plugin=%#v", result)
 	}
 	var helperOutput bytes.Buffer
@@ -1032,6 +1033,7 @@ func preserveAdapterDoctorDependencies(t *testing.T) {
 	relayProbe, notificationProbe, endpointProbe := adapterDoctorRelayProbe, adapterDoctorNotificationProbe, adapterDoctorEndpointProbe
 	mailboxProbe, serviceProbe := adapterDoctorMailboxProbe, adapterDoctorServiceProbe
 	bootstrapReleaseProbe, bootstrapProbe, pluginProbe := adapterDoctorBootstrapReleaseProbe, adapterDoctorBootstrapProbe, adapterDoctorPluginProbe
+	launcherProbe := adapterDoctorClientLauncherProbe
 	buildRelease := adapterBuildRelease
 	t.Cleanup(func() {
 		adapterDoctorConfigLoad = configLoad
@@ -1039,8 +1041,34 @@ func preserveAdapterDoctorDependencies(t *testing.T) {
 		adapterDoctorEndpointProbe = endpointProbe
 		adapterDoctorMailboxProbe, adapterDoctorServiceProbe = mailboxProbe, serviceProbe
 		adapterDoctorBootstrapReleaseProbe, adapterDoctorBootstrapProbe, adapterDoctorPluginProbe = bootstrapReleaseProbe, bootstrapProbe, pluginProbe
+		adapterDoctorClientLauncherProbe = launcherProbe
 		adapterBuildRelease = buildRelease
 	})
+}
+
+func TestClientComponentLaunchersMustBeIdenticalRegularExecutables(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("POSIX mode and symlink contract")
+	}
+	root := t.TempDir()
+	for _, component := range []string{"punaro-adapter", "punaro-enroll", "punaro-memory", "punaro-trusted-attachment"} {
+		path := filepath.Join(root, component)
+		if err := os.WriteFile(path, []byte("stable-launcher"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Chmod(path, 0o700); err != nil { // #nosec G302 -- private executable fixture.
+			t.Fatal(err)
+		}
+	}
+	if !clientComponentLaunchersMatch(t.Context(), root) {
+		t.Fatal("matching client component launchers rejected")
+	}
+	if err := os.WriteFile(filepath.Join(root, "punaro-enroll"), []byte("stale-enroll"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if clientComponentLaunchersMatch(t.Context(), root) {
+		t.Fatal("mixed client component launchers accepted")
+	}
 }
 
 func TestInspectAdapterBootstrapReleaseExecutesInstalledIdentity(t *testing.T) {

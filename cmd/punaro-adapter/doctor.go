@@ -3,6 +3,7 @@ package main
 import (
 	"bufio"
 	"context"
+	"crypto/sha256"
 	"database/sql"
 	"encoding/base64"
 	"encoding/json"
@@ -137,7 +138,10 @@ var (
 	adapterDoctorBootstrapProbe             = func(ctx context.Context, directory, bootstrapRelease string) (punarodiagnostic.Report, error) {
 		return bootstrap.IsolatedDoctor(ctx, bootstrap.DoctorRequest{Directory: directory, BootstrapRelease: bootstrapRelease})
 	}
-	adapterDoctorPluginProbe     = inspectAdapterPluginIsolated
+	adapterDoctorPluginProbe         = inspectAdapterPluginIsolated
+	adapterDoctorClientLauncherProbe = func(ctx context.Context) bool {
+		return clientComponentLaunchersMatch(ctx, defaultAdapterBinDirectory())
+	}
 	mailboxDoctorSnapshotProtect = protectMailboxDoctorSnapshot
 )
 
@@ -178,6 +182,7 @@ func runAdapterDoctor(args []string, stdout, stderr io.Writer) int {
 			punarodiagnostic.Unavailable("bootstrap_running_artifact", "repair_adapter_configuration"),
 			punarodiagnostic.Unavailable("bootstrap_supervisor", "repair_adapter_configuration"),
 			punarodiagnostic.Unavailable("installed_release", "repair_adapter_configuration"),
+			punarodiagnostic.Unavailable("client_component_launchers", "repair_adapter_configuration"),
 			punarodiagnostic.Unavailable("portable_plugin_registration", "repair_adapter_configuration"),
 			punarodiagnostic.Unavailable("codex_plugin_registration", "repair_adapter_configuration"),
 			punarodiagnostic.Unavailable("claude_plugin_registration", "repair_adapter_configuration"),
@@ -194,6 +199,7 @@ func runAdapterDoctor(args []string, stdout, stderr io.Writer) int {
 	checks := []punarodiagnostic.Check{
 		punarodiagnostic.Pass("adapter_configuration"),
 		punarodiagnostic.Pass("machine_credential_file"),
+		boolDoctorCheck(adapterDoctorClientLauncherProbe(ctx), "client_component_launchers", "reinstall_client_launchers"),
 		boolDoctorCheck(config.profileFile != "", "adapter_profile_file", "install_adapter_profile"),
 		boolDoctorCheck(config.identityFile != "", "client_identity_file", "install_client_identity"),
 	}
@@ -746,6 +752,57 @@ func defaultAdapterBootstrapDirectory() string {
 		return ""
 	}
 	return filepath.Join(home, ".local", "state", "punaro-bootstrap")
+}
+
+func defaultAdapterBinDirectory() string {
+	if runtime.GOOS == "windows" {
+		root := strings.TrimSpace(os.Getenv("LOCALAPPDATA"))
+		if root == "" {
+			return ""
+		}
+		return filepath.Join(root, "Punaro", "bin")
+	}
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return ""
+	}
+	return filepath.Join(home, ".local", "bin")
+}
+
+func clientComponentLaunchersMatch(ctx context.Context, root string) bool {
+	if ctx == nil || ctx.Err() != nil || root == "" || !filepath.IsAbs(root) {
+		return false
+	}
+	var expected [sha256.Size]byte
+	for index, component := range []string{"punaro-adapter", "punaro-enroll", "punaro-memory", "punaro-trusted-attachment"} {
+		if runtime.GOOS == "windows" {
+			component += ".exe"
+		}
+		path := filepath.Join(root, component)
+		info, err := os.Lstat(path) // #nosec G703 -- closed component names below the installer-owned bin root.
+		if err != nil || !info.Mode().IsRegular() || info.Mode()&os.ModeSymlink != 0 || info.Size() < 1 || info.Size() > maximumMailboxDoctorBytes || runtime.GOOS != "windows" && info.Mode().Perm()&0o111 == 0 {
+			return false
+		}
+		file, err := os.Open(path) // #nosec G304,G703 -- closed component names below the installer-owned bin root.
+		if err != nil {
+			return false
+		}
+		hash := sha256.New()
+		copied, copyErr := io.Copy(hash, io.LimitReader(pluginDoctorContextReader{ctx: ctx, reader: file}, maximumMailboxDoctorBytes+1))
+		opened, statErr := file.Stat()
+		closeErr := file.Close()
+		if copyErr != nil || statErr != nil || closeErr != nil || !opened.Mode().IsRegular() || !os.SameFile(info, opened) || opened.Size() != info.Size() || copied != info.Size() {
+			return false
+		}
+		var digest [sha256.Size]byte
+		copy(digest[:], hash.Sum(nil))
+		if index == 0 {
+			expected = digest
+		} else if digest != expected {
+			return false
+		}
+	}
+	return true
 }
 
 func defaultAdapterBootstrapExecutable() string {

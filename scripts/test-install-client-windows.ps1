@@ -116,6 +116,14 @@ try {
     }
     & (Join-Path $repoDir 'scripts\punaro-plugin-mcp.cmd')
     if ($LASTEXITCODE -ne 0) { throw 'Windows plugin launcher could not start the installer-owned adapter' }
+    $fixedAdapter = Join-Path $root 'bin\punaro-adapter.exe'
+    $savedFixedAdapter = $fixedAdapter + '.fixed-before-slot-test'
+    [System.IO.File]::Move($fixedAdapter, $savedFixedAdapter)
+    [System.IO.File]::WriteAllText($fixedAdapter, 'stale fixed adapter', [System.Text.Encoding]::ASCII)
+    & (Join-Path $repoDir 'scripts\punaro-plugin-mcp.cmd')
+    if ($LASTEXITCODE -ne 0) { throw 'Windows plugin launcher did not use the selected bootstrap slot' }
+    [System.IO.File]::Delete($fixedAdapter)
+    [System.IO.File]::Move($savedFixedAdapter, $fixedAdapter)
     foreach ($path in @((Join-Path $root 'bin\punaro-attachment.exe'), (Join-Path $root 'bin\punaro-directory.exe'), (Join-Path $root 'bin\punaro-dpapi.exe'), (Join-Path $root 'Run-PunaroAttachment.ps1'))) {
         if (Test-Path -LiteralPath $path) { throw "Windows client installer must not create retired attachment artifact $path" }
     }

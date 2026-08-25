@@ -83,6 +83,17 @@ func PreviewTrustedAgentEnrollment(projectIDs []string, allProjects bool) ([]Gra
 	if err != nil {
 		return nil, "", err
 	}
+	return previewEnrollment(grants)
+}
+
+// PreviewServiceEnrollment returns an explicitly empty capability expansion
+// for service identities that authenticate health checks but need no API
+// authority of their own.
+func PreviewServiceEnrollment() ([]GrantSpec, string, error) {
+	return previewEnrollment([]GrantSpec{})
+}
+
+func previewEnrollment(grants []GrantSpec) ([]GrantSpec, string, error) {
 	body, err := json.Marshal(grants)
 	if err != nil {
 		return nil, "", errors.New("enrollment preview cannot be encoded")
@@ -98,6 +109,7 @@ type EnrollmentRequest struct {
 	Label             string
 	ProjectIDs        []string
 	AllProjects       bool
+	ServiceOnly       bool
 	LegacyPrincipalID string
 	TTL               time.Duration
 	CredentialTTL     time.Duration
@@ -108,6 +120,12 @@ type EnrollmentRequest struct {
 func (r EnrollmentRequest) Validate() error {
 	if !validOpaqueID(r.ClientBinding) || !validLifecycleMachineID(r.MachineID) || !validDisplayName(r.Label) || len(r.ProjectIDs) > maxEnrollmentProjects || r.TTL < minEnrollmentTTL || r.TTL > maxEnrollmentTTL || r.CredentialTTL != 0 || !r.ExpiresAt.IsZero() || (r.LegacyPrincipalID != "" && !validOpaqueID(r.LegacyPrincipalID)) {
 		return errors.New("invalid enrollment request")
+	}
+	if r.ServiceOnly {
+		if len(r.ProjectIDs) != 0 || r.AllProjects || r.LegacyPrincipalID != "" {
+			return errors.New("invalid enrollment request")
+		}
+		return nil
 	}
 	_, err := TrustedAgentGrantPreview(r.ProjectIDs, r.AllProjects)
 	return err

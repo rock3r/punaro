@@ -284,17 +284,18 @@ fi
 	go build -trimpath -buildvcs=true -o "$build_dir/punaro-memory" ./cmd/punaro-memory
 	go build -trimpath -buildvcs=true -o "$build_dir/punaro-enroll" ./cmd/punaro-enroll
 	go build -trimpath -buildvcs=true -o "$build_dir/punaro-keygen" ./cmd/punaro-keygen
+	go build -trimpath -buildvcs=true -o "$build_dir/punaro-launcher" ./cmd/punaro-launcher
 )
 install -m 700 "$build_dir/punaro-adapter" "$bin_dir/punaro-adapter"
 install -m 700 "$build_dir/punaro-bootstrap" "$bin_dir/punaro-bootstrap"
 if [ -n "$keys_file" ]; then
-	"$bin_dir/punaro-bootstrap" seed-checkout --directory "$bootstrap_dir" --adapter "$bin_dir/punaro-adapter" --keys-file "$keys_file"
+	"$bin_dir/punaro-bootstrap" seed-checkout --directory "$bootstrap_dir" --adapter "$bin_dir/punaro-adapter" --trusted-attachment "$build_dir/punaro-trusted-attachment" --memory "$build_dir/punaro-memory" --enroll "$build_dir/punaro-enroll" --keys-file "$keys_file"
 else
-	"$bin_dir/punaro-bootstrap" seed-checkout --directory "$bootstrap_dir" --adapter "$bin_dir/punaro-adapter"
+	"$bin_dir/punaro-bootstrap" seed-checkout --directory "$bootstrap_dir" --adapter "$bin_dir/punaro-adapter" --trusted-attachment "$build_dir/punaro-trusted-attachment" --memory "$build_dir/punaro-memory" --enroll "$build_dir/punaro-enroll"
 fi
-install -m 700 "$build_dir/punaro-trusted-attachment" "$bin_dir/punaro-trusted-attachment"
-install -m 700 "$build_dir/punaro-memory" "$bin_dir/punaro-memory"
-install -m 700 "$build_dir/punaro-enroll" "$bin_dir/punaro-enroll"
+for component in punaro-adapter punaro-trusted-attachment punaro-memory punaro-enroll; do
+	install -m 700 "$build_dir/punaro-launcher" "$bin_dir/$component"
+done
 
 if [ -e "$key_file" ] || [ -L "$key_file" ]; then
 	regular_private_file "$key_file" || fail 'existing machine key must be a non-symlink regular 0600 file'

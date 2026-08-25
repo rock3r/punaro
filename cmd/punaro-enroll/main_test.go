@@ -600,6 +600,31 @@ func TestEnrollmentMaterialAcceptsStrictAdminEnvelope(t *testing.T) {
 	}
 }
 
+func TestEnrollmentMaterialAcceptsExactServiceAdminOutput(t *testing.T) {
+	grants, previewHash, err := punaropostgres.PreviewServiceEnrollment()
+	if err != nil {
+		t.Fatal(err)
+	}
+	preview := struct {
+		Template    string                     `json:"template"`
+		PreviewHash string                     `json:"preview_hash"`
+		Grants      []punaropostgres.GrantSpec `json:"grants"`
+	}{Template: "service", PreviewHash: previewHash, Grants: grants}
+	pending := punaropostgres.PendingEnrollment{ID: "33333333-3333-4333-8333-333333333333", ClientBinding: "44444444-4444-4444-8444-444444444444", Code: strings.Repeat("A", 43), ExpiresAt: time.Date(2030, 1, 2, 3, 4, 5, 0, time.UTC), PreviewHash: previewHash, Grants: grants}
+	previewRaw, err := json.MarshalIndent(preview, "", "  ")
+	if err != nil {
+		t.Fatal(err)
+	}
+	pendingRaw, err := json.MarshalIndent(pending, "", "  ")
+	if err != nil {
+		t.Fatal(err)
+	}
+	material, err := loadMaterial(writeTestMaterial(t, string(append(append(previewRaw, '\n'), append(pendingRaw, '\n')...))))
+	if err != nil || material.EnrollmentID != pending.ID {
+		t.Fatalf("service admin output material=%#v err=%v", material, err)
+	}
+}
+
 func TestEnrollmentMaterialAcceptsExactAdminOutputAtProjectLimit(t *testing.T) {
 	projectIDs := make([]string, 100)
 	for i := range projectIDs {

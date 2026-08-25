@@ -108,6 +108,7 @@ var (
 	serverDoctorProfileExecutable         = os.Executable
 	serverDoctorRecoveryReceiptCheck      = isolatedServerDoctorRecoveryReceipt
 	serverDoctorRecoveryReceiptExecutable = os.Executable
+	serverDoctorRunningImageCommand       = boundedCommandInDirectory
 )
 
 func isolatedServerDoctorProfile(ctx context.Context, path string) (serverDoctorProfile, error) {
@@ -707,11 +708,11 @@ func inspectRunningImage(parent context.Context, installation operator.Installat
 	if err != nil {
 		return knownDoctorBool{}
 	}
-	container, ok := boundedCommand(parent, "docker", "compose", "--project-name", project, "--env-file", operator.EnvFile(installation.Directory), "-f", operator.OverrideFile(installation.Directory), "ps", "--quiet", "punarod")
+	container, ok := serverDoctorRunningImageCommand(parent, installation.Directory, "docker", "compose", "--project-name", project, "--env-file", operator.EnvFile(installation.Directory), "-f", operator.OverrideFile(installation.Directory), "ps", "--quiet", "punarod")
 	if !ok || strings.TrimSpace(container) == "" || strings.Contains(strings.TrimSpace(container), "\n") {
 		return known(ok, false)
 	}
-	image, ok := boundedCommand(parent, "docker", "inspect", "--format", "{{.Config.Image}}", strings.TrimSpace(container))
+	image, ok := serverDoctorRunningImageCommand(parent, installation.Directory, "docker", "inspect", "--format", "{{.Config.Image}}", strings.TrimSpace(container))
 	return known(ok, strings.TrimSpace(image) == installation.Image)
 }
 
@@ -1133,13 +1134,21 @@ func updatePhaseRequiresRecoveryReceipt(phase punaropostgres.UpdatePhase) bool {
 }
 
 func boundedCommand(parent context.Context, executable string, arguments ...string) (string, bool) {
-	return boundedCommandLimit(parent, serverDoctorOutputLimit, executable, arguments...)
+	return boundedCommandLimitInDirectory(parent, serverDoctorOutputLimit, "", executable, arguments...)
 }
 
 func boundedCommandLimit(parent context.Context, maximum int, executable string, arguments ...string) (string, bool) {
+	return boundedCommandLimitInDirectory(parent, maximum, "", executable, arguments...)
+}
+
+func boundedCommandInDirectory(parent context.Context, directory, executable string, arguments ...string) (string, bool) {
+	return boundedCommandLimitInDirectory(parent, serverDoctorOutputLimit, directory, executable, arguments...)
+}
+
+func boundedCommandLimitInDirectory(parent context.Context, maximum int, directory, executable string, arguments ...string) (string, bool) {
 	ctx, cancel := context.WithTimeout(parent, serverDoctorCommandTimeout)
 	defer cancel()
-	command := exec.CommandContext(ctx, executable, arguments...) // #nosec G204 -- fixed audited executable and structured arguments.
+	command := newServerDoctorCommand(ctx, directory, executable, arguments...)
 	command.Stdin = nil
 	command.Stderr = io.Discard
 	output := boundedServerDoctorOutput{maximum: maximum}
@@ -1148,4 +1157,10 @@ func boundedCommandLimit(parent context.Context, maximum int, executable string,
 		return "", false
 	}
 	return output.buffer.String(), true
+}
+
+func newServerDoctorCommand(ctx context.Context, directory, executable string, arguments ...string) *exec.Cmd {
+	command := exec.CommandContext(ctx, executable, arguments...) // #nosec G204 -- fixed audited executable and structured arguments.
+	command.Dir = directory
+	return command
 }

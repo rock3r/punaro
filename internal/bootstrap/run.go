@@ -37,7 +37,13 @@ const (
 	recoveryPreviousFailed = "previous-unhealthy"
 	recoveryCurrentExited  = "current-exited"
 	directoryKeysFile      = "release.pub"
+	localCheckoutStateFile = "checkout.json"
 )
+
+type localCheckoutState struct {
+	Schema    int64             `json:"schema"`
+	Artifacts map[string]string `json:"artifacts"`
+}
 
 // ErrRecoveryOnly means normal child restarts are disabled until host-local recovery.
 var ErrRecoveryOnly = errors.New("bootstrap is recovery-only")
@@ -1076,12 +1082,43 @@ func enterRecoveryOnly(directory, reason string, started slotState) error {
 	return writeRecoveryRecord(directory, reason)
 }
 
-// SeedLocalCheckout publishes a host-local adapter from a reviewed checkout
-// into the current slot. It is not a signed update and cannot be used as an
-// automatic rollback target.
+// LocalCheckoutArtifacts are the installer-built client artifacts published
+// into a development checkout slot before the first signed update.
+type LocalCheckoutArtifacts struct {
+	Adapter           string
+	TrustedAttachment string
+	Memory            string
+	Enroll            string
+}
+
+// SeedLocalCheckout publishes a host-local adapter from a reviewed checkout.
 func SeedLocalCheckout(directory, adapterPath string, keys map[string]ed25519.PublicKey) error {
-	if directory == "" || !filepath.IsAbs(directory) || adapterPath == "" || !filepath.IsAbs(adapterPath) {
+	return SeedLocalCheckoutArtifacts(directory, LocalCheckoutArtifacts{Adapter: adapterPath}, keys)
+}
+
+// SeedLocalCheckoutArtifacts publishes host-local client artifacts from a
+// reviewed checkout into the current slot. It is not a signed update and
+// cannot be used as an automatic rollback target.
+func SeedLocalCheckoutArtifacts(directory string, artifacts LocalCheckoutArtifacts, keys map[string]ed25519.PublicKey) error {
+	if directory == "" || !filepath.IsAbs(directory) || artifacts.Adapter == "" || !filepath.IsAbs(artifacts.Adapter) {
 		return errors.New("bootstrap directory is invalid")
+	}
+	paths := map[string]string{
+		adapterComponent:            artifacts.Adapter,
+		"punaro-trusted-attachment": artifacts.TrustedAttachment,
+		"punaro-memory":             artifacts.Memory,
+		"punaro-enroll":             artifacts.Enroll,
+	}
+	for component, path := range paths {
+		if component == adapterComponent || path != "" {
+			if path == "" || !filepath.IsAbs(path) {
+				return errors.New("bootstrap artifact is invalid")
+			}
+			info, err := os.Lstat(path) // #nosec G703 -- operator-selected checkout artifact.
+			if err != nil || !info.Mode().IsRegular() {
+				return errors.New("bootstrap artifact is invalid")
+			}
+		}
 	}
 	if err := prepareDirectory(directory); err != nil {
 		return err
@@ -1123,11 +1160,7 @@ func SeedLocalCheckout(directory, adapterPath string, keys map[string]ed25519.Pu
 			}
 		}
 	}
-	info, err := os.Lstat(adapterPath) // #nosec G703 -- operator-selected checkout adapter.
-	if err != nil || !info.Mode().IsRegular() {
-		return errors.New("bootstrap adapter is invalid")
-	}
-	body, err := os.ReadFile(adapterPath) // #nosec G304 -- operator-selected checkout adapter.
+	body, err := os.ReadFile(artifacts.Adapter) // #nosec G304 -- operator-selected checkout adapter.
 	if err != nil {
 		return errors.New("bootstrap adapter is invalid")
 	}
@@ -1142,6 +1175,29 @@ func SeedLocalCheckout(directory, adapterPath string, keys map[string]ed25519.Pu
 	}
 	name := artifactName(adapterComponent, runtime.GOOS, runtime.GOARCH)
 	if err := writeAtomic(filepath.Join(candidate, name), body, 0o755); err != nil {
+		return err
+	}
+	artifactDigests := map[string]string{name: digest}
+	for component, path := range paths {
+		if component == adapterComponent || path == "" {
+			continue
+		}
+		artifactBody, err := os.ReadFile(path) // #nosec G304 -- operator-selected checkout artifact.
+		if err != nil {
+			return errors.New("bootstrap artifact is invalid")
+		}
+		artifactFileName := artifactName(component, runtime.GOOS, runtime.GOARCH)
+		if err := writeAtomic(filepath.Join(candidate, artifactFileName), artifactBody, 0o755); err != nil {
+			return err
+		}
+		artifactSum := sha256.Sum256(artifactBody)
+		artifactDigests[artifactFileName] = hex.EncodeToString(artifactSum[:])
+	}
+	checkoutState, err := json.Marshal(localCheckoutState{Schema: 1, Artifacts: artifactDigests})
+	if err != nil {
+		return err
+	}
+	if err := writeAtomic(filepath.Join(candidate, localCheckoutStateFile), checkoutState, 0o600); err != nil {
 		return err
 	}
 	record, err := json.Marshal(slotState{Schema: 1, Release: localCheckoutRelease, Sequence: 1, ManifestSHA256: digest})

@@ -136,6 +136,12 @@ Only the offline-signature publisher can make those stable assets visible.
    Set `supported_from` to the comma-separated installed releases that
    may upgrade directly to this release; this is required for rolling fleet
    transitions after the first release.
+
+   Alpha.8 introduces the selected-component dispatcher and the full local
+   checkout slot. Dispatch `v0.1.0-alpha.8` with
+   `minimum_bootstrap_release=v0.1.0-alpha.8`; upgrading from an older fixed
+   bootstrap requires one client-installer handoff before built-in updates can
+   safely manage every selected component.
 3. Wait for the draft release to appear. The live `catalog` prerelease is not
    touched by the unsigned workflow.
 4. Generate the offline key once, on an air-gapped or owner-only machine, and

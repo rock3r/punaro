@@ -171,8 +171,8 @@ func TestBuildFactsBindsPluginSkillsGeneratedComposeAndMigrations(t *testing.T) 
 	if err != nil {
 		t.Fatal(err)
 	}
-	facts, err := buildFacts([]string{"--release", "v0.1.0-alpha.7", "--plugin-root", root})
-	if err != nil || facts.Release != "v0.1.0-alpha.7" || facts.ComposeSHA256 != operator.ComposeManifestSHA256() || len(facts.MigrationManifestSHA256) != 64 || len(facts.SkillSetSHA256) != 64 || len(facts.PluginRuntimeSHA256) != 64 {
+	facts, err := buildFacts([]string{"--release", "v0.1.0-alpha.8", "--plugin-root", root})
+	if err != nil || facts.Release != "v0.1.0-alpha.8" || facts.ComposeSHA256 != operator.ComposeManifestSHA256() || len(facts.MigrationManifestSHA256) != 64 || len(facts.SkillSetSHA256) != 64 || len(facts.PluginRuntimeSHA256) != 64 {
 		t.Fatalf("facts=%#v err=%v", facts, err)
 	}
 	if _, err := buildFacts([]string{"--release", "v0.1.0", "--plugin-root", root}); err == nil {

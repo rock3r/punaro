@@ -527,6 +527,13 @@ For a legacy exchange the owner also supplies the exact content-free
 `--legacy-principal-id` from `punaro-admin legacy list`; the new machine ID must
 remain the existing registered machine ID.
 
+For a non-agent service probe such as server doctor, the owner uses
+`--service` instead of `--project` or `--all-projects`. Its exact preview has an
+empty `grants` array and grants no project, conversation, memory, attachment,
+or installation capability. `--service` is mutually exclusive with project
+scope and legacy exchange; the resulting device credential authenticates only
+routes that require no capability grant.
+
 Redeem that protected file on the client:
 
 ```sh
