@@ -1,6 +1,6 @@
 {
   "name": "punaro",
-  "version": "0.1.0-alpha.5",
+  "version": "0.1.0-alpha.6",
   "description": "Safely receive and reply to durable Punaro messages and handle explicitly authorized trusted attachments.",
   "author": {
     "name": "Punaro contributors",
