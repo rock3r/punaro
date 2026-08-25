@@ -1,7 +1,7 @@
 {
   "$schema": "https://agent-plugins.org/schemas/1.0.0/plugin.schema.json",
   "name": "punaro",
-  "version": "0.1.0-alpha.2",
+  "version": "0.1.0-alpha.3",
   "description": "Safely receive and reply to durable Punaro messages and handle explicitly authorized trusted attachments.",
   "author": {
     "name": "Punaro contributors",
