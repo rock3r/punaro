@@ -392,7 +392,9 @@ validates the correlation token's bounded canonical form and echoes the
 applicable request token exactly once as `X-Punaro-Response-Nonce` before route
 handling, including HTTP errors and WebSocket upgrades. Clients compare the
 echo with the token they generated to distinguish a Punaro-origin response or
-upgrade from an Access or reverse-proxy rejection. The correlation token is
+upgrade from an Access or reverse-proxy rejection. Bearer clients require
+exactly one matching echo before accepting any allowed HTTP response; doctor
+and WebSocket handshakes enforce the same exact match. The correlation token is
 neither a credential nor authorization, replay protection, or idempotency;
 bearer authorization remains independently mandatory, Ed25519 replay defense
 continues to use the signed nonce, and redirects remain rejections.
@@ -1583,8 +1585,10 @@ least-privilege `trusted-agent` grant preview. `redeem` reads the server's
 short-lived enrollment JSON only from a protected local file, requires its
 binding to equal the sidecar before any request, and posts only to that stored
 origin. Before any network operation it creates a protected recovery journal
-containing the code and fresh idempotency UUID. Server retry with that UUID
-yields the same credential; successful persistence removes the journal. No
+containing the code, fresh idempotency UUID, and, for a legacy exchange, the
+non-secret public key proving the selected legacy private key. Recovery rejects
+a changed proof locally without mutating that journal. Server retry with the
+preserved UUID yields the same credential; successful persistence removes the journal. No
 command-line argument, environment variable, sidecar, normal output, or
 diagnostic includes the code or bearer credential. POSIX storage rejects
 symlinks, non-regular files, non-owner files, and group/other-readable state.

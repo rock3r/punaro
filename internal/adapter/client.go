@@ -1083,11 +1083,16 @@ func (c *HTTPRelayClient) doJSONAllowingWithIdempotency(ctx context.Context, met
 		return 0, fmt.Errorf("relay request failed: %w", err)
 	}
 	defer func() { _ = response.Body.Close() }()
+	responseNonces := response.Header.Values(relay.ResponseNonceHeader)
+	originConfirmed := len(responseNonces) == 1 && responseNonces[0] == nonce
 	if !allowedHTTPStatus(response.StatusCode, allowed) {
 		return response.StatusCode, &relayRejectionError{
 			status:    response.StatusCode,
-			confirmed: response.Header.Get(relay.ResponseNonceHeader) == nonce,
+			confirmed: originConfirmed,
 		}
+	}
+	if c.credential != "" && !originConfirmed {
+		return response.StatusCode, errors.New("relay response origin was not confirmed")
 	}
 	if responseValue == nil || response.StatusCode == http.StatusNoContent {
 		return response.StatusCode, nil

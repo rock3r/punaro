@@ -583,7 +583,10 @@ recovery journal before redemption. If a network interruption occurs, rerun
 the same `redeem` command; if the transfer file is gone, use `punaro-enroll
 recover` with the state and credential paths, and include the same
 `--access-file` when the origin is Access-protected. The retry has the same
-idempotency key, so it cannot mint a second device credential. The server retains that
+idempotency key, so it cannot mint a second device credential. A legacy journal
+also binds the non-secret public key; supplying a different private-key file is
+rejected locally without contacting the server or discarding recovery state.
+The server retains that
 recovery record while its non-expiring credential and principal remain active;
 after revocation or disablement, request a new enrollment. A rejected (including
 expired-first-use, already-used, or revoked) enrollment fails closed and tells the user

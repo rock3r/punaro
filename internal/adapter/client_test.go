@@ -199,6 +199,39 @@ func TestDeviceHTTPRelayClientUsesBearerCredentialAndCorrelation(t *testing.T) {
 	}
 }
 
+func TestDeviceHTTPRelayClientRejectsAllowedSuccessWithoutExactCorrelationEcho(t *testing.T) {
+	credential := "11111111-1111-4111-8111-111111111111.AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
+	for _, test := range []struct {
+		name string
+		echo func(http.Header, string)
+	}{
+		{name: "missing", echo: func(http.Header, string) {}},
+		{name: "wrong", echo: func(header http.Header, _ string) { header.Set(relay.ResponseNonceHeader, "wrong-origin-token") }},
+		{name: "duplicate", echo: func(header http.Header, correlation string) {
+			header.Add(relay.ResponseNonceHeader, correlation)
+			header.Add(relay.ResponseNonceHeader, correlation)
+		}},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if r.Header.Get("Authorization") != "Bearer "+credential {
+					t.Fatal("device credential is missing")
+				}
+				test.echo(w.Header(), r.Header.Get(relay.RequestCorrelationHeader))
+				w.WriteHeader(http.StatusNoContent)
+			}))
+			defer server.Close()
+			client, err := NewDeviceHTTPRelayClientWithPolicy(server.URL, "machine-a", credential, server.Client(), AccessServiceToken{}, clienttransport.Policy{})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := client.Advertise(t.Context(), []string{"agent/a/session"}); err == nil || strings.Contains(err.Error(), credential) {
+				t.Fatalf("advertise error=%v", err)
+			}
+		})
+	}
+}
+
 func TestHTTPRelayClientDoctorEndpointBindsAssertionToSignature(t *testing.T) {
 	public, private, err := ed25519.GenerateKey(rand.Reader)
 	if err != nil {

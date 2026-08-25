@@ -81,12 +81,13 @@ type accessMaterial struct {
 }
 
 type redemptionJournal struct {
-	EnrollmentID   string `json:"enrollment_id"`
-	ClientBinding  string `json:"client_binding"`
-	Code           string `json:"code"`
-	IdempotencyKey string `json:"idempotency_key"`
-	CredentialPath string `json:"credential_path"`
-	Credential     string `json:"credential,omitempty"`
+	EnrollmentID    string `json:"enrollment_id"`
+	ClientBinding   string `json:"client_binding"`
+	Code            string `json:"code"`
+	IdempotencyKey  string `json:"idempotency_key"`
+	CredentialPath  string `json:"credential_path"`
+	LegacyPublicKey string `json:"legacy_public_key,omitempty"`
+	Credential      string `json:"credential,omitempty"`
 }
 
 type redemptionRequest struct {
@@ -183,11 +184,13 @@ func runRedeem(args []string, stdout, stderr io.Writer, recoveryOnly bool) int {
 		return enrollmentError(stderr, "private enrollment state is unsafe", 2)
 	}
 	var legacyPrivateKey ed25519.PrivateKey
+	legacyPublicKey := ""
 	if *legacyKeyPath != "" {
 		legacyPrivateKey, err = loadLegacyPrivateKey(*legacyKeyPath)
 		if err != nil {
 			return enrollmentError(stderr, "legacy machine credential is invalid", 2)
 		}
+		legacyPublicKey = base64.RawURLEncoding.EncodeToString(legacyPrivateKey.Public().(ed25519.PublicKey))
 	}
 	unlock, err := lockEnrollmentState(*stateDir)
 	if err != nil {
@@ -239,14 +242,17 @@ func runRedeem(args []string, stdout, stderr io.Writer, recoveryOnly bool) int {
 			if err != nil {
 				return enrollmentError(stderr, "enrollment recovery could not be created", 1)
 			}
-			journal = redemptionJournal{EnrollmentID: material.EnrollmentID, ClientBinding: material.ClientBinding, Code: material.Code, IdempotencyKey: key.String(), CredentialPath: *credentialPath}
+			journal = redemptionJournal{EnrollmentID: material.EnrollmentID, ClientBinding: material.ClientBinding, Code: material.Code, IdempotencyKey: key.String(), CredentialPath: *credentialPath, LegacyPublicKey: legacyPublicKey}
 			if !journalCanPersistCredential(journal) || writePrivateAtomicNew(journalPath, mustJSON(journal)) != nil {
 				return enrollmentError(stderr, "enrollment recovery could not be created", 1)
 			}
 		}
 	}
-	if journal.ClientBinding != state.ClientBinding || !validJournal(journal) {
+	if journal.ClientBinding != state.ClientBinding || !validJournal(journal) || (state.LegacyMachineID == "") != (journal.LegacyPublicKey == "") {
 		return enrollmentError(stderr, "private enrollment state is unsafe", 2)
+	}
+	if journal.LegacyPublicKey != legacyPublicKey {
+		return enrollmentError(stderr, "legacy machine credential does not match existing enrollment recovery", 2)
 	}
 	if err := syncPrivateDirectory(*stateDir); err != nil {
 		return enrollmentError(stderr, "enrollment recovery could not be made durable; retry this command", 1)
@@ -491,7 +497,7 @@ func loadJournal(path string) (redemptionJournal, error) {
 		return redemptionJournal{}, err
 	}
 	var value redemptionJournal
-	if err := decodeFields(raw, &value, []string{"enrollment_id", "client_binding", "code", "idempotency_key", "credential_path"}, []string{"credential"}); err != nil || !validJournal(value) {
+	if err := decodeFields(raw, &value, []string{"enrollment_id", "client_binding", "code", "idempotency_key", "credential_path"}, []string{"legacy_public_key", "credential"}); err != nil || !validJournal(value) {
 		return redemptionJournal{}, errors.New("invalid recovery journal")
 	}
 	return value, nil
@@ -522,7 +528,11 @@ func validMaterial(value enrollmentMaterial) bool {
 	return validUUID(value.EnrollmentID) && validUUID(value.ClientBinding) && validCode(value.Code)
 }
 func validJournal(value redemptionJournal) bool {
-	return validMaterial(enrollmentMaterial{EnrollmentID: value.EnrollmentID, ClientBinding: value.ClientBinding, Code: value.Code}) && validUUID(value.IdempotencyKey) && safeStateDir(value.CredentialPath) && (value.Credential == "" || validStoredCredential(value.Credential))
+	return validMaterial(enrollmentMaterial{EnrollmentID: value.EnrollmentID, ClientBinding: value.ClientBinding, Code: value.Code}) && validUUID(value.IdempotencyKey) && safeStateDir(value.CredentialPath) && (value.LegacyPublicKey == "" || validLegacyJournalPublicKey(value.LegacyPublicKey)) && (value.Credential == "" || validStoredCredential(value.Credential))
+}
+func validLegacyJournalPublicKey(value string) bool {
+	decoded, err := base64.RawURLEncoding.Strict().DecodeString(value)
+	return err == nil && len(decoded) == ed25519.PublicKeySize && base64.RawURLEncoding.EncodeToString(decoded) == value
 }
 func validUUID(value string) bool {
 	parsed, err := uuid.Parse(value)

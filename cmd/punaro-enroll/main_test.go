@@ -138,6 +138,74 @@ func TestLegacyPrepareAndRedeemUsesProofBoundExchangeRoute(t *testing.T) {
 	}
 }
 
+func TestLegacyRecoveryRejectsChangedProofWithoutDiscardingJournal(t *testing.T) {
+	stateDir := filepath.Join(t.TempDir(), "legacy-state")
+	public, private, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, wrongPrivate, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	credential := "22222222-2222-4222-8222-222222222222." + strings.Repeat("A", 43)
+	calls := 0
+	server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		calls++
+		var request struct {
+			PublicKey string `json:"legacy_public_key"`
+		}
+		if json.NewDecoder(r.Body).Decode(&request) != nil || request.PublicKey != base64.RawURLEncoding.EncodeToString(public) {
+			t.Fatal("legacy recovery used a changed proof")
+		}
+		if calls == 1 {
+			w.WriteHeader(http.StatusServiceUnavailable)
+			return
+		}
+		w.Header().Set("Cache-Control", "no-store")
+		w.WriteHeader(http.StatusCreated)
+		_, _ = io.WriteString(w, `{"principal_id":"11111111-1111-4111-8111-111111111111","lookup_id":"22222222-2222-4222-8222-222222222222","credential":"`+credential+`","generation":1}`)
+	}))
+	defer server.Close()
+	var prepared publicEnrollment
+	var prepareOut bytes.Buffer
+	if code := run([]string{"prepare", "--origin", server.URL, "--state-dir", stateDir, "--legacy-machine-id", "legacy-a"}, &prepareOut, io.Discard); code != 0 || json.Unmarshal(prepareOut.Bytes(), &prepared) != nil {
+		t.Fatalf("prepare code=%d output=%q", code, prepareOut.String())
+	}
+	keyPath := filepath.Join(stateDir, "legacy.key")
+	wrongKeyPath := filepath.Join(stateDir, "wrong-legacy.key")
+	if err := os.WriteFile(keyPath, []byte(base64.RawURLEncoding.EncodeToString(private)), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(wrongKeyPath, []byte(base64.RawURLEncoding.EncodeToString(wrongPrivate)), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	material := writeTestMaterial(t, `{"enrollment_id":"33333333-3333-4333-8333-333333333333","client_binding":"`+prepared.ClientBinding+`","code":"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"}`)
+	credentialPath := filepath.Join(stateDir, "device.credential")
+	original := newEnrollmentHTTPClient
+	newEnrollmentHTTPClient = func() *http.Client { return server.Client() }
+	t.Cleanup(func() { newEnrollmentHTTPClient = original })
+	if code := run([]string{"redeem", "--state-dir", stateDir, "--enrollment-file", material, "--credential-file", credentialPath, "--legacy-private-key-file", keyPath}, io.Discard, io.Discard); code != 1 {
+		t.Fatalf("initial redeem code=%d", code)
+	}
+	journalPath := filepath.Join(stateDir, redemptionJournalName)
+	before, err := os.ReadFile(journalPath) // #nosec G304 -- test reads its own private recovery fixture.
+	if err != nil {
+		t.Fatal(err)
+	}
+	var stderr bytes.Buffer
+	if code := run([]string{"recover", "--state-dir", stateDir, "--credential-file", credentialPath, "--legacy-private-key-file", wrongKeyPath}, io.Discard, &stderr); code != 2 || !strings.Contains(stderr.String(), "does not match existing enrollment recovery") {
+		t.Fatalf("wrong-key recovery code=%d stderr=%q", code, stderr.String())
+	}
+	after, err := os.ReadFile(journalPath) // #nosec G304 -- test proves the private recovery fixture was retained exactly.
+	if err != nil || !bytes.Equal(before, after) || calls != 1 {
+		t.Fatalf("journal changed=%t calls=%d err=%v", !bytes.Equal(before, after), calls, err)
+	}
+	if code := run([]string{"recover", "--state-dir", stateDir, "--credential-file", credentialPath, "--legacy-private-key-file", keyPath}, io.Discard, io.Discard); code != 0 || calls != 2 {
+		t.Fatalf("correct recovery code=%d calls=%d", code, calls)
+	}
+}
+
 func TestRedeemRejectsCredentialPathsThatCannotFitRecoveryJournal(t *testing.T) {
 	journal := redemptionJournal{
 		EnrollmentID:   "33333333-3333-4333-8333-333333333333",
