@@ -936,6 +936,12 @@ func adapterWindowsTaskBound(body, powershell, runner string) bool {
 	if len(body) > 64<<10 || powershell == "" || runner == "" {
 		return false
 	}
+	// schtasks.exe /Query /XML writes UTF-8/ASCII bytes when stdout is captured
+	// while retaining an encoding="UTF-16" declaration. encoding/xml correctly
+	// rejects that contradictory declaration before it can inspect the task.
+	// Remove only the exact schtasks prolog; genuine UTF-16 output contains NUL
+	// bytes and cannot match this UTF-8 prefix.
+	body = strings.TrimPrefix(body, `<?xml version="1.0" encoding="UTF-16"?>`)
 	var task struct {
 		Actions []struct {
 			Exec []struct {
