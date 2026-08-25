@@ -385,6 +385,18 @@ Punaro. Signed request bodies, machine signatures, nonces, and idempotency keys
 are never sent through an Access-session preflight. All signed relay operations
 still reject redirects.
 
+Every Ed25519-authenticated relay request carries a fresh signed
+`X-Punaro-Nonce`; every device-bearer-authenticated relay request instead
+carries a fresh random, non-secret `X-Punaro-Request-Correlation`. The origin
+validates the correlation token's bounded canonical form and echoes the
+applicable request token exactly once as `X-Punaro-Response-Nonce` before route
+handling, including HTTP errors and WebSocket upgrades. Clients compare the
+echo with the token they generated to distinguish a Punaro-origin response or
+upgrade from an Access or reverse-proxy rejection. The correlation token is
+neither a credential nor authorization, replay protection, or idempotency;
+bearer authorization remains independently mandatory, Ed25519 replay defense
+continues to use the signed nonce, and redirects remain rejections.
+
 `punarod` validates Cloudflare Access JWTs itself (audience, issuer, expiry,
 not-before, and signature via cached JWKS) in addition to accepting traffic
 only through the tunnel. Both the issuer and JWKS endpoint must be

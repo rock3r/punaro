@@ -151,6 +151,22 @@ func TestRedeemRejectsCredentialPathsThatCannotFitRecoveryJournal(t *testing.T) 
 	}
 }
 
+func TestPrepareRejectsChangingExistingFreshStateToLegacyMode(t *testing.T) {
+	stateDir := filepath.Join(t.TempDir(), "state")
+	args := []string{"prepare", "--origin", "https://punaro.test", "--state-dir", stateDir}
+	if code := run(args, io.Discard, io.Discard); code != 0 {
+		t.Fatalf("fresh prepare code=%d", code)
+	}
+	var stdout, stderr bytes.Buffer
+	legacyArgs := append(append([]string(nil), args...), "--legacy-machine-id", "legacy-a")
+	if code := run(legacyArgs, &stdout, &stderr); code != 2 || stdout.Len() != 0 || !strings.Contains(stderr.String(), "state preparation failed") || strings.Contains(stderr.String(), "legacy-a") {
+		t.Fatalf("legacy prepare code=%d stdout=%q stderr=%q", code, stdout.String(), stderr.String())
+	}
+	if code := run(args, io.Discard, io.Discard); code != 0 {
+		t.Fatalf("fresh retry code=%d", code)
+	}
+}
+
 func TestPrepareRetriesIdentityDirectorySyncBeforePublishingBinding(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("POSIX directory-sync durability contract")

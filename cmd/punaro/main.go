@@ -850,7 +850,7 @@ func diagnoseServer(ctx context.Context, installation operator.Installation, mac
 		checks = append(checks, punarodiagnostic.Fail("host_update_stage", "resume_or_recover_update"))
 	}
 
-	if installation.MailCutover == nil {
+	if installation.RelayMachinesJSON == "" {
 		checks = append(checks,
 			punarodiagnostic.OptionalUnavailable("mail_cutover_legacy_inventory", "configure_mail_cutover"),
 			punarodiagnostic.OptionalUnavailable("mail_cutover_recovery", "configure_mail_cutover"),

@@ -445,6 +445,7 @@ func preserveDependencies(t *testing.T) {
 	originalBackup, originalListBackups, originalVerifyBackup, originalRestore := createOperatorBackup, listOperatorBackups, verifyOperatorBackup, restoreOperatorBackup
 	originalServerDoctorInspect, originalServerDoctorLoad := serverDoctorInspect, serverDoctorLoad
 	originalUpdateStageCheck := serverDoctorUpdateStageCheck
+	originalMailCutoverPreflight := inspectMailCutoverPreflight
 	t.Cleanup(func() {
 		inspectSchema, inspectOwner, migratePristinePair, maintenanceActive = originalInspect, originalOwner, originalMigrate, originalMaintenance
 		createOwner, recoverInstallationOwner = originalCreate, originalRecover
@@ -456,6 +457,7 @@ func preserveDependencies(t *testing.T) {
 		serverDoctorInspect = originalServerDoctorInspect
 		serverDoctorLoad = originalServerDoctorLoad
 		serverDoctorUpdateStageCheck = originalUpdateStageCheck
+		inspectMailCutoverPreflight = originalMailCutoverPreflight
 	})
 	inspectOwner = func(context.Context, string) (punaropostgres.Principal, error) {
 		return punaropostgres.Principal{ID: "11111111-1111-4111-8111-111111111111", DisplayName: "owner"}, nil
@@ -1213,6 +1215,48 @@ func TestServerDoctorUsesNonRelayPublicEdgeProbeWhenRelayDisabled(t *testing.T) 
 				t.Fatalf("route=%#v origin=%#v access=%#v", route, origin, access)
 			}
 		})
+	}
+}
+
+func TestServerDoctorRequiresPreflightBeforeMailCutoverPublication(t *testing.T) {
+	preserveDependencies(t)
+	directory := testInstallation(t)
+	installation, err := operator.Load(directory)
+	if err != nil {
+		t.Fatal(err)
+	}
+	installation.RelayMachinesJSON = "configured"
+	if installation.MailCutover != nil {
+		t.Fatal("test requires a pre-publication installation")
+	}
+	inspectSchema = func(context.Context, string) (punaropostgres.SchemaState, error) {
+		return punaropostgres.SchemaState{Classification: punaropostgres.Compatible, Version: 44}, nil
+	}
+	probe = func(context.Context, string) error { return nil }
+	preflightCalls := 0
+	inspectMailCutoverPreflight = func(context.Context, string) (punaropostgres.MailCutoverPreflight, error) {
+		preflightCalls++
+		return punaropostgres.MailCutoverPreflight{LegacyPending: 1, TargetRows: 1}, nil
+	}
+	report, err := diagnoseServer(t.Context(), installation, "punaro-lxc", false, "")
+	if err != nil || preflightCalls != 1 || report.Healthy {
+		t.Fatalf("preflight_calls=%d healthy=%t err=%v", preflightCalls, report.Healthy, err)
+	}
+	want := map[string]punarodiagnostic.Status{
+		"mail_cutover_legacy_inventory": punarodiagnostic.StatusFail,
+		"mail_cutover_recovery":         punarodiagnostic.StatusPass,
+		"mail_cutover_target":           punarodiagnostic.StatusFail,
+	}
+	for _, check := range report.Checks {
+		if status, ok := want[check.Code]; ok {
+			if !check.Required || check.Status != status {
+				t.Fatalf("check=%#v want_status=%s", check, status)
+			}
+			delete(want, check.Code)
+		}
+	}
+	if len(want) != 0 {
+		t.Fatalf("missing preflight checks: %v", want)
 	}
 }
 
