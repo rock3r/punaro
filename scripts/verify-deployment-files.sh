@@ -79,6 +79,15 @@ if ! grep -Fqx 'ReadWritePaths=%h/.local/state/punaro-adapter %h/.local/state/pu
 	exit 1
 fi
 
+for expected in \
+	'if [ "$mailbox_state_dir" = "$HOME/.local/state/waypost" ]; then' \
+	'^ReadWritePaths=%h/.local/state/punaro-adapter %h/.local/state/punaro-bootstrap %h/.local/state/waypost$'; do
+	if ! grep -Fq "$expected" "$adapter_installer"; then
+		printf '%s\n' "adapter installer cannot render the Waypost systemd sandbox: $expected" >&2
+		exit 1
+	fi
+done
+
 "$adapter_installer_test"
 "$server_installer_test"
 "$attachment_relay_configurer_test"

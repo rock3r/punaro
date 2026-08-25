@@ -350,10 +350,10 @@ case "$(uname -s)" in
 		service_dir="$HOME/.config/systemd/user"
 		service_file="$service_dir/punaro-adapter.service"
 		mkdir -p "$service_dir"
-		if [ "$mailbox_state_dir" = "$HOME/.local/state/ai-agent/mailbox" ]; then
+		if [ "$mailbox_state_dir" = "$HOME/.local/state/waypost" ]; then
 			install -m 600 "$repo_dir/deploy/systemd/user/punaro-adapter.service" "$service_file"
 		else
-			sed "s|^ReadWritePaths=%h/.local/state/punaro-adapter %h/.local/state/punaro-bootstrap %h/.local/state/ai-agent/mailbox$|ReadWritePaths=%h/.local/state/punaro-adapter %h/.local/state/punaro-bootstrap $mailbox_state_dir|" \
+			sed "s|^ReadWritePaths=%h/.local/state/punaro-adapter %h/.local/state/punaro-bootstrap %h/.local/state/waypost$|ReadWritePaths=%h/.local/state/punaro-adapter %h/.local/state/punaro-bootstrap $mailbox_state_dir|" \
 				"$repo_dir/deploy/systemd/user/punaro-adapter.service" >"$service_file"
 			chmod 600 "$service_file"
 			grep -Fqx "ReadWritePaths=%h/.local/state/punaro-adapter %h/.local/state/punaro-bootstrap $mailbox_state_dir" "$service_file" || fail 'could not render the Linux mailbox sandbox path'
