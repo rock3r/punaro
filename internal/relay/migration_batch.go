@@ -210,9 +210,14 @@ func ReadMigrationSourceBatch(ctx context.Context, path, table, afterKey string,
 	if manifest.Phase != MigrationSourcePrepared {
 		return MigrationSourceBatch{}, errors.New("relay migration source is not prepared")
 	}
-	parentRoleOnlyV3 := manifest.Version == 3 && manifest.Counts.ControlEvents == 0 && manifest.Counts.ControlIdempotency == 0 && manifest.TableSHA256.ControlEvents == "" && manifest.TableSHA256.ControlIdempotency == ""
-	if (manifest.Version == 1 && (table == "mail_roles" || table == "mail_role_memberships" || table == "mail_role_bindings")) || ((manifest.Version <= 2 || parentRoleOnlyV3) && (table == "mail_conversation_controls" || table == "mail_conversation_control_idempotency")) || (manifest.Version < 4 && (table == "mail_role_profiles" || table == "mail_role_profile_idempotency")) || (manifest.Version < 5 && table == "mail_rate_buckets") || (manifest.Version < 6 && (table == "mail_direct_conversations" || table == "mail_message_from_roles" || table == "mail_direct_message_idempotency")) || (manifest.Version < 7 && (table == "mail_telegram_claims" || table == "mail_telegram_participants" || table == "mail_telegram_claim_events" || table == "mail_conversation_display_name_idempotency")) || (manifest.Version < 8 && table == "mail_telegram_claim_idempotency") {
+	if !MigrationSourceTablePresent(manifest, table) {
 		return MigrationSourceBatch{Done: true}, nil
+	}
+	source := migrationTableSpecForVersion(spec.source, manifest.Version)
+	selectColumns, sourceTable, sourceOrder := migrationSourceQuery(source, IsLegacyTelegramMigrationSource(manifest))
+	queryKeyColumns := spec.keyColumns
+	if IsLegacyTelegramMigrationSource(manifest) && table == "mail_telegram_claim_idempotency" {
+		queryKeyColumns = []string{"requested_by_machine", "idempotency_key"}
 	}
 	var keyValues []any
 	where := ""
@@ -229,24 +234,23 @@ func ReadMigrationSourceBatch(ctx context.Context, path, table, afterKey string,
 				return MigrationSourceBatch{}, errors.New("relay migration resume key is invalid")
 			}
 			keyValues[index] = part
-			predicates[index] = spec.keyColumns[index] + "=?"
+			predicates[index] = queryKeyColumns[index] + "=?"
 			placeholders[index] = "?"
 		}
 		var present int
 		// #nosec G201 -- identifiers come only from migrationBatchSpecs.
-		exactQuery := fmt.Sprintf("SELECT 1 FROM %s WHERE %s LIMIT 1", spec.source.name, strings.Join(predicates, " AND "))
+		exactQuery := fmt.Sprintf("SELECT 1 FROM %s WHERE %s LIMIT 1", sourceTable, strings.Join(predicates, " AND "))
 		if err := tx.QueryRowContext(ctx, exactQuery, keyValues...).Scan(&present); err != nil || present != 1 { // #nosec G202 -- fragments come only from migrationBatchSpecs.
 			return MigrationSourceBatch{}, errors.New("relay migration resume key is unavailable")
 		}
 		if len(parts) == 1 {
-			where = " WHERE " + spec.keyColumns[0] + ">?"
+			where = " WHERE " + queryKeyColumns[0] + ">?"
 		} else {
-			where = " WHERE (" + strings.Join(spec.keyColumns, ",") + ")>(" + strings.Join(placeholders, ",") + ")"
+			where = " WHERE (" + strings.Join(queryKeyColumns, ",") + ")>(" + strings.Join(placeholders, ",") + ")"
 		}
 	}
-	source := migrationTableSpecForVersion(spec.source, manifest.Version)
 	// #nosec G201 -- fragments come only from migrationBatchSpecs and frozen parent column lists.
-	query := fmt.Sprintf("SELECT %s FROM %s%s ORDER BY %s LIMIT ?", source.columns, source.name, where, source.order)
+	query := fmt.Sprintf("SELECT %s FROM %s%s ORDER BY %s LIMIT ?", selectColumns, sourceTable, where, sourceOrder)
 	arguments := make([]any, 0, len(keyValues)+1)
 	arguments = append(arguments, keyValues...)
 	arguments = append(arguments, limit+1)

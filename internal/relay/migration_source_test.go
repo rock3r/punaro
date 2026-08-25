@@ -375,6 +375,13 @@ func TestCheckMigrationSourceEnrollmentCoverage(t *testing.T) {
 	if err := CheckMigrationSourceEnrollmentCoverage(ctx, path, reassigned); err == nil {
 		t.Fatal("another machine's authority was accepted for the persisted endpoint owner")
 	}
+	retiredEndpoint := "agent/retired"
+	if _, err := store.db.ExecContext(ctx, `INSERT INTO endpoints(endpoint,machine_id,lease_until,ownership_generation,consumer_id,consumer_generation,consumer_lease_until) VALUES(?,?,0,1,NULL,0,NULL)`, retiredEndpoint, retiredMigrationMachineID(retiredEndpoint)); err != nil {
+		t.Fatal(err)
+	}
+	if err := CheckMigrationSourceEnrollmentCoverage(ctx, path, covered); err == nil {
+		t.Fatal("current source accepted an uncovered endpoint with a fabricated retired migration owner")
+	}
 }
 
 func TestMigrationSourceRefusesOutOfRangeRoleCapabilities(t *testing.T) {
@@ -1015,6 +1022,360 @@ func TestInspectMigrationSourceAcceptsPreparedParentV6WithoutTelegramTables(t *t
 	count, digest := hasher.Evidence()
 	if count != prepared.Counts.Conversations || digest != prepared.TableSHA256.Conversations {
 		t.Fatalf("parent v6 conversation evidence count=%d digest=%s manifest=%#v", count, digest, prepared)
+	}
+}
+
+func TestInspectMigrationSourceAcceptsLegacyTelegramBranchSchemaAndBackfillsClaimReplayBoundary(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	now := time.Date(2026, time.August, 25, 15, 0, 0, 0, time.UTC)
+	path := filepath.Join(t.TempDir(), "relay.db")
+	store, err := Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.AdvertiseEndpoints("machine-a", []string{"agent/a"}, now, time.Hour); err != nil {
+		_ = store.Close()
+		t.Fatal(err)
+	}
+	if err := store.AdvertiseEndpoints("machine-telegram", []string{TelegramGatewayEndpoint}, now, time.Hour); err != nil {
+		_ = store.Close()
+		t.Fatal(err)
+	}
+	if err := store.Close(); err != nil {
+		t.Fatal(err)
+	}
+	db, err := openMigrationSourceDatabase(path, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	conversationID := "11111111-1111-4111-8111-111111111111"
+	otherConversationID := "22222222-2222-4222-8222-222222222222"
+	requestHash := telegramClaimRequestHash(conversationID)
+	for _, statement := range []string{
+		`DROP INDEX telegram_claims_machine_key`,
+		`DROP TABLE telegram_claim_idempotency`,
+		`DROP TABLE conversation_display_name_idempotency`,
+		`DROP TABLE direct_message_idempotency`,
+		`DROP TABLE message_from_roles`,
+		`DROP TABLE direct_conversations`,
+		`DROP TABLE rate_buckets`,
+		`DROP TABLE role_profile_idempotency`,
+		`DROP TABLE role_profiles`,
+		`ALTER TABLE messages ADD COLUMN to_role TEXT`,
+		`INSERT INTO conversations(id,next_sequence,created_at,display_name) VALUES('` + conversationID + `',0,1,'legacy')`,
+		`INSERT INTO telegram_claims(conversation_id,status,requested_by_machine,requested_by_endpoint,idempotency_key,request_hash,created_at) VALUES('` + conversationID + `','pending','machine-telegram','` + TelegramGatewayEndpoint + `','legacy-claim-key','` + requestHash + `',1)`,
+	} {
+		if _, err := db.ExecContext(ctx, statement); err != nil {
+			_ = db.Close()
+			t.Fatal(err)
+		}
+	}
+	if err := db.Close(); err != nil {
+		t.Fatal(err)
+	}
+	inspected, err := InspectMigrationSource(ctx, path)
+	if err != nil || inspected.Version != 7 || inspected.Phase != MigrationSourceActive || inspected.Counts.TelegramClaims != 1 || inspected.Counts.TelegramClaimIdempotency != 1 || inspected.TableSHA256.TelegramClaimIdempotency == "" || inspected.TableSHA256.DirectConversations != "" || inspected.TableSHA256.DisplayNameIdempotency != "" {
+		t.Fatalf("legacy Telegram branch inspect=%#v err=%v", inspected, err)
+	}
+	prepared, err := PrepareMigrationSource(ctx, path, uuid.NewString(), strings.Repeat("d", 64), inspected.Fingerprint, now.Add(time.Minute))
+	if err != nil || prepared.Phase != MigrationSourcePrepared || prepared.Version != 7 {
+		t.Fatalf("legacy Telegram branch prepare=%#v err=%v", prepared, err)
+	}
+	for _, table := range []string{"mail_role_profiles", "mail_rate_buckets", "mail_direct_conversations", "mail_conversation_display_name_idempotency"} {
+		batch, err := ReadMigrationSourceBatch(ctx, path, table, "", 10)
+		if err != nil || len(batch.Rows) != 0 || !batch.Done {
+			t.Fatalf("legacy Telegram branch absent table %s batch=%#v err=%v", table, batch, err)
+		}
+	}
+	telegram, err := ReadMigrationSourceBatch(ctx, path, "mail_telegram_claims", "", 10)
+	if err != nil || len(telegram.Rows) != 1 || !telegram.Done {
+		t.Fatalf("legacy Telegram branch claim batch=%#v err=%v", telegram, err)
+	}
+	derived, err := ReadMigrationSourceBatch(ctx, path, "mail_telegram_claim_idempotency", "", 10)
+	if err != nil || len(derived.Rows) != 1 || !derived.Done {
+		t.Fatalf("legacy Telegram branch derived claim retry batch=%#v err=%v", derived, err)
+	}
+	var payload map[string]any
+	if err := json.Unmarshal(derived.Rows[0].Payload, &payload); err != nil {
+		t.Fatal(err)
+	}
+	if payload["machine_id"] != "machine-telegram" || payload["key"] != "legacy-claim-key" || payload["conversation_id"] != conversationID || payload["request_hash"] != requestHash || payload["request_hash"] == telegramClaimRequestHash(otherConversationID) {
+		t.Fatalf("derived claim retry lost cross-conversation boundary: %#v", payload)
+	}
+	hasher, err := NewMigrationTableHasher("mail_telegram_claim_idempotency")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := hasher.Add(derived.Rows[0]); err != nil {
+		t.Fatal(err)
+	}
+	count, digest := hasher.Evidence()
+	if count != prepared.Counts.TelegramClaimIdempotency || digest != prepared.TableSHA256.TelegramClaimIdempotency {
+		t.Fatalf("derived claim retry evidence count=%d digest=%s manifest=%#v", count, digest, prepared)
+	}
+}
+
+func TestInspectMigrationSourceRejectsPopulatedRetiredToRoleColumn(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	now := time.Date(2026, time.August, 25, 15, 0, 0, 0, time.UTC)
+	path := filepath.Join(t.TempDir(), "relay.db")
+	store, err := Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.AdvertiseEndpoints("machine-a", []string{"agent/a"}, now, time.Hour); err != nil {
+		_ = store.Close()
+		t.Fatal(err)
+	}
+	if err := store.Close(); err != nil {
+		t.Fatal(err)
+	}
+	db, err := openMigrationSourceDatabase(path, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, statement := range []string{
+		`DROP INDEX telegram_claims_machine_key`,
+		`DROP TABLE telegram_claim_idempotency`, `DROP TABLE conversation_display_name_idempotency`,
+		`DROP TABLE direct_message_idempotency`, `DROP TABLE message_from_roles`, `DROP TABLE direct_conversations`,
+		`DROP TABLE rate_buckets`, `DROP TABLE role_profile_idempotency`, `DROP TABLE role_profiles`,
+		`ALTER TABLE messages ADD COLUMN to_role TEXT`,
+		`INSERT INTO conversations(id,next_sequence,created_at) VALUES('11111111-1111-4111-8111-111111111111',1,1)`,
+		`INSERT INTO messages(id,conversation_id,sequence,from_endpoint,body,created_at,to_role) VALUES('22222222-2222-4222-8222-222222222222','11111111-1111-4111-8111-111111111111',1,'agent/a','body',1,'role/machine-a/legacy')`,
+	} {
+		if _, err := db.ExecContext(ctx, statement); err != nil {
+			_ = db.Close()
+			t.Fatal(err)
+		}
+	}
+	if err := db.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := InspectMigrationSource(ctx, path); err == nil {
+		t.Fatal("populated retired messages.to_role was accepted")
+	}
+}
+
+func TestPrepareLegacyTelegramBranchRepairsDerivedOperationalState(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	now := time.Date(2026, time.August, 25, 15, 30, 0, 0, time.UTC)
+	path := filepath.Join(t.TempDir(), "relay.db")
+	store, err := Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.AdvertiseEndpoints("machine-a", []string{"agent/a"}, now, time.Hour); err != nil {
+		_ = store.Close()
+		t.Fatal(err)
+	}
+	if err := store.Close(); err != nil {
+		t.Fatal(err)
+	}
+	db, err := openMigrationSourceDatabase(path, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	conversationID := "11111111-1111-4111-8111-111111111111"
+	messageID := "22222222-2222-4222-8222-222222222222"
+	deliveryID := "33333333-3333-4333-8333-333333333333"
+	controlID := "44444444-4444-4444-8444-444444444444"
+	controlActor := "legacy/control-actor"
+	controlMember := "legacy/control-member"
+	controlHash := ControlRequestHash(ControlInput{ConversationID: conversationID, ActorEndpoint: controlActor, Operation: ControlRemoveMember, Member: Member{Endpoint: controlMember}})
+	for _, statement := range []string{
+		`DROP INDEX telegram_claims_machine_key`, `DROP TABLE telegram_claim_idempotency`, `DROP TABLE conversation_display_name_idempotency`,
+		`DROP TABLE direct_message_idempotency`, `DROP TABLE message_from_roles`, `DROP TABLE direct_conversations`,
+		`DROP TABLE rate_buckets`, `DROP TABLE role_profile_idempotency`, `DROP TABLE role_profiles`,
+		`ALTER TABLE messages ADD COLUMN to_role TEXT`,
+		`INSERT INTO conversations(id,next_sequence,created_at,display_name) VALUES('` + conversationID + `',1,1,'legacy')`,
+		`INSERT INTO memberships(conversation_id,endpoint,capabilities) VALUES('` + conversationID + `','legacy/member',3)`,
+		`INSERT INTO messages(id,conversation_id,sequence,from_endpoint,body,created_at) VALUES('` + messageID + `','` + conversationID + `',1,'legacy/sender','body',1)`,
+		`INSERT INTO idempotency(machine_id,key,request_hash,message_id,created_at) VALUES('machine-a','legacy-message','` + strings.Repeat("a", 64) + `','` + messageID + `',1)`,
+		`INSERT INTO deliveries(id,message_id,recipient_endpoint,lease_machine_id,lease_token,lease_generation,ownership_generation,consumer_generation,lease_until,acked_at) VALUES('` + deliveryID + `','` + messageID + `','legacy/member','machine-a','` + strings.Repeat("b", 64) + `',2,NULL,NULL,2,3)`,
+		`INSERT INTO recipient_cursors(recipient_endpoint,conversation_id,sequence) VALUES('legacy/member','` + conversationID + `',1)`,
+		`INSERT INTO roles(role,machine_id) VALUES('role/machine-a/reviewer','machine-a')`,
+		`INSERT INTO role_bindings(role,session_endpoint,machine_id,ownership_generation,lease_until) VALUES('role/machine-a/reviewer','legacy/binding','machine-a',99,2)`,
+		`INSERT INTO conversation_controls(id,conversation_id,actor_endpoint,operation,member_endpoint,member_capabilities,created_at) VALUES('` + controlID + `','` + conversationID + `','` + controlActor + `','remove_member','` + controlMember + `',0,1)`,
+		`INSERT INTO conversation_control_idempotency(machine_id,key,request_hash,control_id,created_at) VALUES('machine-a','legacy-control','` + controlHash + `','` + controlID + `',1)`,
+	} {
+		if _, err := db.ExecContext(ctx, statement); err != nil {
+			_ = db.Close()
+			t.Fatal(err)
+		}
+	}
+	if err := db.Close(); err != nil {
+		t.Fatal(err)
+	}
+	inspected, err := InspectMigrationSource(ctx, path)
+	if err != nil || !IsLegacyTelegramMigrationSource(inspected) {
+		t.Fatalf("inspect repairable legacy source=%#v err=%v", inspected, err)
+	}
+	prepared, err := PrepareMigrationSource(ctx, path, uuid.NewString(), strings.Repeat("e", 64), inspected.Fingerprint, now.Add(time.Minute))
+	if err != nil || prepared.Phase != MigrationSourcePrepared || prepared.Counts.Endpoints != inspected.Counts.Endpoints+5 {
+		t.Fatalf("prepare repairable legacy source=%#v err=%v", prepared, err)
+	}
+	db, err = openMigrationSourceDatabase(path, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, endpoint := range []string{"legacy/member", "legacy/sender", controlActor, controlMember} {
+		var machineID string
+		if err := db.QueryRowContext(ctx, `SELECT machine_id FROM endpoints WHERE endpoint=?`, endpoint).Scan(&machineID); err != nil || machineID != retiredMigrationMachineID(endpoint) {
+			_ = db.Close()
+			t.Fatalf("retired endpoint %s machine=%q err=%v", endpoint, machineID, err)
+		}
+	}
+	var bindingMachine string
+	if err := db.QueryRowContext(ctx, `SELECT machine_id FROM endpoints WHERE endpoint='legacy/binding'`).Scan(&bindingMachine); err != nil || bindingMachine != "machine-a" {
+		_ = db.Close()
+		t.Fatalf("binding repair machine=%q err=%v", bindingMachine, err)
+	}
+	var leased, mismatched int
+	if err := db.QueryRowContext(ctx, `SELECT count(*) FROM deliveries WHERE lease_machine_id IS NOT NULL OR lease_token IS NOT NULL OR ownership_generation IS NOT NULL OR consumer_generation IS NOT NULL OR lease_until IS NOT NULL`).Scan(&leased); err != nil {
+		_ = db.Close()
+		t.Fatal(err)
+	}
+	if err := db.QueryRowContext(ctx, `SELECT count(*) FROM role_bindings b JOIN endpoints e ON e.endpoint=b.session_endpoint WHERE b.ownership_generation<>e.ownership_generation`).Scan(&mismatched); err != nil {
+		_ = db.Close()
+		t.Fatal(err)
+	}
+	if err := db.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if leased != 0 || mismatched != 0 {
+		t.Fatalf("prepared repair left leased=%d mismatched=%d", leased, mismatched)
+	}
+	enrollment := `[{"id":"machine-a","public_key":"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA","endpoints":["agent/a","legacy/binding"]}]`
+	if err := CheckMigrationSourceEnrollmentCoverage(ctx, path, enrollment); err != nil {
+		t.Fatalf("retired tombstones failed enrollment coverage: %v", err)
+	}
+	uncoveredBinding := `[{"id":"machine-a","public_key":"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA","endpoints":["agent/a"]}]`
+	if err := CheckMigrationSourceEnrollmentCoverage(ctx, path, uncoveredBinding); err == nil {
+		t.Fatal("repaired binding endpoint bypassed enrollment authority")
+	}
+	aborted, err := AbortPreparedMigrationSource(ctx, path, prepared.EpochID, prepared.TargetIdentity, prepared.Fingerprint)
+	if err != nil || aborted.Phase != MigrationSourceActive {
+		t.Fatalf("abort repaired legacy source=%#v err=%v", aborted, err)
+	}
+	reopened, err := Open(path)
+	if err != nil {
+		t.Fatalf("reopen aborted legacy source: %v", err)
+	}
+	if err := reopened.ConsumeRequestNonce("machine-a", "post-abort-write", now, now.Add(time.Hour)); err != nil {
+		_ = reopened.Close()
+		t.Fatal(err)
+	}
+	if err := reopened.Close(); err != nil {
+		t.Fatal(err)
+	}
+	active, err := InspectMigrationSource(ctx, path)
+	if err != nil || active.Version != 8 || active.Phase != MigrationSourceActive || active.Fingerprint == aborted.Fingerprint || !active.legacyTelegramRepairLineage {
+		t.Fatalf("inspect written aborted legacy source=%#v err=%v", active, err)
+	}
+	if err := CheckMigrationSourceEnrollmentCoverage(ctx, path, enrollment); err != nil {
+		t.Fatalf("durable repair provenance failed enrollment after abort: %v", err)
+	}
+	retried, err := PrepareMigrationSource(ctx, path, uuid.NewString(), prepared.TargetIdentity, active.Fingerprint, now.Add(2*time.Minute))
+	if err != nil || retried.Phase != MigrationSourcePrepared {
+		t.Fatalf("retry repaired legacy source=%#v err=%v", retried, err)
+	}
+	reopenedPrepared, err := InspectMigrationSource(ctx, path)
+	if err != nil || reopenedPrepared.Version != 8 || reopenedPrepared.Phase != MigrationSourcePrepared || reopenedPrepared.Fingerprint != retried.Fingerprint || !reopenedPrepared.legacyTelegramRepairLineage {
+		t.Fatalf("inspect retried reopened legacy source=%#v err=%v", reopenedPrepared, err)
+	}
+}
+
+func TestPrepareLegacyTelegramBranchRejectsPreexistingRetiredOwner(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	now := time.Date(2026, time.August, 25, 15, 45, 0, 0, time.UTC)
+	path := filepath.Join(t.TempDir(), "relay.db")
+	store, err := Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.AdvertiseEndpoints("machine-a", []string{"agent/a"}, now, time.Hour); err != nil {
+		_ = store.Close()
+		t.Fatal(err)
+	}
+	if err := store.Close(); err != nil {
+		t.Fatal(err)
+	}
+	db, err := openMigrationSourceDatabase(path, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, statement := range []string{
+		`DROP INDEX telegram_claims_machine_key`, `DROP TABLE telegram_claim_idempotency`, `DROP TABLE conversation_display_name_idempotency`,
+		`DROP TABLE direct_message_idempotency`, `DROP TABLE message_from_roles`, `DROP TABLE direct_conversations`,
+		`DROP TABLE rate_buckets`, `DROP TABLE role_profile_idempotency`, `DROP TABLE role_profiles`,
+		`ALTER TABLE messages ADD COLUMN to_role TEXT`,
+	} {
+		if _, err := db.ExecContext(ctx, statement); err != nil {
+			_ = db.Close()
+			t.Fatal(err)
+		}
+	}
+	fabricatedEndpoint := "legacy/fabricated"
+	if _, err := db.ExecContext(ctx, `INSERT INTO endpoints(endpoint,machine_id,lease_until,ownership_generation,consumer_id,consumer_generation,consumer_lease_until) VALUES(?,?,0,1,NULL,0,NULL)`, fabricatedEndpoint, retiredMigrationMachineID(fabricatedEndpoint)); err != nil {
+		_ = db.Close()
+		t.Fatal(err)
+	}
+	if err := db.Close(); err != nil {
+		t.Fatal(err)
+	}
+	inspected, err := InspectMigrationSource(ctx, path)
+	if err != nil || !IsLegacyTelegramMigrationSource(inspected) {
+		t.Fatalf("inspect fabricated legacy source=%#v err=%v", inspected, err)
+	}
+	if _, err := PrepareMigrationSource(ctx, path, uuid.NewString(), strings.Repeat("f", 64), inspected.Fingerprint, now.Add(time.Minute)); err == nil {
+		t.Fatal("legacy source accepted a pre-existing deterministic retired owner")
+	}
+}
+
+func TestInspectMigrationSourceRejectsLegacyTelegramDuplicateClaimRetries(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	now := time.Date(2026, time.August, 25, 16, 0, 0, 0, time.UTC)
+	path := filepath.Join(t.TempDir(), "relay.db")
+	store, err := Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.AdvertiseEndpoints("machine-telegram", []string{TelegramGatewayEndpoint}, now, time.Hour); err != nil {
+		_ = store.Close()
+		t.Fatal(err)
+	}
+	if err := store.Close(); err != nil {
+		t.Fatal(err)
+	}
+	db, err := openMigrationSourceDatabase(path, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, statement := range []string{
+		`DROP INDEX telegram_claims_machine_key`, `DROP TABLE telegram_claim_idempotency`, `DROP TABLE conversation_display_name_idempotency`,
+		`DROP TABLE direct_message_idempotency`, `DROP TABLE message_from_roles`, `DROP TABLE direct_conversations`,
+		`DROP TABLE rate_buckets`, `DROP TABLE role_profile_idempotency`, `DROP TABLE role_profiles`,
+		`ALTER TABLE messages ADD COLUMN to_role TEXT`,
+		`INSERT INTO conversations(id,next_sequence,created_at) VALUES('11111111-1111-4111-8111-111111111111',0,1),('22222222-2222-4222-8222-222222222222',0,2)`,
+		`INSERT INTO telegram_claims(conversation_id,status,requested_by_machine,requested_by_endpoint,idempotency_key,request_hash,created_at) VALUES
+			('11111111-1111-4111-8111-111111111111','pending','machine-telegram','telegram/primary','duplicate-key','` + strings.Repeat("a", 64) + `',1),
+			('22222222-2222-4222-8222-222222222222','pending','machine-telegram','telegram/primary','duplicate-key','` + strings.Repeat("b", 64) + `',2)`,
+	} {
+		if _, err := db.ExecContext(ctx, statement); err != nil {
+			_ = db.Close()
+			t.Fatal(err)
+		}
+	}
+	if err := db.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := InspectMigrationSource(ctx, path); err == nil {
+		t.Fatal("legacy Telegram source with duplicate claim retry keys was accepted")
 	}
 }
 

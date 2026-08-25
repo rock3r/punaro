@@ -67,17 +67,20 @@ func canonicalMailCutoverManifest(request MailCutoverRequest) ([]byte, error) {
 	}
 	counts := []int64{manifest.Counts.Endpoints, manifest.Counts.Conversations, manifest.Counts.Memberships, manifest.Counts.Roles, manifest.Counts.RoleMemberships, manifest.Counts.RoleBindings, manifest.Counts.Messages, manifest.Counts.Deliveries, manifest.Counts.RecipientCursors, manifest.Counts.MessageIdempotency, manifest.Counts.ConversationIdempotency, manifest.Counts.ControlEvents, manifest.Counts.ControlIdempotency, manifest.Counts.RequestNonces, manifest.Counts.RoleProfiles, manifest.Counts.RoleProfileIdempotency, manifest.Counts.RateBuckets, manifest.Counts.DirectConversations, manifest.Counts.MessageFromRoles, manifest.Counts.DirectMessageIdempotency, manifest.Counts.TelegramClaims, manifest.Counts.TelegramParticipants, manifest.Counts.TelegramClaimEvents, manifest.Counts.DisplayNameIdempotency, manifest.Counts.TelegramClaimIdempotency}
 	hashes := []string{manifest.TableSHA256.Endpoints, manifest.TableSHA256.Conversations, manifest.TableSHA256.Memberships, manifest.TableSHA256.Roles, manifest.TableSHA256.RoleMemberships, manifest.TableSHA256.RoleBindings, manifest.TableSHA256.Messages, manifest.TableSHA256.Deliveries, manifest.TableSHA256.RecipientCursors, manifest.TableSHA256.MessageIdempotency, manifest.TableSHA256.ConversationIdempotency, manifest.TableSHA256.ControlEvents, manifest.TableSHA256.ControlIdempotency, manifest.TableSHA256.RequestNonces, manifest.TableSHA256.RoleProfiles, manifest.TableSHA256.RoleProfileIdempotency, manifest.TableSHA256.RateBuckets, manifest.TableSHA256.DirectConversations, manifest.TableSHA256.MessageFromRoles, manifest.TableSHA256.DirectMessageIdempotency, manifest.TableSHA256.TelegramClaims, manifest.TableSHA256.TelegramParticipants, manifest.TableSHA256.TelegramClaimEvents, manifest.TableSHA256.DisplayNameIdempotency, manifest.TableSHA256.TelegramClaimIdempotency}
+	tables := []string{"mail_endpoints", "mail_conversations", "mail_memberships", "mail_roles", "mail_role_memberships", "mail_role_bindings", "mail_messages", "mail_deliveries", "mail_recipient_cursors", "mail_message_idempotency", "mail_conversation_idempotency", "mail_conversation_controls", "mail_conversation_control_idempotency", "mail_request_nonces", "mail_role_profiles", "mail_role_profile_idempotency", "mail_rate_buckets", "mail_direct_conversations", "mail_message_from_roles", "mail_direct_message_idempotency", "mail_telegram_claims", "mail_telegram_participants", "mail_telegram_claim_events", "mail_conversation_display_name_idempotency", "mail_telegram_claim_idempotency"}
 	if (manifest.Version < 1 || manifest.Version > 8) || manifest.SourceID != request.SourceID || manifest.Phase != relay.MigrationSourcePrepared || manifest.EpochID != request.EpochID || manifest.TargetIdentity != request.TargetIdentity || manifest.Fingerprint != request.SourceFingerprint {
 		return nil, errors.New("mail cutover manifest binding does not match")
 	}
-	parentRoleOnlyV3 := manifest.Version == 3 && manifest.Counts.ControlEvents == 0 && manifest.Counts.ControlIdempotency == 0 && manifest.TableSHA256.ControlEvents == "" && manifest.TableSHA256.ControlIdempotency == ""
 	for _, count := range counts {
 		if count < 0 {
 			return nil, errors.New("mail cutover manifest count is invalid")
 		}
 	}
 	for index, hash := range hashes {
-		if ((manifest.Version == 1 && index >= 3 && index <= 5) || ((manifest.Version <= 2 || parentRoleOnlyV3) && index >= 11 && index <= 12) || (manifest.Version < 4 && index >= 14) || (manifest.Version < 5 && index >= 16) || (manifest.Version < 6 && index >= 17) || (manifest.Version < 7 && index >= 20) || (manifest.Version < 8 && index >= 24)) && hash == "" {
+		if !relay.MigrationSourceTablePresent(manifest, tables[index]) {
+			if hash != "" || counts[index] != 0 {
+				return nil, errors.New("mail cutover manifest absent table evidence is invalid")
+			}
 			continue
 		}
 		if !mailCutoverDigestPattern.MatchString(hash) {

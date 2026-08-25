@@ -90,6 +90,33 @@ func TestMailCutoverRequestValidation(t *testing.T) {
 	if len(current.Manifest) > 8192 {
 		t.Fatalf("current v7 manifest is %d bytes, want <= 8192", len(current.Manifest))
 	}
+	legacyTelegram := valid
+	legacyTelegramManifest := currentManifest
+	legacyTelegramManifest.TableSHA256.RoleProfiles = ""
+	legacyTelegramManifest.TableSHA256.RoleProfileIdempotency = ""
+	legacyTelegramManifest.TableSHA256.RateBuckets = ""
+	legacyTelegramManifest.TableSHA256.DirectConversations = ""
+	legacyTelegramManifest.TableSHA256.MessageFromRoles = ""
+	legacyTelegramManifest.TableSHA256.DirectMessageIdempotency = ""
+	legacyTelegramManifest.TableSHA256.DisplayNameIdempotency = ""
+	legacyTelegramManifest.Counts.TelegramClaimIdempotency = legacyTelegramManifest.Counts.TelegramClaims
+	emptyDigest := sha256.Sum256(nil)
+	legacyTelegramManifest.TableSHA256.TelegramClaimIdempotency = hex.EncodeToString(emptyDigest[:])
+	legacyTelegram.Manifest, _ = json.Marshal(legacyTelegramManifest)
+	legacyTelegramDigest := sha256.Sum256(legacyTelegram.Manifest)
+	legacyTelegram.ManifestSHA256 = hex.EncodeToString(legacyTelegramDigest[:])
+	if err := legacyTelegram.Validate(); err != nil {
+		t.Fatalf("legacy Telegram branch request rejected: %v", err)
+	}
+	legacyTelegramInvalid := legacyTelegram
+	legacyTelegramInvalidManifest := legacyTelegramManifest
+	legacyTelegramInvalidManifest.Counts.DirectConversations = 1
+	legacyTelegramInvalid.Manifest, _ = json.Marshal(legacyTelegramInvalidManifest)
+	legacyTelegramInvalidDigest := sha256.Sum256(legacyTelegramInvalid.Manifest)
+	legacyTelegramInvalid.ManifestSHA256 = hex.EncodeToString(legacyTelegramInvalidDigest[:])
+	if err := legacyTelegramInvalid.Validate(); err == nil {
+		t.Fatal("legacy Telegram branch accepted nonzero evidence for an absent table")
+	}
 	legacy := valid
 	legacyManifest := manifest
 	legacyManifest.Version = 1
