@@ -40,6 +40,8 @@ for file in "$project/AGENTS.md" "$project/CLAUDE.md"; do
 	grep -Fq 'envelope is from `user-telegram`' "$file" || { printf '%s\n' 'installed guidance omitted telegram-origin restriction' >&2; exit 1; }
 	grep -Fq 'Proactive Telegram pings' "$file" || { printf '%s\n' 'installed guidance omitted proactive Telegram pings' >&2; exit 1; }
 	grep -Fq 'punaro-adapter doctor --plugin-root' "$file" || { printf '%s\n' 'installed guidance omitted read-only doctor readiness' >&2; exit 1; }
+	grep -Fq 'waypost_status(include_cli_context=true)' "$file" || { printf '%s\n' 'installed guidance omitted bounded Waypost CLI routing' >&2; exit 1; }
+	grep -Fq 'waypost_ack' "$file" || { printf '%s\n' 'installed guidance omitted Waypost acknowledgement' >&2; exit 1; }
 done
 [ -f "$project/.agents/skills/punaro-mailbox/SKILL.md" ]
 [ -f "$project/.agents/skills/punaro-reply/SKILL.md" ]
@@ -78,6 +80,7 @@ for installer in "$repo_dir/scripts/install-agent-guidance.sh" "$repo_dir/script
 	require_phrase "$installer" 'Proactive Telegram pings'
 	require_phrase "$installer" 'predates telegram-origin-only send'
 	require_phrase "$installer" 'punaro-adapter doctor --plugin-root'
+	require_phrase "$installer" 'predates Waypost'
 done
 
 linked_project="$fixture_dir/linked-project"
@@ -175,7 +178,7 @@ sh "$repo_dir/scripts/install-agent-guidance.sh" --directory "$stale_project" >"
 status=$?
 set -e
 [ "$status" -eq 2 ] || { printf '%s\n' 'pre-runtime-boundary guidance was silently retained or overwritten' >&2; exit 1; }
-grep -Fq 'existing Punaro guidance predates the agent-runtime boundary:' "$fixture_dir/stale.out"
+grep -Fq 'existing Punaro guidance predates Waypost:' "$fixture_dir/stale.out"
 grep -Fq 'installed `punaro-trusted-attachment` client' "$stale_project/AGENTS.md"
 if grep -Fq 'successful send proves relay acceptance only' "$stale_project/AGENTS.md"; then
 	printf '%s\n' 'stale guidance was rewritten in place' >&2
@@ -200,7 +203,7 @@ sh "$repo_dir/scripts/install-agent-guidance.sh" --directory "$outside_project" 
 status=$?
 set -e
 [ "$status" -eq 2 ] || { printf '%s\n' 'sentinel outside the Punaro block skipped the runtime-boundary upgrade' >&2; exit 1; }
-grep -Fq 'existing Punaro guidance predates the agent-runtime boundary:' "$fixture_dir/outside.out"
+grep -Fq 'existing Punaro guidance predates Waypost:' "$fixture_dir/outside.out"
 grep -Fq 'installed `punaro-trusted-attachment` client' "$outside_project/AGENTS.md"
 awk '
 	index($0, "<!-- punaro-agent-guidance:start -->") { p=1 }

@@ -8,7 +8,7 @@ mailbox; a native local client translates between that mailbox and Punaro.
 
 The accepted production direction is a versioned OCI application image with
 Docker Compose as the reference single-node deployment. The service is written
-in Go. Go matches the existing `agent-mailbox` toolchain, produces small
+in Go. Go matches the existing Waypost toolchain, produces small
 auditable binaries, and supports native clients on the existing platforms.
 
 ## Architectural authority
@@ -31,7 +31,8 @@ The accepted target is not yet a released service. The current `punarod`
 binary provides a loopback-only alpha text relay: explicit
 machine enrollment, signed requests, durable append/lease/ack, attached-endpoint
 advertising, and payload-free WebSocket wake hints. A local adapter bridges
-this to `agent-mailbox`. The separately deployable `punaro-telegram` bridge
+this to Waypost, retaining a bounded legacy `agent-mailbox` compatibility path
+during migration. The separately deployable `punaro-telegram` bridge
 adds explicit Telegram topic routing and a restricted Bot API client.
 Authenticated attachments use the separately gated trusted-relay surface and
 native client. V2/v3 production settings are rejected, their routes are
@@ -1071,7 +1072,7 @@ never calls `createForumTopic`.
 
 ## Local adapter boundary
 
-The Go adapter runs on each agent machine. It owns the local `agent-mailbox`
+The Go adapter runs on each agent machine. It owns the local Waypost
 CLI/MCP integration and no remote actor may invoke the CLI directly. It:
 
 1. Watches or periodically reads the locally configured attachment group.

@@ -24,7 +24,8 @@ adapter over Punaro's own API.
 > Status: alpha implementation under an accepted PostgreSQL/trusted-relay/Big
 > Brain migration plan. Enrolled adapters can exchange durable
 > text through the loopback relay, with signed requests, payload-free wake
-> hints, local `agent-mailbox` handoff, and a separately enrolled Telegram
+> hints, local Waypost handoff (with rolling legacy `agent-mailbox`
+> compatibility), and a separately enrolled Telegram
 > gateway process. Authenticated attachments use the separately gated trusted
 > relay and native client. Attachment v2/v3 production settings, routes, and
 > binaries are retired; their code, tests, RFCs, and vectors remain evidence.

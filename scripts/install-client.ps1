@@ -2,8 +2,9 @@
 param(
     [Parameter(Mandatory = $true)][string]$RelayUrl,
     [Parameter(Mandatory = $true)][string]$MachineId,
-    [string]$AgentMailboxBin = 'agent-mailbox.exe',
-    [string]$MailboxStateDir = (Join-Path $env:LOCALAPPDATA 'ai-agent\mailbox'),
+    [string]$WaypostBin = '',
+    [string]$AgentMailboxBin = '',
+    [string]$MailboxStateDir = '',
     [string]$AttachedGroup = 'group/punaro-attached',
     [string]$AgentGuidanceDir,
     [switch]$AllowLanHttp,
@@ -317,11 +318,37 @@ foreach ($retiredPath in @(
     if (Test-Path -LiteralPath $retiredPath) { Stop-Install "retired attachment artifact exists at $retiredPath; archive or remove it explicitly before installing the trusted client" }
 }
 
+if (-not [string]::IsNullOrWhiteSpace($WaypostBin) -and -not [string]::IsNullOrWhiteSpace($AgentMailboxBin)) {
+    Stop-Install 'specify only one Waypost executable option'
+}
+$mailboxIsWaypost = $false
 try {
-    $mailboxCommand = Get-Command $AgentMailboxBin -CommandType Application -ErrorAction Stop
+    $mailboxCommand = $null
+    if ([string]::IsNullOrWhiteSpace($WaypostBin) -and [string]::IsNullOrWhiteSpace($AgentMailboxBin)) {
+        foreach ($candidate in @('waypost.exe', 'agent-mailbox.exe')) {
+            $mailboxCommand = Get-Command $candidate -CommandType Application -ErrorAction SilentlyContinue
+            if ($null -ne $mailboxCommand) {
+                $mailboxIsWaypost = $candidate -eq 'waypost.exe'
+                break
+            }
+        }
+    } elseif (-not [string]::IsNullOrWhiteSpace($WaypostBin)) {
+        $mailboxCommand = Get-Command $WaypostBin -CommandType Application -ErrorAction Stop
+        $mailboxIsWaypost = $true
+    } else {
+        $mailboxCommand = Get-Command $AgentMailboxBin -CommandType Application -ErrorAction Stop
+    }
+    if ($null -eq $mailboxCommand) { Stop-Install 'Waypost is required; install it before onboarding this machine' }
     $mailbox = if (-not [string]::IsNullOrWhiteSpace($mailboxCommand.Path)) { $mailboxCommand.Path } else { $mailboxCommand.Source }
-    if ([string]::IsNullOrWhiteSpace($mailbox)) { Stop-Install 'agent-mailbox is required; install it before onboarding this machine' }
-} catch { Stop-Install 'agent-mailbox is required; install it before onboarding this machine' }
+    if ([string]::IsNullOrWhiteSpace($mailbox)) { Stop-Install 'Waypost is required; install it before onboarding this machine' }
+} catch { Stop-Install 'Waypost is required; install it before onboarding this machine' }
+if ([string]::IsNullOrWhiteSpace($MailboxStateDir)) {
+    $MailboxStateDir = if ($mailboxIsWaypost) {
+        Join-Path $env:LOCALAPPDATA 'waypost'
+    } else {
+        Join-Path $env:LOCALAPPDATA 'ai-agent\mailbox'
+    }
+}
 $MailboxStateDir = Get-FullPath $MailboxStateDir
 
 $adapterTaskName = 'Punaro Adapter'

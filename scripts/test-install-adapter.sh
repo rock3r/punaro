@@ -77,7 +77,7 @@ run_install() {
 		sh "$repo_dir/scripts/install-client.sh" \
 		--relay-url https://relay.example.test \
 		--machine-id macbook \
-		--agent-mailbox-bin "$mailbox" \
+		--waypost-bin "$mailbox" \
 		--mailbox-state-dir "$mailbox_state" \
 		--agent-guidance-dir "$guidance_project"
 }
@@ -104,8 +104,8 @@ file_mode() {
 
 [ -x "$adapter" ] || { printf '%s\n' 'adapter binary was not installed' >&2; exit 1; }
 [ -x "$bootstrap" ] || { printf '%s\n' 'bootstrap binary was not installed' >&2; exit 1; }
-[ "$("$adapter" version)" = 'v0.1.0-alpha.3' ] || { printf '%s\n' 'adapter binary lacks the source release identity' >&2; exit 1; }
-[ "$("$bootstrap" version)" = 'v0.1.0-alpha.3' ] || { printf '%s\n' 'bootstrap binary lacks the source release identity' >&2; exit 1; }
+[ "$("$adapter" version)" = 'v0.1.0-alpha.4' ] || { printf '%s\n' 'adapter binary lacks the source release identity' >&2; exit 1; }
+[ "$("$bootstrap" version)" = 'v0.1.0-alpha.4' ] || { printf '%s\n' 'bootstrap binary lacks the source release identity' >&2; exit 1; }
 [ -d "$home/.local/state/punaro-bootstrap/current" ] || { printf '%s\n' 'bootstrap current slot was not seeded' >&2; exit 1; }
 [ -x "$attachment" ] || { printf '%s\n' 'attachment binary was not installed' >&2; exit 1; }
 [ -x "$memory" ] || { printf '%s\n' 'memory binary was not installed' >&2; exit 1; }
@@ -288,6 +288,29 @@ PATH="$fixture_dir:$PATH" HOME="$default_home" GOTOOLCHAIN=local GOMODCACHE="$go
 		--machine-id default-path >"$fixture_dir/default.out"
 default_mailbox_dir=$(CDPATH= cd -- "$(dirname -- "$mailbox")" && pwd -P)
 grep -Fqx "PUNARO_AGENT_MAILBOX_BIN=$default_mailbox_dir/$(basename -- "$mailbox")" "$default_home/.config/punaro/adapter.env"
+
+waypost="$fixture_dir/waypost"
+cp "$mailbox" "$waypost"
+waypost_home="$fixture_dir/waypost-home"
+mkdir -p "$waypost_home"
+PATH="$fixture_dir:$PATH" HOME="$waypost_home" GOTOOLCHAIN=local GOMODCACHE="$go_mod_cache" GOCACHE="$go_build_cache" PUNARO_TEST_MAILBOX_LOG="$mailbox_log" \
+	sh "$repo_dir/scripts/install-client.sh" \
+		--relay-url https://relay.example.test \
+		--machine-id waypost-default >"$fixture_dir/waypost-default.out"
+grep -Fqx "PUNARO_AGENT_MAILBOX_BIN=$default_mailbox_dir/waypost" "$waypost_home/.config/punaro/adapter.env"
+grep -Fqx "PUNARO_MAILBOX_STATE_DIR=$waypost_home/.local/state/waypost" "$waypost_home/.config/punaro/adapter.env"
+
+versioned_waypost="$fixture_dir/waypost-0.8"
+cp "$mailbox" "$versioned_waypost"
+versioned_waypost_home="$fixture_dir/versioned-waypost-home"
+mkdir -p "$versioned_waypost_home"
+HOME="$versioned_waypost_home" GOTOOLCHAIN=local GOMODCACHE="$go_mod_cache" GOCACHE="$go_build_cache" PUNARO_TEST_MAILBOX_LOG="$mailbox_log" \
+	sh "$repo_dir/scripts/install-client.sh" \
+		--relay-url https://relay.example.test \
+		--machine-id waypost-versioned \
+		--waypost-bin "$versioned_waypost" >"$fixture_dir/waypost-versioned.out"
+grep -Fqx "PUNARO_AGENT_MAILBOX_BIN=$versioned_waypost" "$versioned_waypost_home/.config/punaro/adapter.env"
+grep -Fqx "PUNARO_MAILBOX_STATE_DIR=$versioned_waypost_home/.local/state/waypost" "$versioned_waypost_home/.config/punaro/adapter.env"
 
 set +e
 HOME="$home" sh "$repo_dir/scripts/install-adapter.sh" --relay-url https://relay.example.test --machine-id 'bad/id' >"$fixture_dir/invalid.out" 2>&1

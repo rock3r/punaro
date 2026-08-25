@@ -31,7 +31,7 @@ SystemCallArchitectures=native
 MemoryDenyWriteExecute=yes
 CapabilityBoundingSet=
 AmbientCapabilities=
-ReadWritePaths=%h/.local/state/punaro-adapter %h/.local/state/punaro-bootstrap %h/.local/state/ai-agent/mailbox
+ReadWritePaths=%h/.local/state/punaro-adapter %h/.local/state/punaro-bootstrap %h/.local/state/waypost
 UMask=0077
 
 [Install]

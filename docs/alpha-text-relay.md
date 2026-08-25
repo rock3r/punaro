@@ -101,7 +101,7 @@ the tunnel and Access policy are not substitutes for the machine signature.
 
 ## Adapter configuration
 
-Create a local `agent-mailbox` group (for example `group/punaro-attached`),
+Create a local Waypost group (for example `group/punaro-attached`),
 bind machine-scoped aliases such as `agent/workstation-review/agent-a`, and add
 those aliases while their agents should be reachable. The adapter polls active
 members, renews their relay lease, injects inbound text locally, and only then
@@ -148,7 +148,7 @@ at an interactive user's mailbox database. Install the reviewed bootstrap as
 to mode `0600`. Add that machine's distinct Access client ID and secret only to
 the private environment file. The unit launches `punaro-bootstrap run` and
 limits writable paths to its private adapter journal, bootstrap slots, and the
-explicit `agent-mailbox` state path, then starts from the same session identity
+explicit Waypost state path, then starts from the same session identity
 as the attached aliases. Install it under
 `~/.config/systemd/user/`, run `systemctl --user daemon-reload`, enable it, and
 start it with `systemctl --user enable --now punaro-adapter.service`. Use
@@ -181,12 +181,12 @@ machines.
 1. Generate the enrollment record as shown above and add only its public JSON
    record to `PUNARO_RELAY_MACHINES_JSON` on the relay. Restart the relay and
    verify its readiness endpoint before continuing.
-2. On the machine, use the `agent-mailbox` MCP `mailbox_bind` operation to bind
+2. On the machine, use the Waypost MCP `waypost_bind` operation to bind
    the explicit alias (for example, `agent/workstation-review/agent-a`). Add it
    to that machine's `group/punaro-attached` group:
 
    ```sh
-   agent-mailbox group add-member \
+   waypost group add-member \
      --group group/punaro-attached \
      --person agent/workstation-review/agent-a
    ```

@@ -1,9 +1,9 @@
 {
   "mcpServers": {
-    "agent-mailbox": {
+    "waypost": {
       "command": "${CLAUDE_PLUGIN_ROOT}/scripts/punaro-plugin-mcp"
     },
-    "agent-mailbox-windows": {
+    "waypost-windows": {
       "command": "${CLAUDE_PLUGIN_ROOT}/scripts/punaro-plugin-mcp.cmd"
     }
   }

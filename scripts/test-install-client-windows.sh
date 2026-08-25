@@ -31,6 +31,8 @@ for expected in \
 	'punaro-enroll.exe' \
 	'retired attachment artifact exists at' \
 	'agent-mailbox' \
+	'[string]$AgentMailboxBin' \
+	'$mailboxIsWaypost' \
 	'AgentGuidanceDir' \
 	'AllowLanHttp' \
 	'PUNARO_ADAPTER_TRUSTED_LAN_CIDR' \
