@@ -111,6 +111,55 @@ type MigrationSourceManifest struct {
 	lastTransition          string
 }
 
+// IsLegacyTelegramMigrationSource identifies the exact v7-shaped predecessor
+// branch that carried Telegram claims and current message metadata without the
+// later profile, rate-limit, direct-message, rename-idempotency, and
+// claim-idempotency tables.
+func IsLegacyTelegramMigrationSource(manifest MigrationSourceManifest) bool {
+	return manifest.Version == 7 &&
+		manifest.TableSHA256.TelegramClaims != "" && manifest.TableSHA256.TelegramParticipants != "" && manifest.TableSHA256.TelegramClaimEvents != "" &&
+		manifest.Counts.RoleProfiles == 0 && manifest.TableSHA256.RoleProfiles == "" &&
+		manifest.Counts.RoleProfileIdempotency == 0 && manifest.TableSHA256.RoleProfileIdempotency == "" &&
+		manifest.Counts.RateBuckets == 0 && manifest.TableSHA256.RateBuckets == "" &&
+		manifest.Counts.DirectConversations == 0 && manifest.TableSHA256.DirectConversations == "" &&
+		manifest.Counts.MessageFromRoles == 0 && manifest.TableSHA256.MessageFromRoles == "" &&
+		manifest.Counts.DirectMessageIdempotency == 0 && manifest.TableSHA256.DirectMessageIdempotency == "" &&
+		manifest.Counts.DisplayNameIdempotency == 0 && manifest.TableSHA256.DisplayNameIdempotency == "" &&
+		manifest.Counts.TelegramClaimIdempotency == 0 && manifest.TableSHA256.TelegramClaimIdempotency == ""
+}
+
+// MigrationSourceTablePresent reports whether one canonical cutover table is
+// represented by the source schema rather than by an empty destination table.
+func MigrationSourceTablePresent(manifest MigrationSourceManifest, table string) bool {
+	legacyTelegram := IsLegacyTelegramMigrationSource(manifest)
+	if legacyTelegram {
+		switch table {
+		case "mail_role_profiles", "mail_role_profile_idempotency", "mail_rate_buckets", "mail_direct_conversations", "mail_message_from_roles", "mail_direct_message_idempotency", "mail_conversation_display_name_idempotency", "mail_telegram_claim_idempotency":
+			return false
+		}
+	}
+	parentRoleOnlyV3 := manifest.Version == 3 && manifest.Counts.ControlEvents == 0 && manifest.Counts.ControlIdempotency == 0 && manifest.TableSHA256.ControlEvents == "" && manifest.TableSHA256.ControlIdempotency == ""
+	if manifest.Version == 1 && (table == "mail_roles" || table == "mail_role_memberships" || table == "mail_role_bindings") {
+		return false
+	}
+	if (manifest.Version <= 2 || parentRoleOnlyV3) && (table == "mail_conversation_controls" || table == "mail_conversation_control_idempotency") {
+		return false
+	}
+	if manifest.Version < 4 && (table == "mail_role_profiles" || table == "mail_role_profile_idempotency") {
+		return false
+	}
+	if manifest.Version < 5 && table == "mail_rate_buckets" {
+		return false
+	}
+	if manifest.Version < 6 && (table == "mail_direct_conversations" || table == "mail_message_from_roles" || table == "mail_direct_message_idempotency") {
+		return false
+	}
+	if manifest.Version < 7 && (table == "mail_telegram_claims" || table == "mail_telegram_participants" || table == "mail_telegram_claim_events" || table == "mail_conversation_display_name_idempotency") {
+		return false
+	}
+	return manifest.Version >= 8 || table != "mail_telegram_claim_idempotency"
+}
+
 type migrationTableSpec struct {
 	name, columns, order string
 }
@@ -149,6 +198,11 @@ var v5MigrationTableSpecs = withParentConversationAndMessageColumns(migrationTab
 var v6MigrationTableSpecs = withParentConversationAndMessageColumns(migrationTableSpecs[:20])
 var v7MigrationTableSpecs = append([]migrationTableSpec(nil), migrationTableSpecs[:24]...)
 
+var legacyTelegramV7MigrationTableSpecs = func() []migrationTableSpec {
+	specs := append([]migrationTableSpec(nil), migrationTableSpecs[:14]...)
+	return append(specs, migrationTableSpecs[20:23]...)
+}()
+
 var roleMigrationTableSpecs = withParentConversationAndMessageColumns(func() []migrationTableSpec {
 	specs := append([]migrationTableSpec(nil), migrationTableSpecs[:11]...)
 	return append(specs, migrationTableSpecs[13])
@@ -180,6 +234,7 @@ var legacyMigrationTableSpecs = []migrationTableSpec{
 }
 
 const v7MigrationSourceSchema = "punaro-relay-sqlite-v7:endpoints;conversations;memberships;roles;role_memberships;role_bindings;messages;deliveries;recipient_cursors;idempotency;conversation_idempotency;conversation_controls;conversation_control_idempotency;request_nonces;role_profiles;role_profile_idempotency;rate_buckets;direct_conversations;message_from_roles;direct_message_idempotency;telegram_claims;telegram_participants;telegram_claim_events;conversation_display_name_idempotency"
+const legacyTelegramV7MigrationSourceSchema = "punaro-relay-sqlite-v7-legacy-telegram:endpoints;conversations;memberships;roles;role_memberships;role_bindings;messages;deliveries;recipient_cursors;idempotency;conversation_idempotency;conversation_controls;conversation_control_idempotency;request_nonces;telegram_claims;telegram_participants;telegram_claim_events"
 const migrationSourceSchema = v7MigrationSourceSchema + ";telegram_claim_idempotency"
 const v6MigrationSourceSchema = "punaro-relay-sqlite-v6:endpoints;conversations;memberships;roles;role_memberships;role_bindings;messages;deliveries;recipient_cursors;idempotency;conversation_idempotency;conversation_controls;conversation_control_idempotency;request_nonces;role_profiles;role_profile_idempotency;rate_buckets;direct_conversations;message_from_roles;direct_message_idempotency"
 const v5MigrationSourceSchema = "punaro-relay-sqlite-v5:endpoints;conversations;memberships;roles;role_memberships;role_bindings;messages;deliveries;recipient_cursors;idempotency;conversation_idempotency;conversation_controls;conversation_control_idempotency;request_nonces;role_profiles;role_profile_idempotency;rate_buckets"
@@ -238,7 +293,7 @@ func CheckMigrationSourceEnrollmentCoverage(ctx context.Context, path, enrollmen
 	}
 	for rows.Next() {
 		var endpoint, machineID string
-		if err := rows.Scan(&endpoint, &machineID); err != nil || !authenticator.AllowsEndpoint(machineID, endpoint) {
+		if err := rows.Scan(&endpoint, &machineID); err != nil || (!authenticator.AllowsEndpoint(machineID, endpoint) && machineID != retiredMigrationMachineID(endpoint)) {
 			_ = rows.Close()
 			return errors.New("relay migration enrollment does not cover every endpoint")
 		}
@@ -296,6 +351,11 @@ func PrepareMigrationSource(ctx context.Context, path, epochID, targetIdentity, 
 		if current.Phase != MigrationSourceActive || current.Fingerprint != expectedFingerprint {
 			return MigrationSourceManifest{}, errors.New("relay migration source changed before preparation")
 		}
+		if IsLegacyTelegramMigrationSource(current) {
+			if err := repairLegacyTelegramMigrationSource(ctx, conn); err != nil {
+				return MigrationSourceManifest{}, err
+			}
+		}
 		if _, err := conn.ExecContext(ctx, `UPDATE endpoints SET lease_until=?,ownership_generation=ownership_generation+1,
 			consumer_id=NULL,consumer_generation=consumer_generation+CASE WHEN consumer_id IS NULL THEN 0 ELSE 1 END,consumer_lease_until=NULL`, now.UTC().UnixMilli()); err != nil {
 			return MigrationSourceManifest{}, errors.New("relay migration endpoint fencing failed")
@@ -311,6 +371,11 @@ func PrepareMigrationSource(ctx context.Context, path, epochID, targetIdentity, 
 			lease_generation=lease_generation+CASE WHEN lease_token IS NULL THEN 0 ELSE 1 END,
 			ownership_generation=NULL,consumer_generation=NULL,lease_until=NULL`); err != nil {
 			return MigrationSourceManifest{}, errors.New("relay migration delivery fencing failed")
+		}
+		if IsLegacyTelegramMigrationSource(current) {
+			if err := verifyRepairedLegacyTelegramMigrationSource(ctx, conn); err != nil {
+				return MigrationSourceManifest{}, err
+			}
 		}
 		prepared, err := inspectMigrationSource(ctx, conn)
 		if err != nil {
@@ -331,6 +396,72 @@ func PrepareMigrationSource(ctx context.Context, path, epochID, targetIdentity, 
 		prepared.lastTransition = "prepared"
 		return prepared, nil
 	})
+}
+
+func retiredMigrationMachineID(endpoint string) string {
+	digest := sha256.Sum256([]byte(endpoint))
+	return "migration-retired-" + hex.EncodeToString(digest[:])
+}
+
+func repairLegacyTelegramMigrationSource(ctx context.Context, conn *sql.Conn) error {
+	rows, err := conn.QueryContext(ctx, `WITH referenced(endpoint) AS (
+		SELECT endpoint FROM memberships
+		UNION SELECT from_endpoint FROM messages
+		UNION SELECT recipient_endpoint FROM deliveries WHERE substr(recipient_endpoint,1,6)<>char(30)||'role:'
+		UNION SELECT recipient_endpoint FROM recipient_cursors WHERE substr(recipient_endpoint,1,6)<>char(30)||'role:'
+		UNION SELECT actor_endpoint FROM conversation_controls
+		UNION SELECT member_endpoint FROM conversation_controls
+		UNION SELECT session_endpoint FROM role_bindings
+		UNION SELECT requested_by_endpoint FROM telegram_claims
+		UNION SELECT actor_endpoint FROM telegram_claim_events
+		UNION SELECT in_reply_to_endpoint FROM messages WHERE in_reply_to_endpoint IS NOT NULL
+	)
+	SELECT referenced.endpoint,COALESCE(min(role_bindings.machine_id),''),count(DISTINCT role_bindings.machine_id)
+	FROM referenced LEFT JOIN endpoints ON endpoints.endpoint=referenced.endpoint
+	LEFT JOIN role_bindings ON role_bindings.session_endpoint=referenced.endpoint
+	WHERE endpoints.endpoint IS NULL GROUP BY referenced.endpoint ORDER BY referenced.endpoint COLLATE BINARY`)
+	if err != nil {
+		return errors.New("relay migration legacy endpoint repair is unavailable")
+	}
+	type missingEndpoint struct{ endpoint, bindingMachine string }
+	var missing []missingEndpoint
+	for rows.Next() {
+		var endpoint, bindingMachine string
+		var bindingMachines int
+		if err := rows.Scan(&endpoint, &bindingMachine, &bindingMachines); err != nil || !ValidEndpoint(endpoint) || bindingMachines > 1 || bindingMachine != "" && !ValidMachineID(bindingMachine) {
+			_ = rows.Close()
+			return errors.New("relay migration legacy endpoint repair is ambiguous")
+		}
+		missing = append(missing, missingEndpoint{endpoint: endpoint, bindingMachine: bindingMachine})
+	}
+	if err := rows.Close(); err != nil || rows.Err() != nil {
+		return errors.New("relay migration legacy endpoint repair is unavailable")
+	}
+	for _, item := range missing {
+		machineID := item.bindingMachine
+		if machineID == "" {
+			machineID = retiredMigrationMachineID(item.endpoint)
+		}
+		if _, err := conn.ExecContext(ctx, `INSERT INTO endpoints(endpoint,machine_id,lease_until,ownership_generation,consumer_id,consumer_generation,consumer_lease_until) VALUES(?,?,0,1,NULL,0,NULL)`, item.endpoint, machineID); err != nil {
+			return errors.New("relay migration legacy endpoint repair cannot be persisted")
+		}
+	}
+	return nil
+}
+
+func verifyRepairedLegacyTelegramMigrationSource(ctx context.Context, q migrationQueryer) error {
+	var invalid bool
+	err := q.QueryRowContext(ctx, `SELECT
+		EXISTS(SELECT 1 FROM memberships m LEFT JOIN endpoints e ON e.endpoint=m.endpoint WHERE e.endpoint IS NULL)
+		OR EXISTS(SELECT 1 FROM messages m LEFT JOIN endpoints e ON e.endpoint=m.from_endpoint WHERE e.endpoint IS NULL)
+		OR EXISTS(SELECT 1 FROM deliveries d LEFT JOIN endpoints e ON e.endpoint=d.recipient_endpoint LEFT JOIN roles r ON substr(d.recipient_endpoint,7)=r.role WHERE (substr(d.recipient_endpoint,1,6)=char(30)||'role:' AND r.role IS NULL) OR (substr(d.recipient_endpoint,1,6)<>char(30)||'role:' AND e.endpoint IS NULL))
+		OR EXISTS(SELECT 1 FROM recipient_cursors c LEFT JOIN endpoints e ON e.endpoint=c.recipient_endpoint LEFT JOIN roles r ON substr(c.recipient_endpoint,7)=r.role WHERE (substr(c.recipient_endpoint,1,6)=char(30)||'role:' AND r.role IS NULL) OR (substr(c.recipient_endpoint,1,6)<>char(30)||'role:' AND e.endpoint IS NULL))
+		OR EXISTS(SELECT 1 FROM deliveries WHERE lease_machine_id IS NOT NULL OR lease_token IS NOT NULL OR ownership_generation IS NOT NULL OR consumer_generation IS NOT NULL OR lease_until IS NOT NULL)
+		OR EXISTS(SELECT 1 FROM role_bindings b LEFT JOIN roles r ON r.role=b.role LEFT JOIN endpoints e ON e.endpoint=b.session_endpoint WHERE r.role IS NULL OR e.endpoint IS NULL OR r.machine_id<>b.machine_id OR e.machine_id<>b.machine_id OR e.ownership_generation<>b.ownership_generation)`).Scan(&invalid)
+	if err != nil || invalid {
+		return errors.New("relay migration legacy source repair is incomplete")
+	}
+	return nil
 }
 
 // AbortPreparedMigrationSource reopens SQLite only before the permanent retire
@@ -467,6 +598,7 @@ func inspectMigrationSource(ctx context.Context, q migrationQueryer) (MigrationS
 	}
 	manifest := MigrationSourceManifest{Version: 3}
 	roleOnly := false
+	legacyTelegram := false
 	tableSpecs, schema := v3MigrationTableSpecs, v3MigrationSourceSchema
 	switch {
 	case roleTables == 0:
@@ -478,6 +610,14 @@ func inspectMigrationSource(ctx context.Context, q migrationQueryer) (MigrationS
 		roleOnly = true
 		manifest.Version = 2
 		tableSpecs, schema = roleMigrationTableSpecs, roleMigrationSourceSchema
+	case telegramTables == 3 && claimIdempotencyTables == 0 && profileTables == 0 && rateBucketTables == 0 && directTables == 0:
+		// The Telegram topic-claim branch was deployed from a supported
+		// predecessor before the later profile, rate-limit, direct-message,
+		// rename-idempotency, and claim-idempotency tables converged on main.
+		// Its conversation/message columns and Telegram tables are v7-shaped.
+		legacyTelegram = true
+		manifest.Version = 7
+		tableSpecs, schema = legacyTelegramV7MigrationTableSpecs, legacyTelegramV7MigrationSourceSchema
 	case claimIdempotencyTables == 1 && telegramTables == 3:
 		manifest.Version = 8
 		tableSpecs, schema = migrationTableSpecs, migrationSourceSchema
@@ -522,7 +662,7 @@ func inspectMigrationSource(ctx context.Context, q migrationQueryer) (MigrationS
 	if manifest.lastTransition != "" && manifest.lastTransition != "prepared" && manifest.lastTransition != "aborted" && manifest.lastTransition != "retired" {
 		return MigrationSourceManifest{}, errors.New("relay migration transition journal is invalid")
 	}
-	if err := verifyMigrationSourceSchemaVersion(ctx, q, manifest.Version, controlTables == 2, profileTables == 2, rateBucketTables == 1, directTables == 3); err != nil {
+	if err := verifyMigrationSourceSchemaVersion(ctx, q, manifest.Version, controlTables == 2, profileTables == 2, rateBucketTables == 1, directTables == 3, legacyTelegram); err != nil {
 		return MigrationSourceManifest{}, err
 	}
 	overall := sha256.New()
@@ -599,11 +739,11 @@ func conversationDisplayNameTypeCheck(version int) string {
 	return " OR (display_name IS NOT NULL AND typeof(display_name)<>'text')"
 }
 
-func verifyMigrationSourceSchemaVersion(ctx context.Context, q migrationQueryer, version int, controls, profiles, rateBuckets, direct bool) error {
+func verifyMigrationSourceSchemaVersion(ctx context.Context, q migrationQueryer, version int, controls, profiles, rateBuckets, direct, legacyTelegram bool) error {
 	if version == 1 {
 		return verifyLegacyMigrationSourceSchema(ctx, q)
 	}
-	return verifyMigrationSourceSchema(ctx, q, version, controls, profiles, rateBuckets, direct)
+	return verifyMigrationSourceSchema(ctx, q, version, controls, profiles, rateBuckets, direct, legacyTelegram)
 }
 
 func verifyLegacyMigrationSourceSchema(ctx context.Context, q migrationQueryer) error {
@@ -639,7 +779,7 @@ func verifyLegacyMigrationSourceSchema(ctx context.Context, q migrationQueryer) 
 	return foreignKeys.Close()
 }
 
-func verifyMigrationSourceSchema(ctx context.Context, q migrationQueryer, version int, controls, profiles, rateBuckets, direct bool) error {
+func verifyMigrationSourceSchema(ctx context.Context, q migrationQueryer, version int, controls, profiles, rateBuckets, direct, legacyTelegram bool) error {
 	rows, err := q.QueryContext(ctx, `SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%' ORDER BY name`)
 	if err != nil {
 		return errors.New("relay migration source schema is unavailable")
@@ -656,6 +796,8 @@ func verifyMigrationSourceSchema(ctx context.Context, q migrationQueryer, versio
 	names = filterOperationalQuotaTables(names)
 	want := []string{"conversation_control_idempotency", "conversation_controls", "conversation_display_name_idempotency", "conversation_idempotency", "conversations", "deliveries", "endpoints", "idempotency", "memberships", "messages", "recipient_cursors", "relay_migration_control", "request_nonces", "role_bindings", "role_memberships", "roles", "telegram_claim_events", "telegram_claim_idempotency", "telegram_claims", "telegram_participants"}
 	switch {
+	case legacyTelegram:
+		want = []string{"conversation_control_idempotency", "conversation_controls", "conversation_idempotency", "conversations", "deliveries", "endpoints", "idempotency", "memberships", "messages", "recipient_cursors", "relay_migration_control", "request_nonces", "role_bindings", "role_memberships", "roles", "telegram_claim_events", "telegram_claims", "telegram_participants"}
 	case direct:
 		want = []string{"conversation_control_idempotency", "conversation_controls", "conversation_display_name_idempotency", "conversation_idempotency", "conversations", "deliveries", "direct_conversations", "direct_message_idempotency", "endpoints", "idempotency", "memberships", "message_from_roles", "messages", "rate_buckets", "recipient_cursors", "relay_migration_control", "request_nonces", "role_bindings", "role_memberships", "role_profile_idempotency", "role_profiles", "roles", "telegram_claim_events", "telegram_claim_idempotency", "telegram_claims", "telegram_participants"}
 	case rateBuckets:
@@ -732,6 +874,10 @@ func verifyMigrationSourceSchema(ctx context.Context, q migrationQueryer, versio
 		delete(expectedColumns, "message_from_roles")
 		delete(expectedColumns, "direct_message_idempotency")
 	}
+	if legacyTelegram {
+		delete(expectedColumns, "conversation_display_name_idempotency")
+		expectedColumns["messages"] = append(expectedColumns["messages"], "to_role:TEXT:0:0:-")
+	}
 	if version < 8 {
 		delete(expectedColumns, "telegram_claim_idempotency")
 	}
@@ -803,6 +949,9 @@ func verifyMigrationSourceSchema(ctx context.Context, q migrationQueryer, versio
 		delete(expectedForeignKeys, "direct_conversations")
 		delete(expectedForeignKeys, "message_from_roles")
 		delete(expectedForeignKeys, "direct_message_idempotency")
+	}
+	if legacyTelegram {
+		delete(expectedForeignKeys, "conversation_display_name_idempotency")
 	}
 	if version < 8 {
 		delete(expectedForeignKeys, "telegram_claim_idempotency")
@@ -892,6 +1041,16 @@ func verifyMigrationSourceSchema(ctx context.Context, q migrationQueryer, versio
 		filtered := expectedIndexes[:0]
 		for _, index := range expectedIndexes {
 			if strings.HasPrefix(index, "telegram_") || strings.HasPrefix(index, "conversation_display_name_idempotency:") {
+				continue
+			}
+			filtered = append(filtered, index)
+		}
+		expectedIndexes = filtered
+	}
+	if legacyTelegram {
+		filtered := expectedIndexes[:0]
+		for _, index := range expectedIndexes {
+			if strings.HasPrefix(index, "conversation_display_name_idempotency:") || index == "telegram_claims:1:c:0:requested_by_machine,idempotency_key" {
 				continue
 			}
 			filtered = append(filtered, index)
@@ -998,6 +1157,9 @@ func verifyMigrationSourceSchema(ctx context.Context, q migrationQueryer, versio
 	if version < 7 {
 		wantTriggers -= 12
 	}
+	if legacyTelegram {
+		wantTriggers -= 3
+	}
 	var quotaTables int
 	if err := q.QueryRowContext(ctx, `SELECT count(*) FROM sqlite_master WHERE type='table' AND name IN ('pending_quota_recipients','pending_quota_install','delivery_terminals')`).Scan(&quotaTables); err != nil || quotaTables != 0 && quotaTables != 2 && quotaTables != 3 {
 		return errors.New("relay migration source schema is unavailable")
@@ -1102,6 +1264,29 @@ func verifyMigrationSourceSchema(ctx context.Context, q migrationQueryer, versio
 		OR EXISTS (SELECT 1 FROM role_profile_idempotency AS retry LEFT JOIN role_profiles AS profile ON profile.role=retry.role WHERE profile.role IS NULL
 			OR typeof(retry.machine_id)<>'text' OR typeof(retry.key)<>'text' OR typeof(retry.request_hash)<>'text' OR typeof(retry.role)<>'text'
 			OR (retry.display_name IS NOT NULL AND typeof(retry.display_name)<>'text') OR typeof(retry.direct_addressable)<>'integer' OR typeof(retry.updated_at)<>'integer' OR typeof(retry.created_at)<>'integer')`
+	}
+	if legacyTelegram {
+		for _, clause := range []string{
+			"\n        OR EXISTS (SELECT 1 FROM memberships AS membership LEFT JOIN endpoints AS endpoint ON endpoint.endpoint=membership.endpoint WHERE endpoint.endpoint IS NULL)",
+			"\n        OR EXISTS (SELECT 1 FROM messages AS message LEFT JOIN endpoints AS endpoint ON endpoint.endpoint=message.from_endpoint WHERE endpoint.endpoint IS NULL)",
+		} {
+			logicalStateQuery = strings.ReplaceAll(logicalStateQuery, clause, "")
+		}
+		logicalStateQuery = strings.Replace(logicalStateQuery,
+			`OR EXISTS (SELECT 1 FROM deliveries WHERE lease_generation<0 OR (lease_token IS NOT NULL AND (ownership_generation<1 OR consumer_generation<0)) OR (acked_at IS NOT NULL AND lease_token IS NOT NULL) OR ((lease_machine_id IS NULL OR lease_token IS NULL OR ownership_generation IS NULL OR consumer_generation IS NULL OR lease_until IS NULL) AND NOT (lease_machine_id IS NULL AND lease_token IS NULL AND ownership_generation IS NULL AND consumer_generation IS NULL AND lease_until IS NULL)))`,
+			`OR EXISTS (SELECT 1 FROM deliveries WHERE lease_generation<0)`, 1)
+		logicalStateQuery = strings.Replace(logicalStateQuery,
+			`OR EXISTS (SELECT 1 FROM deliveries AS delivery LEFT JOIN endpoints AS endpoint ON endpoint.endpoint=delivery.recipient_endpoint LEFT JOIN roles AS role ON substr(delivery.recipient_endpoint,7)=role.role WHERE (substr(delivery.recipient_endpoint,1,6)=char(30)||'role:' AND role.role IS NULL) OR (substr(delivery.recipient_endpoint,1,6)<>char(30)||'role:' AND endpoint.endpoint IS NULL))`,
+			`OR EXISTS (SELECT 1 FROM deliveries AS delivery LEFT JOIN roles AS role ON substr(delivery.recipient_endpoint,7)=role.role WHERE substr(delivery.recipient_endpoint,1,6)=char(30)||'role:' AND role.role IS NULL)`, 1)
+		logicalStateQuery = strings.Replace(logicalStateQuery,
+			`OR EXISTS (SELECT 1 FROM recipient_cursors AS cursor LEFT JOIN endpoints AS endpoint ON endpoint.endpoint=cursor.recipient_endpoint LEFT JOIN roles AS role ON substr(cursor.recipient_endpoint,7)=role.role WHERE (substr(cursor.recipient_endpoint,1,6)=char(30)||'role:' AND role.role IS NULL) OR (substr(cursor.recipient_endpoint,1,6)<>char(30)||'role:' AND endpoint.endpoint IS NULL))`,
+			`OR EXISTS (SELECT 1 FROM recipient_cursors AS cursor LEFT JOIN roles AS role ON substr(cursor.recipient_endpoint,7)=role.role WHERE substr(cursor.recipient_endpoint,1,6)=char(30)||'role:' AND role.role IS NULL)`, 1)
+		logicalStateQuery = strings.Replace(logicalStateQuery,
+			`OR endpoint.machine_id<>binding.machine_id OR endpoint.ownership_generation<>binding.ownership_generation)`,
+			`OR (endpoint.endpoint IS NOT NULL AND endpoint.machine_id<>binding.machine_id))`, 1)
+		logicalStateQuery += `
+		OR EXISTS (SELECT 1 FROM messages WHERE to_role IS NOT NULL)
+		OR EXISTS (SELECT 1 FROM telegram_claims GROUP BY requested_by_machine,idempotency_key HAVING count(*)>1)`
 	}
 	if !controls {
 		for _, clause := range []string{
