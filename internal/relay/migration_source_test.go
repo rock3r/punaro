@@ -1225,6 +1225,32 @@ func TestPrepareLegacyTelegramBranchRepairsDerivedOperationalState(t *testing.T)
 	if err := CheckMigrationSourceEnrollmentCoverage(ctx, path, uncoveredBinding); err == nil {
 		t.Fatal("repaired binding endpoint bypassed enrollment authority")
 	}
+	aborted, err := AbortPreparedMigrationSource(ctx, path, prepared.EpochID, prepared.TargetIdentity, prepared.Fingerprint)
+	if err != nil || aborted.Phase != MigrationSourceActive {
+		t.Fatalf("abort repaired legacy source=%#v err=%v", aborted, err)
+	}
+	db, err = openMigrationSourceDatabase(path, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.ExecContext(ctx, `INSERT INTO request_nonces(machine_id,nonce,expires_at) VALUES('machine-a','post-abort-write',?)`, now.Add(time.Hour).UnixMilli()); err != nil {
+		_ = db.Close()
+		t.Fatal(err)
+	}
+	if err := db.Close(); err != nil {
+		t.Fatal(err)
+	}
+	active, err := InspectMigrationSource(ctx, path)
+	if err != nil || active.Phase != MigrationSourceActive || active.Fingerprint == aborted.Fingerprint {
+		t.Fatalf("inspect written aborted legacy source=%#v err=%v", active, err)
+	}
+	if err := CheckMigrationSourceEnrollmentCoverage(ctx, path, enrollment); err != nil {
+		t.Fatalf("durable repair provenance failed enrollment after abort: %v", err)
+	}
+	retried, err := PrepareMigrationSource(ctx, path, uuid.NewString(), prepared.TargetIdentity, active.Fingerprint, now.Add(2*time.Minute))
+	if err != nil || retried.Phase != MigrationSourcePrepared {
+		t.Fatalf("retry repaired legacy source=%#v err=%v", retried, err)
+	}
 }
 
 func TestPrepareLegacyTelegramBranchRejectsPreexistingRetiredOwner(t *testing.T) {

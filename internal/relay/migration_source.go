@@ -235,6 +235,8 @@ var legacyMigrationTableSpecs = []migrationTableSpec{
 
 const v7MigrationSourceSchema = "punaro-relay-sqlite-v7:endpoints;conversations;memberships;roles;role_memberships;role_bindings;messages;deliveries;recipient_cursors;idempotency;conversation_idempotency;conversation_controls;conversation_control_idempotency;request_nonces;role_profiles;role_profile_idempotency;rate_buckets;direct_conversations;message_from_roles;direct_message_idempotency;telegram_claims;telegram_participants;telegram_claim_events;conversation_display_name_idempotency"
 const legacyTelegramV7MigrationSourceSchema = "punaro-relay-sqlite-v7-legacy-telegram:endpoints;conversations;memberships;roles;role_memberships;role_bindings;messages;deliveries;recipient_cursors;idempotency;conversation_idempotency;conversation_controls;conversation_control_idempotency;request_nonces;telegram_claims;telegram_participants;telegram_claim_events"
+
+const legacyMigrationEndpointRepairsTable = "relay_migration_endpoint_repairs"
 const migrationSourceSchema = v7MigrationSourceSchema + ";telegram_claim_idempotency"
 const v6MigrationSourceSchema = "punaro-relay-sqlite-v6:endpoints;conversations;memberships;roles;role_memberships;role_bindings;messages;deliveries;recipient_cursors;idempotency;conversation_idempotency;conversation_controls;conversation_control_idempotency;request_nonces;role_profiles;role_profile_idempotency;rate_buckets;direct_conversations;message_from_roles;direct_message_idempotency"
 const v5MigrationSourceSchema = "punaro-relay-sqlite-v5:endpoints;conversations;memberships;roles;role_memberships;role_bindings;messages;deliveries;recipient_cursors;idempotency;conversation_idempotency;conversation_controls;conversation_control_idempotency;request_nonces;role_profiles;role_profile_idempotency;rate_buckets"
@@ -287,6 +289,10 @@ func CheckMigrationSourceEnrollmentCoverage(ctx context.Context, path, enrollmen
 	if err != nil {
 		return err
 	}
+	repairedOwners, err := readLegacyMigrationEndpointRepairs(ctx, tx, manifest)
+	if err != nil {
+		return err
+	}
 	rows, err := tx.QueryContext(ctx, `SELECT endpoint, machine_id FROM endpoints ORDER BY endpoint COLLATE BINARY`)
 	if err != nil {
 		return errors.New("relay migration endpoints are unavailable")
@@ -297,7 +303,7 @@ func CheckMigrationSourceEnrollmentCoverage(ctx context.Context, path, enrollmen
 			_ = rows.Close()
 			return errors.New("relay migration enrollment does not cover every endpoint")
 		}
-		retiredRepairEndpoint := IsLegacyTelegramMigrationSource(manifest) && (manifest.Phase == MigrationSourcePrepared || manifest.Phase == MigrationSourceRetired) && machineID == retiredMigrationMachineID(endpoint)
+		retiredRepairEndpoint := repairedOwners[endpoint] == machineID
 		if !authenticator.AllowsEndpoint(machineID, endpoint) && !retiredRepairEndpoint {
 			_ = rows.Close()
 			return errors.New("relay migration enrollment does not cover every endpoint")
@@ -357,7 +363,7 @@ func PrepareMigrationSource(ctx context.Context, path, epochID, targetIdentity, 
 			return MigrationSourceManifest{}, errors.New("relay migration source changed before preparation")
 		}
 		if IsLegacyTelegramMigrationSource(current) {
-			if err := repairLegacyTelegramMigrationSource(ctx, conn); err != nil {
+			if err := repairLegacyTelegramMigrationSource(ctx, conn, current); err != nil {
 				return MigrationSourceManifest{}, err
 			}
 		}
@@ -408,20 +414,81 @@ func retiredMigrationMachineID(endpoint string) string {
 	return "migration-retired-" + hex.EncodeToString(digest[:])
 }
 
-func repairLegacyTelegramMigrationSource(ctx context.Context, conn *sql.Conn) error {
+func readLegacyMigrationEndpointRepairs(ctx context.Context, q migrationQueryer, manifest MigrationSourceManifest) (map[string]string, error) {
+	var tables int
+	if err := q.QueryRowContext(ctx, `SELECT count(*) FROM sqlite_master WHERE type='table' AND name=?`, legacyMigrationEndpointRepairsTable).Scan(&tables); err != nil || tables < 0 || tables > 1 {
+		return nil, errors.New("relay migration legacy endpoint provenance is unavailable")
+	}
+	repairs := make(map[string]string)
+	if tables == 0 {
+		return repairs, nil
+	}
+	journalAllowsRepairs := IsLegacyTelegramMigrationSource(manifest) && (manifest.Phase == MigrationSourcePrepared || manifest.Phase == MigrationSourceRetired || manifest.Phase == MigrationSourceActive && manifest.lastTransition == "aborted")
+	if !journalAllowsRepairs {
+		return nil, errors.New("relay migration legacy endpoint provenance is invalid")
+	}
+	rows, err := q.QueryContext(ctx, `SELECT endpoint,machine_id FROM relay_migration_endpoint_repairs ORDER BY endpoint COLLATE BINARY`)
+	if err != nil {
+		return nil, errors.New("relay migration legacy endpoint provenance is unavailable")
+	}
+	for rows.Next() {
+		var endpoint, machineID string
+		if err := rows.Scan(&endpoint, &machineID); err != nil || !ValidEndpoint(endpoint) || machineID != retiredMigrationMachineID(endpoint) {
+			_ = rows.Close()
+			return nil, errors.New("relay migration legacy endpoint provenance is invalid")
+		}
+		repairs[endpoint] = machineID
+	}
+	if err := rows.Close(); err != nil || rows.Err() != nil {
+		return nil, errors.New("relay migration legacy endpoint provenance is unavailable")
+	}
+	return repairs, nil
+}
+
+func installLegacyMigrationEndpointRepairs(ctx context.Context, conn *sql.Conn) error {
+	if _, err := conn.ExecContext(ctx, `CREATE TABLE relay_migration_endpoint_repairs(endpoint TEXT PRIMARY KEY,machine_id TEXT NOT NULL) WITHOUT ROWID`); err != nil {
+		return errors.New("relay migration legacy endpoint provenance cannot be installed")
+	}
+	for _, operation := range []string{"INSERT", "UPDATE", "DELETE"} {
+		name := "relay_migration_guard_" + legacyMigrationEndpointRepairsTable + "_" + strings.ToLower(operation)
+		statement := fmt.Sprintf(`CREATE TRIGGER %s BEFORE %s ON %s
+			WHEN COALESCE((SELECT phase FROM relay_migration_control WHERE singleton=1), 'missing') <> 'active'
+			BEGIN SELECT RAISE(ABORT, 'relay migration source is not writable'); END`, name, operation, legacyMigrationEndpointRepairsTable) // #nosec G201 -- identifiers come only from fixed internal constants.
+		if _, err := conn.ExecContext(ctx, statement); err != nil { // #nosec G202 -- identifiers come only from fixed internal constants.
+			return errors.New("relay migration legacy endpoint provenance cannot be installed")
+		}
+	}
+	return nil
+}
+
+func repairLegacyTelegramMigrationSource(ctx context.Context, conn *sql.Conn, manifest MigrationSourceManifest) error {
+	repairs, err := readLegacyMigrationEndpointRepairs(ctx, conn, manifest)
+	if err != nil {
+		return err
+	}
 	existing, err := conn.QueryContext(ctx, `SELECT endpoint,machine_id FROM endpoints ORDER BY endpoint COLLATE BINARY`)
 	if err != nil {
 		return errors.New("relay migration legacy endpoint provenance is unavailable")
 	}
 	for existing.Next() {
 		var endpoint, machineID string
-		if err := existing.Scan(&endpoint, &machineID); err != nil || machineID == retiredMigrationMachineID(endpoint) {
+		if err := existing.Scan(&endpoint, &machineID); err != nil || machineID == retiredMigrationMachineID(endpoint) && repairs[endpoint] != machineID {
 			_ = existing.Close()
 			return errors.New("relay migration legacy endpoint provenance is invalid")
 		}
+		delete(repairs, endpoint)
 	}
-	if err := existing.Close(); err != nil || existing.Err() != nil {
+	if err := existing.Close(); err != nil || existing.Err() != nil || len(repairs) != 0 {
 		return errors.New("relay migration legacy endpoint provenance is unavailable")
+	}
+	var repairTables int
+	if err := conn.QueryRowContext(ctx, `SELECT count(*) FROM sqlite_master WHERE type='table' AND name=?`, legacyMigrationEndpointRepairsTable).Scan(&repairTables); err != nil {
+		return errors.New("relay migration legacy endpoint provenance is unavailable")
+	}
+	if repairTables == 0 {
+		if err := installLegacyMigrationEndpointRepairs(ctx, conn); err != nil {
+			return err
+		}
 	}
 	rows, err := conn.QueryContext(ctx, `WITH referenced(endpoint) AS (
 		SELECT endpoint FROM memberships
@@ -463,6 +530,11 @@ func repairLegacyTelegramMigrationSource(ctx context.Context, conn *sql.Conn) er
 		}
 		if _, err := conn.ExecContext(ctx, `INSERT INTO endpoints(endpoint,machine_id,lease_until,ownership_generation,consumer_id,consumer_generation,consumer_lease_until) VALUES(?,?,0,1,NULL,0,NULL)`, item.endpoint, machineID); err != nil {
 			return errors.New("relay migration legacy endpoint repair cannot be persisted")
+		}
+		if item.bindingMachine == "" {
+			if _, err := conn.ExecContext(ctx, `INSERT INTO relay_migration_endpoint_repairs(endpoint,machine_id) VALUES(?,?)`, item.endpoint, machineID); err != nil {
+				return errors.New("relay migration legacy endpoint provenance cannot be persisted")
+			}
 		}
 	}
 	return nil
@@ -799,6 +871,10 @@ func verifyLegacyMigrationSourceSchema(ctx context.Context, q migrationQueryer) 
 }
 
 func verifyMigrationSourceSchema(ctx context.Context, q migrationQueryer, version int, controls, profiles, rateBuckets, direct, legacyTelegram bool) error {
+	var repairTables int
+	if err := q.QueryRowContext(ctx, `SELECT count(*) FROM sqlite_master WHERE type='table' AND name=?`, legacyMigrationEndpointRepairsTable).Scan(&repairTables); err != nil || repairTables < 0 || repairTables > 1 || repairTables == 1 && !legacyTelegram {
+		return errors.New("relay migration source schema is unavailable")
+	}
 	rows, err := q.QueryContext(ctx, `SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%' ORDER BY name`)
 	if err != nil {
 		return errors.New("relay migration source schema is unavailable")
@@ -817,6 +893,9 @@ func verifyMigrationSourceSchema(ctx context.Context, q migrationQueryer, versio
 	switch {
 	case legacyTelegram:
 		want = []string{"conversation_control_idempotency", "conversation_controls", "conversation_idempotency", "conversations", "deliveries", "endpoints", "idempotency", "memberships", "messages", "recipient_cursors", "relay_migration_control", "request_nonces", "role_bindings", "role_memberships", "roles", "telegram_claim_events", "telegram_claims", "telegram_participants"}
+		if repairTables == 1 {
+			want = append(want[:11], append([]string{legacyMigrationEndpointRepairsTable}, want[11:]...)...)
+		}
 	case direct:
 		want = []string{"conversation_control_idempotency", "conversation_controls", "conversation_display_name_idempotency", "conversation_idempotency", "conversations", "deliveries", "direct_conversations", "direct_message_idempotency", "endpoints", "idempotency", "memberships", "message_from_roles", "messages", "rate_buckets", "recipient_cursors", "relay_migration_control", "request_nonces", "role_bindings", "role_memberships", "role_profile_idempotency", "role_profiles", "roles", "telegram_claim_events", "telegram_claim_idempotency", "telegram_claims", "telegram_participants"}
 	case rateBuckets:
@@ -876,6 +955,9 @@ func verifyMigrationSourceSchema(ctx context.Context, q migrationQueryer, versio
 		"direct_conversations":                  {"role_low:TEXT:1:1:-", "role_high:TEXT:1:2:-", "conversation_id:TEXT:1:0:-", "created_at:INTEGER:1:0:-"},
 		"message_from_roles":                    {"message_id:TEXT:0:1:-", "from_role:TEXT:1:0:-"},
 		"direct_message_idempotency":            {"machine_id:TEXT:1:1:-", "key:TEXT:1:2:-", "request_hash:TEXT:1:0:-", "from_role:TEXT:1:0:-", "to_role:TEXT:1:0:-", "conversation_id:TEXT:1:0:-", "message_id:TEXT:1:0:-", "sequence:INTEGER:1:0:-", "created_at:INTEGER:1:0:-"},
+	}
+	if repairTables == 1 {
+		expectedColumns[legacyMigrationEndpointRepairsTable] = []string{"endpoint:TEXT:1:1:-", "machine_id:TEXT:1:0:-"}
 	}
 	if !controls {
 		delete(expectedColumns, "conversation_controls")
@@ -1076,6 +1158,9 @@ func verifyMigrationSourceSchema(ctx context.Context, q migrationQueryer, versio
 		}
 		expectedIndexes = filtered
 	}
+	if repairTables == 1 {
+		expectedIndexes = append(expectedIndexes, legacyMigrationEndpointRepairsTable+":1:pk:0:endpoint")
+	}
 	var actualIndexes []string
 	for table := range expectedColumns {
 		indexes, err := q.QueryContext(ctx, fmt.Sprintf("PRAGMA index_list(%s)", table)) // #nosec G202 -- table comes only from the fixed expectedColumns allowlist.
@@ -1172,6 +1257,9 @@ func verifyMigrationSourceSchema(ctx context.Context, q migrationQueryer, versio
 	}
 	if version < 8 {
 		wantTriggers -= 3
+	}
+	if repairTables == 1 {
+		wantTriggers += 3
 	}
 	if version < 7 {
 		wantTriggers -= 12
