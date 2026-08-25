@@ -1939,6 +1939,10 @@ func TestAdapterWindowsTaskRequiresExactProtectedRunner(t *testing.T) {
 	if !adapterWindowsTaskBound(valid, powershell, runner) {
 		t.Fatal("valid scheduled task rejected")
 	}
+	live := `<?xml version="1.0" encoding="UTF-16"?>` + valid
+	if !adapterWindowsTaskBound(live, powershell, runner) {
+		t.Fatal("valid schtasks XML declaration rejected")
+	}
 	for _, stale := range []string{
 		strings.Replace(valid, "Run-PunaroAdapter.ps1", "attacker.ps1", 1),
 		strings.Replace(valid, "-NoProfile ", "", 1),
