@@ -55,6 +55,25 @@ func TestWindowsPrivateDACL(t *testing.T) {
 	}
 }
 
+func TestWindowsProtectTransferredMaterialReplacesInheritedACLWithOneACE(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "enrollment-material.json")
+	if err := os.WriteFile(path, []byte("private enrollment material"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if privateWindowsACL(path) {
+		t.Skip("temporary file already has an exclusive DACL")
+	}
+	if _, err := readPrivate(path, maxEnrollmentMaterial); err == nil {
+		t.Fatal("inherited transfer ACL was accepted before remediation")
+	}
+	if err := protectEnrollmentMaterial(path); err != nil {
+		t.Fatal(err)
+	}
+	if !privateWindowsACL(path) {
+		t.Fatal("remediated enrollment material does not have one exclusive current-user ACE")
+	}
+}
+
 func TestReservedStateFileNameRejectsWindowsAliases(t *testing.T) {
 	for _, name := range []string{redemptionJournalName, strings.ToUpper(redemptionJournalName), redemptionJournalName + ".", redemptionJournalName + " "} {
 		if !reservedStateFileName(name) {

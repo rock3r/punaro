@@ -77,6 +77,12 @@ release-named identity is embedded metadata, not a pushed tag. It then builds:
   `linux/arm64`, and `windows/amd64`
 - `punaro`, `punaro-telegram`, and `punaro-relay-adopt-prepare` for Linux
 
+The Linux `punaro-linux-{amd64,arm64}` artifact is also the supported
+host-operator handoff for a server update. Operators verify its manifest
+signature and manifest-bound length/digest before an atomic root-owned install;
+server doctor then checks `operator_binary_release` against the durable update
+outcome.
+
 Darwin adapter builds use `CGO_ENABLED=1` so the supported ACL path is compiled
 in. The workflow then writes unsigned `punaro-release.json` and
 `punaro-catalog.json` and creates a **draft** GitHub Release. The private

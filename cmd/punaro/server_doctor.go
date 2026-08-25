@@ -555,7 +555,7 @@ func inspectServerDoctorState(parent context.Context, installation operator.Inst
 		state.AdminPrivate = known(listenerErr == nil, private)
 		_ = administration.Close()
 	}
-	state.UpdateTransaction, state.RecoveryReceipt, state.UpdateRecovery = inspectUpdateState(ctx, installation)
+	state.UpdateTransaction, state.RecoveryReceipt, state.UpdateRecovery, state.OperatorBinaryRelease = inspectUpdateState(ctx, installation)
 	return state
 }
 
@@ -1095,31 +1095,46 @@ func serverGatewaySystemdExecStartBound(body string) bool {
 	return fields["path"] == executable && fields["argv[]"] == executable
 }
 
-func inspectUpdateState(parent context.Context, installation operator.Installation) (knownDoctorBool, knownDoctorBool, knownDoctorBool) {
+func inspectUpdateState(parent context.Context, installation operator.Installation) (knownDoctorBool, knownDoctorBool, knownDoctorBool, knownDoctorBool) {
 	admin, err := openServerDoctorAdministration(parent, installation.OwnerDSNFile)
 	if err != nil {
-		return knownDoctorBool{}, knownDoctorBool{}, knownDoctorBool{}
+		return knownDoctorBool{}, knownDoctorBool{}, knownDoctorBool{}, knownDoctorBool{}
 	}
 	defer func() { _ = admin.Close() }()
 	transaction, err := admin.LatestUpdate(parent)
 	if errors.Is(err, punaropostgres.ErrNotFound) {
-		return known(true, true), serverDoctorRecoveryReceiptCheck(parent, serverDoctorRecoveryReceiptRequest{Directory: installation.Directory, ExpectAbsent: true}), known(true, true)
+		return known(true, true), serverDoctorRecoveryReceiptCheck(parent, serverDoctorRecoveryReceiptRequest{Directory: installation.Directory, ExpectAbsent: true}), known(true, true), operatorBinaryReleaseState(serverBuildRelease, punaropostgres.UpdateTransaction{}, false)
 	}
 	if err != nil {
-		return knownDoctorBool{}, knownDoctorBool{}, knownDoctorBool{}
+		return knownDoctorBool{}, knownDoctorBool{}, knownDoctorBool{}, knownDoctorBool{}
 	}
+	operatorRelease := operatorBinaryReleaseState(serverBuildRelease, transaction, true)
 	terminal := transaction.Phase == punaropostgres.UpdateCommitted || transaction.Phase == punaropostgres.UpdateRecovered || transaction.Phase == punaropostgres.UpdateAborted
 	if transaction.Phase == punaropostgres.UpdateCommitted && serverBuildRelease != "" {
 		terminal = transaction.TargetRelease == serverBuildRelease && transaction.TargetImage == installation.Image && transaction.ComposeSHA256 == serverBuildComposeSHA256 && transaction.MigrationManifestSHA256 == serverBuildMigrationSHA256
 	}
 	if terminal {
-		return known(true, true), serverDoctorRecoveryReceiptCheck(parent, serverDoctorRecoveryReceiptRequest{Directory: installation.Directory, ExpectAbsent: true}), known(true, true)
+		return known(true, true), serverDoctorRecoveryReceiptCheck(parent, serverDoctorRecoveryReceiptRequest{Directory: installation.Directory, ExpectAbsent: true}), known(true, true), operatorRelease
 	}
 	if !updatePhaseRequiresRecoveryReceipt(transaction.Phase) {
-		return known(true, false), serverDoctorRecoveryReceiptCheck(parent, serverDoctorRecoveryReceiptRequest{Directory: installation.Directory, ExpectAbsent: true}), known(true, false)
+		return known(true, false), serverDoctorRecoveryReceiptCheck(parent, serverDoctorRecoveryReceiptRequest{Directory: installation.Directory, ExpectAbsent: true}), known(true, false), operatorRelease
 	}
 	receipt := serverDoctorRecoveryReceiptRequest{Directory: installation.Directory, UpdateID: transaction.UpdateID, BackupID: transaction.BackupID, TargetRelease: transaction.TargetRelease, ManifestSHA256: transaction.BackupManifestSHA256}
-	return known(true, false), serverDoctorRecoveryReceiptCheck(parent, receipt), known(true, false)
+	return known(true, false), serverDoctorRecoveryReceiptCheck(parent, receipt), known(true, false), operatorRelease
+}
+
+func operatorBinaryReleaseState(release string, transaction punaropostgres.UpdateTransaction, found bool) knownDoctorBool {
+	if release == "" {
+		return knownDoctorBool{}
+	}
+	if !found {
+		return known(true, true)
+	}
+	expected := transaction.SourceRelease
+	if transaction.Phase == punaropostgres.UpdateCommitted {
+		expected = transaction.TargetRelease
+	}
+	return known(expected != "", release == expected)
 }
 
 func updatePhaseRequiresRecoveryReceipt(phase punaropostgres.UpdatePhase) bool {

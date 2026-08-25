@@ -161,6 +161,64 @@ func readPrivate(path string, maximum int) ([]byte, error) {
 	}
 	return raw, nil
 }
+
+func protectEnrollmentMaterial(path string) error {
+	if !filepath.IsAbs(path) || filepath.Clean(path) != path {
+		return errors.New("unsafe enrollment material")
+	}
+	before, err := os.Lstat(path)
+	if err != nil {
+		return err
+	}
+	if !before.Mode().IsRegular() || before.Mode()&os.ModeSymlink != 0 || before.Size() < 1 || before.Size() > maxEnrollmentMaterial {
+		return errors.New("unsafe enrollment material")
+	}
+	name, err := windows.UTF16PtrFromString(path)
+	if err != nil {
+		return err
+	}
+	handle, err := windows.CreateFile(
+		name,
+		windows.GENERIC_READ|windows.GENERIC_WRITE|windows.WRITE_DAC|windows.WRITE_OWNER,
+		windows.FILE_SHARE_READ,
+		nil,
+		windows.OPEN_EXISTING,
+		windows.FILE_ATTRIBUTE_NORMAL|windows.FILE_FLAG_OPEN_REPARSE_POINT,
+		0,
+	) // #nosec G304 -- explicit absolute transfer path is opened without following a final reparse point.
+	if err != nil {
+		return err
+	}
+	file := os.NewFile(uintptr(handle), path)
+	opened, err := file.Stat()
+	var details windows.ByHandleFileInformation
+	if detailsErr := windows.GetFileInformationByHandle(handle, &details); err != nil || detailsErr != nil || details.FileAttributes&windows.FILE_ATTRIBUTE_REPARSE_POINT != 0 || details.FileAttributes&windows.FILE_ATTRIBUTE_DIRECTORY != 0 || !opened.Mode().IsRegular() || opened.Size() < 1 || opened.Size() > maxEnrollmentMaterial || !os.SameFile(before, opened) {
+		_ = file.Close()
+		return errors.New("enrollment material changed while opening")
+	}
+	user, acl, err := currentUserFullControlACL()
+	if err != nil {
+		_ = file.Close()
+		return err
+	}
+	if err := windows.SetSecurityInfo(handle, windows.SE_FILE_OBJECT, windows.OWNER_SECURITY_INFORMATION|windows.DACL_SECURITY_INFORMATION|windows.PROTECTED_DACL_SECURITY_INFORMATION, user, nil, acl, nil); err != nil {
+		_ = file.Close()
+		return err
+	}
+	if err := file.Sync(); err != nil {
+		_ = file.Close()
+		return err
+	}
+	if err := file.Close(); err != nil {
+		return err
+	}
+	after, err := os.Lstat(path)
+	if err != nil || !after.Mode().IsRegular() || after.Size() < 1 || after.Size() > maxEnrollmentMaterial || !os.SameFile(opened, after) || !privateWindowsACL(path) {
+		return errors.New("protected enrollment material could not be verified")
+	}
+	return syncPrivateDirectory(filepath.Dir(path))
+}
+
 func writePrivateNew(path string, raw []byte) error {
 	if len(raw) == 0 || !filepath.IsAbs(path) {
 		return errors.New("unsafe private file")
@@ -359,10 +417,18 @@ func privateWindowsACL(path string) bool {
 var protectWindowsPath = protectWindowsPathImpl
 
 func protectWindowsPathImpl(path string) error {
+	user, acl, err := currentUserFullControlACL()
+	if err != nil {
+		return err
+	}
+	return windows.SetNamedSecurityInfo(path, windows.SE_FILE_OBJECT, windows.OWNER_SECURITY_INFORMATION|windows.DACL_SECURITY_INFORMATION|windows.PROTECTED_DACL_SECURITY_INFORMATION, user, nil, acl, nil)
+}
+
+func currentUserFullControlACL() (*windows.SID, *windows.ACL, error) {
 	token := windows.GetCurrentProcessToken()
 	user, err := token.GetTokenUser()
 	if err != nil || user.User.Sid == nil {
-		return errors.New("current user is unavailable")
+		return nil, nil, errors.New("current user is unavailable")
 	}
 	acl, err := windows.ACLFromEntries([]windows.EXPLICIT_ACCESS{{
 		// Use the expanded file FullControl mask rather than GENERIC_ALL so the
@@ -372,7 +438,7 @@ func protectWindowsPathImpl(path string) error {
 		Trustee:           windows.TRUSTEE{TrusteeForm: windows.TRUSTEE_IS_SID, TrusteeValue: windows.TrusteeValueFromSID(user.User.Sid)},
 	}}, nil)
 	if err != nil {
-		return err
+		return nil, nil, err
 	}
-	return windows.SetNamedSecurityInfo(path, windows.SE_FILE_OBJECT, windows.OWNER_SECURITY_INFORMATION|windows.DACL_SECURITY_INFORMATION|windows.PROTECTED_DACL_SECURITY_INFORMATION, user.User.Sid, nil, acl, nil)
+	return user.User.Sid, acl, nil
 }

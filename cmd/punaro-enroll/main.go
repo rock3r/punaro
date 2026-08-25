@@ -112,20 +112,37 @@ func main() { os.Exit(run(os.Args[1:], os.Stdout, os.Stderr)) }
 
 func run(args []string, stdout, stderr io.Writer) int {
 	if len(args) == 0 {
-		_, _ = fmt.Fprintln(stderr, "usage: punaro-enroll prepare|redeem|recover")
+		_, _ = fmt.Fprintln(stderr, "usage: punaro-enroll prepare|protect-material|redeem|recover")
 		return 2
 	}
 	switch args[0] {
 	case "prepare":
 		return runPrepare(args[1:], stdout, stderr)
+	case "protect-material":
+		return runProtectMaterial(args[1:], stdout, stderr)
 	case "redeem":
 		return runRedeem(args[1:], stdout, stderr, false)
 	case "recover":
 		return runRedeem(args[1:], stdout, stderr, true)
 	default:
-		_, _ = fmt.Fprintln(stderr, "usage: punaro-enroll prepare|redeem|recover")
+		_, _ = fmt.Fprintln(stderr, "usage: punaro-enroll prepare|protect-material|redeem|recover")
 		return 2
 	}
+}
+
+func runProtectMaterial(args []string, stdout, stderr io.Writer) int {
+	flags := flag.NewFlagSet("protect-material", flag.ContinueOnError)
+	flags.SetOutput(io.Discard)
+	path := flags.String("file", "", "absolute transferred enrollment-material file")
+	if flags.Parse(args) != nil || flags.NArg() != 0 || *path == "" {
+		return invalid(stderr)
+	}
+	if protectEnrollmentMaterial(*path) != nil {
+		_, _ = fmt.Fprintln(stderr, "punaro-enroll protect-material failed")
+		return 1
+	}
+	_, _ = fmt.Fprintln(stdout, "enrollment material protected")
+	return 0
 }
 
 func runPrepare(args []string, stdout, stderr io.Writer) int {

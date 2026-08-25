@@ -704,6 +704,22 @@ schema-range, rollback-floor, and PostgreSQL-major values match the target
 release. The file must be an absolute private regular file. On the first update
 from an installation without a release-name lock, supply the current release:
 
+The supported host-binary handoff starts from one downloaded target-release
+directory containing `punaro-release.json`, `punaro-release.sig`, and every
+native artifact named by that manifest, plus the independently configured
+public release key. First verify the detached manifest signature with the
+trusted `punaro-release verify` tool, then verify the complete artifact
+directory against that verified manifest with `punaro-release
+verify-artifacts`. Select the matching verified `punaro-linux-ARCH` artifact
+and install it through a
+root-owned `0755` temporary file in `/usr/local/bin` and an atomic same-directory
+rename to `/usr/local/bin/punaro`; do not overwrite it from an unverified
+download stream. Confirm `punaro version` names the target before starting the
+update. After the durable transaction reaches its terminal outcome, server
+doctor must report `operator_binary_release` passing for that outcome. A
+failure uses remediation `install_release_operator_binary`; it never authorizes
+doctor to replace the executable itself.
+
 ```sh
 punaro update \
   --directory /absolute/private/punaro-installation \
