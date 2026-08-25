@@ -104,8 +104,8 @@ file_mode() {
 
 [ -x "$adapter" ] || { printf '%s\n' 'adapter binary was not installed' >&2; exit 1; }
 [ -x "$bootstrap" ] || { printf '%s\n' 'bootstrap binary was not installed' >&2; exit 1; }
-[ "$("$adapter" version)" = 'v0.1.0-alpha.5' ] || { printf '%s\n' 'adapter binary lacks the source release identity' >&2; exit 1; }
-[ "$("$bootstrap" version)" = 'v0.1.0-alpha.5' ] || { printf '%s\n' 'bootstrap binary lacks the source release identity' >&2; exit 1; }
+[ "$("$adapter" version)" = 'v0.1.0-alpha.6' ] || { printf '%s\n' 'adapter binary lacks the source release identity' >&2; exit 1; }
+[ "$("$bootstrap" version)" = 'v0.1.0-alpha.6' ] || { printf '%s\n' 'bootstrap binary lacks the source release identity' >&2; exit 1; }
 [ -d "$home/.local/state/punaro-bootstrap/current" ] || { printf '%s\n' 'bootstrap current slot was not seeded' >&2; exit 1; }
 [ -x "$attachment" ] || { printf '%s\n' 'attachment binary was not installed' >&2; exit 1; }
 [ -x "$memory" ] || { printf '%s\n' 'memory binary was not installed' >&2; exit 1; }
