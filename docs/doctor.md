@@ -37,7 +37,7 @@ snapshot and removed afterward. Doctor accepts Waypost's `waypost.db`,
 paginated group-membership document, and required `waypost_status` /
 `waypost_recv` / `waypost_ack` MCP surface. During a rolling migration it also
 accepts the legacy `mailbox.db`, flat membership array, and complete
-`mailbox_status` / `mailbox_recv` / `mailbox_ack` surface. Both database names
+`mailbox_status` / `mailbox_recv` / `mailbox_ack` / `mailbox_wait` surface. Both database names
 in one configured state directory are ambiguous and fail closed; doctor never
 runs migration or chooses one on the operator's behalf.
 Backup contents, mailbox state, and nested skill trees are traversed in bounded

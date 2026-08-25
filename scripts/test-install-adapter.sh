@@ -300,6 +300,18 @@ PATH="$fixture_dir:$PATH" HOME="$waypost_home" GOTOOLCHAIN=local GOMODCACHE="$go
 grep -Fqx "PUNARO_AGENT_MAILBOX_BIN=$default_mailbox_dir/waypost" "$waypost_home/.config/punaro/adapter.env"
 grep -Fqx "PUNARO_MAILBOX_STATE_DIR=$waypost_home/.local/state/waypost" "$waypost_home/.config/punaro/adapter.env"
 
+versioned_waypost="$fixture_dir/waypost-0.8"
+cp "$mailbox" "$versioned_waypost"
+versioned_waypost_home="$fixture_dir/versioned-waypost-home"
+mkdir -p "$versioned_waypost_home"
+HOME="$versioned_waypost_home" GOTOOLCHAIN=local GOMODCACHE="$go_mod_cache" GOCACHE="$go_build_cache" PUNARO_TEST_MAILBOX_LOG="$mailbox_log" \
+	sh "$repo_dir/scripts/install-client.sh" \
+		--relay-url https://relay.example.test \
+		--machine-id waypost-versioned \
+		--waypost-bin "$versioned_waypost" >"$fixture_dir/waypost-versioned.out"
+grep -Fqx "PUNARO_AGENT_MAILBOX_BIN=$versioned_waypost" "$versioned_waypost_home/.config/punaro/adapter.env"
+grep -Fqx "PUNARO_MAILBOX_STATE_DIR=$versioned_waypost_home/.local/state/waypost" "$versioned_waypost_home/.config/punaro/adapter.env"
+
 set +e
 HOME="$home" sh "$repo_dir/scripts/install-adapter.sh" --relay-url https://relay.example.test --machine-id 'bad/id' >"$fixture_dir/invalid.out" 2>&1
 status=$?
