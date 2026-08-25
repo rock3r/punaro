@@ -65,6 +65,20 @@ if grep -Eq 'PUNARO_CF_ACCESS_CLIENT_(ID|SECRET)=' "$launch_agent"; then
 	exit 1
 fi
 
+for expected in \
+	'PUNARO_MAILBOX_STATE_DIR=/home/operator/.local/state/waypost' \
+	'PUNARO_AGENT_MAILBOX_BIN=/home/operator/.local/bin/waypost'; do
+	if ! grep -Fqx "$expected" "$example"; then
+		printf '%s\n' "adapter environment example is missing Waypost default: $expected" >&2
+		exit 1
+	fi
+done
+
+if ! grep -Fqx 'ReadWritePaths=%h/.local/state/punaro-adapter %h/.local/state/punaro-bootstrap %h/.local/state/waypost' "$unit"; then
+	printf '%s\n' 'adapter user unit must grant write access to the default Waypost state' >&2
+	exit 1
+fi
+
 "$adapter_installer_test"
 "$server_installer_test"
 "$attachment_relay_configurer_test"
@@ -113,7 +127,7 @@ if ! grep -Fqx 'ProtectHome=read-only' "$unit"; then
 	exit 1
 fi
 
-if ! grep -Fqx 'ReadWritePaths=%h/.local/state/punaro-adapter %h/.local/state/punaro-bootstrap %h/.local/state/ai-agent/mailbox' "$unit"; then
+if ! grep -Fqx 'ReadWritePaths=%h/.local/state/punaro-adapter %h/.local/state/punaro-bootstrap %h/.local/state/waypost' "$unit"; then
 	printf '%s\n' 'adapter user unit must limit writable state to its journals, bootstrap slots, and mailbox store' >&2
 	exit 1
 fi
