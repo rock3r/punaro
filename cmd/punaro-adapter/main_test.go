@@ -968,12 +968,12 @@ func TestPluginDoctorValidatesAllAdaptersLauncherAndExactSkillTree(t *testing.T)
 		t.Fatal(err)
 	}
 	oldRelease, oldDigest, oldRuntimeDigest := adapterBuildRelease, adapterExpectedSkillSetDigest, adapterExpectedPluginRuntimeDigest
-	adapterBuildRelease, adapterExpectedSkillSetDigest, adapterExpectedPluginRuntimeDigest = "v0.1.0-alpha.6", digest, runtimeDigest
+	adapterBuildRelease, adapterExpectedSkillSetDigest, adapterExpectedPluginRuntimeDigest = "v0.1.0-alpha.7", digest, runtimeDigest
 	t.Cleanup(func() {
 		adapterBuildRelease, adapterExpectedSkillSetDigest, adapterExpectedPluginRuntimeDigest = oldRelease, oldDigest, oldRuntimeDigest
 	})
 	result := inspectAdapterPlugin(t.Context(), root)
-	if !result.Portable || !result.Codex || !result.Claude || !result.Launcher || result.Version != "v0.1.0-alpha.6" || result.SkillDigest != "sha256:"+digest {
+	if !result.Portable || !result.Codex || !result.Claude || !result.Launcher || result.Version != "v0.1.0-alpha.7" || result.SkillDigest != "sha256:"+digest {
 		t.Fatalf("plugin=%#v", result)
 	}
 	var helperOutput bytes.Buffer
