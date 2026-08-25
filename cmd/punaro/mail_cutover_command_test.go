@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -14,6 +15,24 @@ import (
 	"github.com/rock3r/punaro/internal/postgres"
 	"github.com/rock3r/punaro/internal/relay"
 )
+
+func TestMailCutoverCommandReportsSanitizedExecutionFailure(t *testing.T) {
+	directory := testInstallation(t)
+	relayMachines := filepath.Join(filepath.Dir(directory), "relay-machines.json")
+	const relayMachinesJSON = `[{"id":"machine-a","public_key":"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA","endpoint_prefixes":["agent/a/"],"endpoints":[],"attachment_device_id":""}]`
+	if err := os.WriteFile(relayMachines, []byte(relayMachinesJSON), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	want := "mail cutover target is not empty"
+	execute := func(context.Context, operator.Installation, bool, bool, cutover.Request) (any, error) {
+		return nil, errors.New(want)
+	}
+	var stdout, stderr bytes.Buffer
+	args := []string{"--directory", directory, "--relay-machines-file", relayMachines, "--epoch-id", "019f7f07-8b88-7c12-a394-b663274a6555", "--expected-source-fingerprint", strings.Repeat("a", 64), "--yes"}
+	if code := runMailCutover(args, &stdout, &stderr, execute); code != 1 || stdout.Len() != 0 || stderr.String() != "mail cutover failed: "+want+"\n" {
+		t.Fatalf("code=%d stdout=%q stderr=%q", code, stdout.String(), stderr.String())
+	}
+}
 
 func TestMailCutoverCommandRequiresDryRunBindingAndExplicitConfirmation(t *testing.T) {
 	directory := testInstallation(t)

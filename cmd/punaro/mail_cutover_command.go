@@ -76,7 +76,7 @@ func runMailCutover(args []string, stdout, stderr io.Writer, execute mailCutover
 	defer cancel()
 	value, err := execute(ctx, installation, *dryRun, *abort, request)
 	if err != nil {
-		_, _ = fmt.Fprintln(stderr, "mail cutover failed")
+		_, _ = fmt.Fprintf(stderr, "mail cutover failed: %v\n", err)
 		return 1
 	}
 	return writeJSON(stdout, stderr, value)

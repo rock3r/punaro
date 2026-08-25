@@ -206,7 +206,7 @@ consume the mail budget indefinitely.
 
 SQLite remains the default active relay. Maintainers may explicitly select an
 empty PostgreSQL relay with `PUNARO_RELAY_STORE=postgres` only after completing
-the supported update through schema v9. This selector does not import the SQLite file,
+the supported update through the exact current schema (currently v49). This selector does not import the SQLite file,
 does not dual-write, and is incompatible with the superseded directory and
 attachment routes. Do not point an established installation at an empty
 PostgreSQL relay as a migration shortcut; the verified one-shot mail cutover is
@@ -215,14 +215,21 @@ again while retaining both stores unchanged.
 
 ### One-shot mail cutover
 
-First complete the supported update through the exact current schema v9; the
-preview and execution both fail closed on runtime-compatible schema v8 before
+First complete the supported update through the exact current schema (currently
+v49); the preview and execution both fail closed on any runtime-compatible older schema before
 inspecting or preparing SQLite. Then stop ordinary operator changes, confirm every intended legacy machine is
 `migrated` or explicitly `retired`, and run the read-only preview:
 
 ```sh
 punaro mail cutover --directory /absolute/private/punaro --dry-run
 ```
+
+The preview includes a content-free `preflight` object and `ready` boolean.
+`ready` is false when the PostgreSQL mail target contains unintended rows, any
+legacy machine remains pending, or an incomplete epoch requires recovery. Do
+not execute until `ready` is true and server doctor passes
+`mail_cutover_target`, `mail_cutover_legacy_inventory`, and
+`mail_cutover_recovery`. The preview never changes either authority.
 
 Record the printed `source_fingerprint` and `target_identity`. Prepare one
 protected JSON file containing the complete public static relay enrollment;
@@ -254,6 +261,10 @@ begin can then only observe that tombstone and cannot recreate an import fence.
 
 After success, run `punaro up --directory /absolute/private/punaro` to recreate
 the daemon from the published PostgreSQL and credential-transition settings.
+Only after that server activation succeeds may migrated adapters and the
+Telegram gateway replace their legacy private-key profile entry with the staged
+device-credential-file entry and restart. Switch and doctor one client at a
+time; redemption alone does not make bearer relay authentication available.
 Never reopen or replace the retired SQLite file. Once PostgreSQL accepts new
 mail, recovery uses a PostgreSQL backup or forward repair.
 
@@ -532,8 +543,13 @@ Use `punaro status --directory ...` for a non-mutating report and `punaro doctor
 /absolute/private/server-doctor.env` for an Internet/proxy failing health gate.
 Provision that owner-only profile with `punaro doctor-profile write`; it stores
 only the fixed origin, diagnostic machine ID, and absolute references to
-separately protected Ed25519 and Cloudflare Access credential files. The
-diagnostic machine must be enrolled when relay is enabled; relay-only checks
+exactly one separately protected relay credential (Ed25519 key before mail
+cutover or its migrated device credential after activation) and the Cloudflare
+Access credential file. Migrate the diagnostic identity before cutover but keep
+using its key-backed profile until the server restarts with PostgreSQL
+credential transition; then create a new device-credential-backed profile and
+use it for the post-cutover doctor. The diagnostic machine must be enrolled
+when relay is enabled; relay-only checks
 are optional when relay is intentionally disabled. Access health requires both
 a successful credentialed probe and rejection of a fresh credentialless probe
 before it reaches Punaro. A trusted-LAN installation may derive only its edge
@@ -579,6 +595,12 @@ bounded authentication check. `POST /v1/device/session/revoke` permanently
 revokes only its authenticating client and accepts no target. Forwarded headers
 never qualify a direct request for TLS or trusted-LAN admission. The older
 `client add` spelling remains an alias during the transition.
+
+For a pending registered legacy principal, create the invitation with the exact
+`--legacy-principal-id` and use `punaro-enroll`'s legacy preparation and
+redemption options. The client sends the six-field proof object only to
+`POST /v1/legacy-enrollments/redeem`; the server verifies possession of the
+registered Ed25519 key before atomically marking that inventory row migrated.
 
 ### Consistent backup and clean-stack restore
 

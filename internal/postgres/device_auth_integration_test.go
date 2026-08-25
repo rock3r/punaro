@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/rock3r/punaro/internal/legacyexchange"
 )
 
 func testDeviceAuthIntegration(ctx context.Context, t *testing.T, app *Database, ownerDB *sql.DB) {
@@ -465,12 +466,12 @@ WHERE id = $1`, legacyPending.ID, uuid.NewString(), owner.ID, credential.LookupI
 		t.Fatal(err)
 	}
 	legacyCodeDigest := sha256.Sum256(legacyCode)
-	proof := LegacyExchangeProof{PublicKey: legacyPublic, Signature: ed25519.Sign(legacyPrivate, legacyExchangeTranscript(legacyRedeem, legacyCodeDigest))}
+	proof := LegacyExchangeProof{PublicKey: legacyPublic, Signature: ed25519.Sign(legacyPrivate, legacyexchange.Transcript(legacyRedeem.EnrollmentID, legacyRedeem.ClientBinding, legacyRedeem.IdempotencyKey, legacyCodeDigest))}
 	wrongPublic, wrongPrivate, err := ed25519.GenerateKey(rand.Reader)
 	if err != nil {
 		t.Fatal(err)
 	}
-	wrongProof := LegacyExchangeProof{PublicKey: wrongPublic, Signature: ed25519.Sign(wrongPrivate, legacyExchangeTranscript(legacyRedeem, legacyCodeDigest))}
+	wrongProof := LegacyExchangeProof{PublicKey: wrongPublic, Signature: ed25519.Sign(wrongPrivate, legacyexchange.Transcript(legacyRedeem.EnrollmentID, legacyRedeem.ClientBinding, legacyRedeem.IdempotencyKey, legacyCodeDigest))}
 	if _, err := app.RedeemLegacyEnrollment(ctx, wrongProof, legacyRedeem); !errors.Is(err, ErrInvalidEnrollment) {
 		t.Fatalf("wrong legacy key exchange error=%v", err)
 	}

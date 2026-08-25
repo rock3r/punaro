@@ -88,6 +88,7 @@ type HTTPRelayClient struct {
 	baseURL       *url.URL
 	machineID     string
 	privateKey    ed25519.PrivateKey
+	credential    string
 	httpClient    *http.Client
 	consumerID    string
 	accessToken   AccessServiceToken
@@ -144,12 +145,24 @@ func NewHTTPRelayClient(rawURL, machineID string, privateKey ed25519.PrivateKey,
 // NewHTTPRelayClientWithPolicy creates a signed client with an explicit
 // client-side trusted-LAN plaintext boundary when requested.
 func NewHTTPRelayClientWithPolicy(rawURL, machineID string, privateKey ed25519.PrivateKey, client *http.Client, accessToken AccessServiceToken, policy clienttransport.Policy) (*HTTPRelayClient, error) {
+	return newHTTPRelayClientWithPolicy(rawURL, machineID, privateKey, "", client, accessToken, policy)
+}
+
+// NewDeviceHTTPRelayClientWithPolicy creates a bearer-authenticated relay
+// client for one legacy identity that completed device-credential migration.
+func NewDeviceHTTPRelayClientWithPolicy(rawURL, machineID, credential string, client *http.Client, accessToken AccessServiceToken, policy clienttransport.Policy) (*HTTPRelayClient, error) {
+	return newHTTPRelayClientWithPolicy(rawURL, machineID, nil, credential, client, accessToken, policy)
+}
+
+func newHTTPRelayClientWithPolicy(rawURL, machineID string, privateKey ed25519.PrivateKey, credential string, client *http.Client, accessToken AccessServiceToken, policy clienttransport.Policy) (*HTTPRelayClient, error) {
 	baseURL, err := clienttransport.ValidateOrigin(rawURL, policy)
 	if err != nil {
 		return nil, fmt.Errorf("invalid relay URL")
 	}
-	if strings.TrimSpace(machineID) == "" || len(privateKey) != ed25519.PrivateKeySize {
-		return nil, fmt.Errorf("machine ID and Ed25519 private key are required")
+	validCredential := credential != "" && credential == strings.TrimSpace(credential) && len(credential) <= 1024 && !strings.ContainsAny(credential, "\r\n\x00")
+	validPrivateKey := len(privateKey) == ed25519.PrivateKeySize
+	if strings.TrimSpace(machineID) == "" || (validPrivateKey && validCredential) || (!validPrivateKey && !validCredential) || (!validPrivateKey && len(privateKey) != 0) {
+		return nil, fmt.Errorf("machine ID and exactly one relay credential are required")
 	}
 	if (accessToken.ClientID == "") != (accessToken.ClientSecret == "") {
 		return nil, fmt.Errorf("cloudflare Access service token must contain both ID and secret")
@@ -173,8 +186,40 @@ func NewHTTPRelayClientWithPolicy(rawURL, machineID string, privateKey ed25519.P
 	if accessToken.ClientID != "" {
 		clientCopy.Jar = nil
 	}
-	result := &HTTPRelayClient{baseURL: baseURL, machineID: machineID, privateKey: append(ed25519.PrivateKey(nil), privateKey...), httpClient: &clientCopy, consumerID: consumerID, accessToken: accessToken, requireAccess: requiresAccessAdmission(baseURL)}
+	result := &HTTPRelayClient{baseURL: baseURL, machineID: machineID, privateKey: append(ed25519.PrivateKey(nil), privateKey...), credential: credential, httpClient: &clientCopy, consumerID: consumerID, accessToken: accessToken, requireAccess: requiresAccessAdmission(baseURL)}
 	return result, nil
+}
+
+func (c *HTTPRelayClient) authenticateRequest(request *http.Request, method, path string, body []byte) (string, error) {
+	if c == nil || request == nil {
+		return "", errors.New("relay client is unavailable")
+	}
+	nonce, err := randomNonce()
+	if err != nil {
+		return "", err
+	}
+	if c.credential != "" {
+		request.Header.Set("Authorization", "Bearer "+c.credential)
+		request.Header.Set(relay.RequestCorrelationHeader, nonce)
+		return nonce, nil
+	}
+	timestamp := time.Now().UTC()
+	signed := relay.SignedRequest{MachineID: c.machineID, Method: method, Path: path, Body: body, Timestamp: timestamp, Nonce: nonce}
+	signed.Signature = ed25519.Sign(c.privateKey, relay.CanonicalRequest(signed))
+	request.Header.Set("X-Punaro-Machine", signed.MachineID)
+	request.Header.Set("X-Punaro-Timestamp", signed.Timestamp.Format(time.RFC3339Nano))
+	request.Header.Set("X-Punaro-Nonce", signed.Nonce)
+	request.Header.Set("X-Punaro-Signature", base64.RawURLEncoding.EncodeToString(signed.Signature))
+	return nonce, nil
+}
+
+func (c *HTTPRelayClient) authenticationHeaders(method, path string, body []byte) (http.Header, string, error) {
+	request, err := http.NewRequestWithContext(context.Background(), method, "http://punaro.invalid", nil)
+	if err != nil {
+		return nil, "", err
+	}
+	nonce, err := c.authenticateRequest(request, method, path, body)
+	return request.Header, nonce, err
 }
 
 func requiresAccessAdmission(baseURL *url.URL) bool {
@@ -202,22 +247,15 @@ func (c *HTTPRelayClient) doctor(ctx context.Context, endpoint string) (DoctorPr
 	if c == nil || c.httpClient == nil || c.baseURL == nil {
 		return DoctorProbeResult{}, errors.New("relay doctor client is unavailable")
 	}
-	nonce, err := randomNonce()
-	if err != nil {
-		return DoctorProbeResult{}, err
-	}
-	timestamp := time.Now().UTC()
-	signed := relay.SignedRequest{MachineID: c.machineID, Method: http.MethodHead, Path: relay.DoctorPath, Body: []byte(endpoint), Timestamp: timestamp, Nonce: nonce}
-	signed.Signature = ed25519.Sign(c.privateKey, relay.CanonicalRequest(signed))
 	target := c.baseURL.ResolveReference(&url.URL{Path: relay.DoctorPath})
 	request, err := http.NewRequestWithContext(ctx, http.MethodHead, target.String(), nil)
 	if err != nil {
 		return DoctorProbeResult{}, errors.New("build relay doctor request")
 	}
-	request.Header.Set("X-Punaro-Machine", signed.MachineID)
-	request.Header.Set("X-Punaro-Timestamp", signed.Timestamp.Format(time.RFC3339Nano))
-	request.Header.Set("X-Punaro-Nonce", signed.Nonce)
-	request.Header.Set("X-Punaro-Signature", base64.RawURLEncoding.EncodeToString(signed.Signature))
+	nonce, err := c.authenticateRequest(request, http.MethodHead, relay.DoctorPath, []byte(endpoint))
+	if err != nil {
+		return DoctorProbeResult{}, err
+	}
 	if endpoint != "" {
 		request.Header.Set(relay.DoctorEndpointHeader, endpoint)
 	}
@@ -270,22 +308,15 @@ func (c *HTTPRelayClient) doctor(ctx context.Context, endpoint string) (DoctorPr
 }
 
 func (c *HTTPRelayClient) doctorAccessIsEnforced(ctx context.Context, endpoint string) bool {
-	nonce, err := randomNonce()
-	if err != nil {
-		return false
-	}
-	timestamp := time.Now().UTC()
-	signed := relay.SignedRequest{MachineID: c.machineID, Method: http.MethodHead, Path: relay.DoctorPath, Body: []byte(endpoint), Timestamp: timestamp, Nonce: nonce}
-	signed.Signature = ed25519.Sign(c.privateKey, relay.CanonicalRequest(signed))
 	target := c.baseURL.ResolveReference(&url.URL{Path: relay.DoctorPath})
 	request, err := http.NewRequestWithContext(ctx, http.MethodHead, target.String(), nil)
 	if err != nil {
 		return false
 	}
-	request.Header.Set("X-Punaro-Machine", signed.MachineID)
-	request.Header.Set("X-Punaro-Timestamp", signed.Timestamp.Format(time.RFC3339Nano))
-	request.Header.Set("X-Punaro-Nonce", signed.Nonce)
-	request.Header.Set("X-Punaro-Signature", base64.RawURLEncoding.EncodeToString(signed.Signature))
+	nonce, err := c.authenticateRequest(request, http.MethodHead, relay.DoctorPath, []byte(endpoint))
+	if err != nil {
+		return false
+	}
 	if endpoint != "" {
 		request.Header.Set(relay.DoctorEndpointHeader, endpoint)
 	}
@@ -364,13 +395,10 @@ func (c *HTTPRelayClient) DoctorNotifications(ctx context.Context) (DoctorProbeR
 }
 
 func (c *HTTPRelayClient) openDoctorNotification(ctx context.Context, includeAccess bool) (*websocket.Conn, *http.Response, string, error) {
-	nonce, err := randomNonce()
+	headers, nonce, err := c.authenticationHeaders(http.MethodGet, relay.DoctorNotificationsPath, nil)
 	if err != nil {
 		return nil, nil, "", err
 	}
-	timestamp := time.Now().UTC()
-	signed := relay.SignedRequest{MachineID: c.machineID, Method: http.MethodGet, Path: relay.DoctorNotificationsPath, Timestamp: timestamp, Nonce: nonce}
-	signed.Signature = ed25519.Sign(c.privateKey, relay.CanonicalRequest(signed))
 	target := *c.baseURL
 	if target.Scheme == "https" {
 		target.Scheme = "wss"
@@ -378,11 +406,6 @@ func (c *HTTPRelayClient) openDoctorNotification(ctx context.Context, includeAcc
 		target.Scheme = "ws"
 	}
 	target.Path = relay.DoctorNotificationsPath
-	headers := http.Header{}
-	headers.Set("X-Punaro-Machine", signed.MachineID)
-	headers.Set("X-Punaro-Timestamp", signed.Timestamp.Format(time.RFC3339Nano))
-	headers.Set("X-Punaro-Nonce", signed.Nonce)
-	headers.Set("X-Punaro-Signature", base64.RawURLEncoding.EncodeToString(signed.Signature))
 	if includeAccess && c.accessToken.ClientID != "" {
 		headers.Set("CF-Access-Client-Id", c.accessToken.ClientID)
 		headers.Set("CF-Access-Client-Secret", c.accessToken.ClientSecret)
@@ -773,13 +796,6 @@ func (c *HTTPRelayClient) IssuePermit(ctx context.Context, permitRequest attachm
 	if err != nil {
 		return attachmentv2.Permit{}, fmt.Errorf("encode permit request: %w", err)
 	}
-	nonce, err := randomNonce()
-	if err != nil {
-		return attachmentv2.Permit{}, err
-	}
-	timestamp := time.Now().UTC()
-	signed := relay.SignedRequest{MachineID: c.machineID, Method: http.MethodPost, Path: permitIssuancePath, Body: body, Timestamp: timestamp, Nonce: nonce}
-	signed.Signature = ed25519.Sign(c.privateKey, relay.CanonicalRequest(signed))
 	target := c.baseURL.ResolveReference(&url.URL{Path: permitIssuancePath})
 	request, err := http.NewRequestWithContext(ctx, http.MethodPost, target.String(), bytes.NewReader(body))
 	if err != nil {
@@ -787,10 +803,9 @@ func (c *HTTPRelayClient) IssuePermit(ctx context.Context, permitRequest attachm
 	}
 	request.Header.Set("Content-Type", "application/cbor")
 	request.Header.Set("Accept", "application/cbor")
-	request.Header.Set("X-Punaro-Machine", signed.MachineID)
-	request.Header.Set("X-Punaro-Timestamp", signed.Timestamp.Format(time.RFC3339Nano))
-	request.Header.Set("X-Punaro-Nonce", signed.Nonce)
-	request.Header.Set("X-Punaro-Signature", base64.RawURLEncoding.EncodeToString(signed.Signature))
+	if _, err := c.authenticateRequest(request, http.MethodPost, permitIssuancePath, body); err != nil {
+		return attachmentv2.Permit{}, err
+	}
 	if c.accessToken.ClientID != "" {
 		request.Header.Set("CF-Access-Client-Id", c.accessToken.ClientID)
 		request.Header.Set("CF-Access-Client-Secret", c.accessToken.ClientSecret)
@@ -856,22 +871,14 @@ func (c *HTTPRelayClient) DoV3Attachment(ctx context.Context, method, path strin
 	if err != nil || attachmentv3.VerifyAttachmentRoute(route, permit) != nil {
 		return nil, errors.New("invalid v3 attachment route")
 	}
-	nonce, err := randomNonce()
-	if err != nil {
-		return nil, err
-	}
-	timestamp := time.Now().UTC()
-	signed := relay.SignedRequest{MachineID: c.machineID, Method: method, Path: path, Body: body, Timestamp: timestamp, Nonce: nonce}
-	signed.Signature = ed25519.Sign(c.privateKey, relay.CanonicalRequest(signed))
 	target := c.baseURL.ResolveReference(&url.URL{Path: path})
 	request, err := http.NewRequestWithContext(ctx, method, target.String(), bytes.NewReader(body))
 	if err != nil {
 		return nil, fmt.Errorf("build v3 attachment request: %w", err)
 	}
-	request.Header.Set("X-Punaro-Machine", signed.MachineID)
-	request.Header.Set("X-Punaro-Timestamp", signed.Timestamp.Format(time.RFC3339Nano))
-	request.Header.Set("X-Punaro-Nonce", signed.Nonce)
-	request.Header.Set("X-Punaro-Signature", base64.RawURLEncoding.EncodeToString(signed.Signature))
+	if _, err := c.authenticateRequest(request, method, path, body); err != nil {
+		return nil, err
+	}
 	request.Header.Set("X-Punaro-Attachment-Permit", base64.RawURLEncoding.EncodeToString(permitRaw))
 	request.Header.Set("X-Punaro-Attachment-Operation", base64.RawURLEncoding.EncodeToString(operationRaw))
 	if len(body) > 0 {
@@ -909,13 +916,6 @@ func (c *HTTPRelayClient) doSignedCBOR(ctx context.Context, method, path string,
 	if c == nil || maximum <= 0 || len(body) == 0 || path == "" || contentType != "application/cbor" {
 		return nil, errors.New("invalid signed CBOR request")
 	}
-	nonce, err := randomNonce()
-	if err != nil {
-		return nil, err
-	}
-	timestamp := time.Now().UTC()
-	signed := relay.SignedRequest{MachineID: c.machineID, Method: method, Path: path, Body: body, Timestamp: timestamp, Nonce: nonce}
-	signed.Signature = ed25519.Sign(c.privateKey, relay.CanonicalRequest(signed))
 	target := c.baseURL.ResolveReference(&url.URL{Path: path})
 	request, err := http.NewRequestWithContext(ctx, method, target.String(), bytes.NewReader(body))
 	if err != nil {
@@ -923,10 +923,9 @@ func (c *HTTPRelayClient) doSignedCBOR(ctx context.Context, method, path string,
 	}
 	request.Header.Set("Content-Type", contentType)
 	request.Header.Set("Accept", contentType)
-	request.Header.Set("X-Punaro-Machine", signed.MachineID)
-	request.Header.Set("X-Punaro-Timestamp", signed.Timestamp.Format(time.RFC3339Nano))
-	request.Header.Set("X-Punaro-Nonce", signed.Nonce)
-	request.Header.Set("X-Punaro-Signature", base64.RawURLEncoding.EncodeToString(signed.Signature))
+	if _, err := c.authenticateRequest(request, method, path, body); err != nil {
+		return nil, err
+	}
 	if c.accessToken.ClientID != "" {
 		request.Header.Set("CF-Access-Client-Id", c.accessToken.ClientID)
 		request.Header.Set("CF-Access-Client-Secret", c.accessToken.ClientSecret)
@@ -953,23 +952,15 @@ func (c *HTTPRelayClient) doSignedCBOR(ctx context.Context, method, path string,
 // policy: directory membership and public-key metadata are not public relay
 // content. Callers must still root-verify the returned snapshot before use.
 func (c *HTTPRelayClient) FetchDirectorySnapshot(ctx context.Context) (attachmentv2.DirectorySnapshot, error) {
-	nonce, err := randomNonce()
-	if err != nil {
-		return attachmentv2.DirectorySnapshot{}, err
-	}
-	timestamp := time.Now().UTC()
-	signed := relay.SignedRequest{MachineID: c.machineID, Method: http.MethodGet, Path: directorySnapshotPath, Timestamp: timestamp, Nonce: nonce}
-	signed.Signature = ed25519.Sign(c.privateKey, relay.CanonicalRequest(signed))
 	target := c.baseURL.ResolveReference(&url.URL{Path: directorySnapshotPath})
 	request, err := http.NewRequestWithContext(ctx, http.MethodGet, target.String(), nil)
 	if err != nil {
 		return attachmentv2.DirectorySnapshot{}, fmt.Errorf("build directory request: %w", err)
 	}
 	request.Header.Set("Accept", "application/cbor")
-	request.Header.Set("X-Punaro-Machine", signed.MachineID)
-	request.Header.Set("X-Punaro-Timestamp", signed.Timestamp.Format(time.RFC3339Nano))
-	request.Header.Set("X-Punaro-Nonce", signed.Nonce)
-	request.Header.Set("X-Punaro-Signature", base64.RawURLEncoding.EncodeToString(signed.Signature))
+	if _, err := c.authenticateRequest(request, http.MethodGet, directorySnapshotPath, nil); err != nil {
+		return attachmentv2.DirectorySnapshot{}, err
+	}
 	if c.accessToken.ClientID != "" {
 		request.Header.Set("CF-Access-Client-Id", c.accessToken.ClientID)
 		request.Header.Set("CF-Access-Client-Secret", c.accessToken.ClientSecret)
@@ -999,13 +990,10 @@ func (c *HTTPRelayClient) FetchDirectorySnapshot(ctx context.Context) (attachmen
 // the connection ends. Durable polling remains authoritative.
 func (c *HTTPRelayClient) ReadNotifications(ctx context.Context, receive func(relay.WakeEvent)) error {
 	path := "/v1/notifications"
-	nonce, err := randomNonce()
+	headers, _, err := c.authenticationHeaders(http.MethodGet, path, nil)
 	if err != nil {
 		return err
 	}
-	timestamp := time.Now().UTC()
-	signed := relay.SignedRequest{MachineID: c.machineID, Method: http.MethodGet, Path: path, Timestamp: timestamp, Nonce: nonce}
-	signed.Signature = ed25519.Sign(c.privateKey, relay.CanonicalRequest(signed))
 	target := *c.baseURL
 	if target.Scheme == "https" {
 		target.Scheme = "wss"
@@ -1013,11 +1001,6 @@ func (c *HTTPRelayClient) ReadNotifications(ctx context.Context, receive func(re
 		target.Scheme = "ws"
 	}
 	target.Path = path
-	headers := http.Header{}
-	headers.Set("X-Punaro-Machine", signed.MachineID)
-	headers.Set("X-Punaro-Timestamp", signed.Timestamp.Format(time.RFC3339Nano))
-	headers.Set("X-Punaro-Nonce", signed.Nonce)
-	headers.Set("X-Punaro-Signature", base64.RawURLEncoding.EncodeToString(signed.Signature))
 	if c.accessToken.ClientID != "" {
 		headers.Set("CF-Access-Client-Id", c.accessToken.ClientID)
 		headers.Set("CF-Access-Client-Secret", c.accessToken.ClientSecret)
@@ -1073,23 +1056,16 @@ func (c *HTTPRelayClient) doJSONAllowingWithIdempotency(ctx context.Context, met
 	if err != nil {
 		return 0, fmt.Errorf("encode relay request: %w", err)
 	}
-	nonce, err := randomNonce()
-	if err != nil {
-		return 0, err
-	}
-	timestamp := time.Now().UTC()
-	signed := relay.SignedRequest{MachineID: c.machineID, Method: method, Path: path, Body: body, Timestamp: timestamp, Nonce: nonce}
-	signed.Signature = ed25519.Sign(c.privateKey, relay.CanonicalRequest(signed))
 	target := c.baseURL.ResolveReference(&url.URL{Path: path})
 	httpRequest, err := http.NewRequestWithContext(ctx, method, target.String(), bytes.NewReader(body))
 	if err != nil {
 		return 0, fmt.Errorf("build relay request: %w", err)
 	}
 	httpRequest.Header.Set("Content-Type", "application/json")
-	httpRequest.Header.Set("X-Punaro-Machine", signed.MachineID)
-	httpRequest.Header.Set("X-Punaro-Timestamp", signed.Timestamp.Format(time.RFC3339Nano))
-	httpRequest.Header.Set("X-Punaro-Nonce", signed.Nonce)
-	httpRequest.Header.Set("X-Punaro-Signature", base64.RawURLEncoding.EncodeToString(signed.Signature))
+	nonce, err := c.authenticateRequest(httpRequest, method, path, body)
+	if err != nil {
+		return 0, err
+	}
 	if idempotencyKey != "" {
 		httpRequest.Header.Set("Idempotency-Key", idempotencyKey)
 	}
@@ -1107,11 +1083,16 @@ func (c *HTTPRelayClient) doJSONAllowingWithIdempotency(ctx context.Context, met
 		return 0, fmt.Errorf("relay request failed: %w", err)
 	}
 	defer func() { _ = response.Body.Close() }()
+	responseNonces := response.Header.Values(relay.ResponseNonceHeader)
+	originConfirmed := len(responseNonces) == 1 && responseNonces[0] == nonce
 	if !allowedHTTPStatus(response.StatusCode, allowed) {
 		return response.StatusCode, &relayRejectionError{
 			status:    response.StatusCode,
-			confirmed: response.Header.Get(relay.ResponseNonceHeader) == nonce,
+			confirmed: originConfirmed,
 		}
+	}
+	if c.credential != "" && !originConfirmed {
+		return response.StatusCode, errors.New("relay response origin was not confirmed")
 	}
 	if responseValue == nil || response.StatusCode == http.StatusNoContent {
 		return response.StatusCode, nil

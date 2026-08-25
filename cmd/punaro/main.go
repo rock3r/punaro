@@ -54,6 +54,14 @@ var (
 		defer func() { _ = database.Close() }()
 		return database.MaintenanceActive(ctx)
 	}
+	inspectMailCutoverPreflight = func(ctx context.Context, dsnFile string) (punaropostgres.MailCutoverPreflight, error) {
+		admin, err := punaropostgres.OpenAdministration(ctx, punaropostgres.Config{DSNFile: dsnFile})
+		if err != nil {
+			return punaropostgres.MailCutoverPreflight{}, err
+		}
+		defer func() { _ = admin.Close() }()
+		return admin.InspectMailCutoverPreflight(ctx)
+	}
 	migratePristinePair = func(ctx context.Context, appDSNFile, ownerDSNFile string) (punaropostgres.SchemaState, error) {
 		return punaropostgres.MigratePristinePair(ctx, punaropostgres.Config{DSNFile: appDSNFile}, punaropostgres.Config{DSNFile: ownerDSNFile})
 	}
@@ -687,7 +695,7 @@ func runServerDoctor(args []string, stdout, stderr io.Writer) int {
 
 func runDoctorProfile(args []string, stdout, stderr io.Writer) int {
 	if len(args) == 0 || args[0] != "write" {
-		_, _ = fmt.Fprintln(stderr, "usage: punaro doctor-profile write --out FILE --relay-url URL --machine-id ID --private-key-file FILE --access-token-file FILE")
+		_, _ = fmt.Fprintln(stderr, "usage: punaro doctor-profile write --out FILE --relay-url URL --machine-id ID (--private-key-file FILE | --device-credential-file FILE) --access-token-file FILE")
 		return 2
 	}
 	flags := flag.NewFlagSet("doctor-profile write", flag.ContinueOnError)
@@ -696,11 +704,12 @@ func runDoctorProfile(args []string, stdout, stderr io.Writer) int {
 	relayURL := flags.String("relay-url", "", "fixed relay origin")
 	machineID := flags.String("machine-id", "", "enrolled relay diagnostic machine identity")
 	privateKeyFile := flags.String("private-key-file", "", "absolute protected Ed25519 private-key file")
+	deviceCredentialFile := flags.String("device-credential-file", "", "absolute protected device-credential file")
 	accessTokenFile := flags.String("access-token-file", "", "absolute protected Cloudflare Access service-token file")
 	if flags.Parse(args[1:]) != nil || flags.NArg() != 0 {
 		return 2
 	}
-	if err := writeServerDoctorProfile(strings.TrimSpace(*output), strings.TrimSpace(*relayURL), strings.TrimSpace(*machineID), strings.TrimSpace(*privateKeyFile), strings.TrimSpace(*accessTokenFile)); err != nil {
+	if err := writeServerDoctorProfile(strings.TrimSpace(*output), strings.TrimSpace(*relayURL), strings.TrimSpace(*machineID), strings.TrimSpace(*privateKeyFile), strings.TrimSpace(*deviceCredentialFile), strings.TrimSpace(*accessTokenFile)); err != nil {
 		_, _ = fmt.Fprintln(stderr, "punaro doctor-profile write failed")
 		return 1
 	}
@@ -717,6 +726,7 @@ func unavailableServerDoctorChecks(gatewayColocated bool) []punarodiagnostic.Che
 		"maintenance_fence", "migration_manifest_binding", "owner_credential_file", "postgres_major", "readiness_endpoint", "recovery_receipt", "relay_enrollment",
 		"relay_protocol", "running_image", "storage_capacity", "storage_credential_isolation", "storage_directory_separation", "tunnel_origin", "tunnel_route",
 		"update_recovery", "update_transaction", "verified_backup",
+		"mail_cutover_legacy_inventory", "mail_cutover_recovery", "mail_cutover_target",
 	}
 	checks := []punarodiagnostic.Check{punarodiagnostic.Fail("installation_configuration", "repair_installation_configuration")}
 	for _, code := range codes {
@@ -841,6 +851,26 @@ func diagnoseServer(ctx context.Context, installation operator.Installation, mac
 		checks = append(checks, punarodiagnostic.Fail("host_update_stage", "resume_or_recover_update"))
 	}
 
+	if installation.RelayMachinesJSON == "" {
+		checks = append(checks,
+			punarodiagnostic.OptionalUnavailable("mail_cutover_legacy_inventory", "configure_mail_cutover"),
+			punarodiagnostic.OptionalUnavailable("mail_cutover_recovery", "configure_mail_cutover"),
+			punarodiagnostic.OptionalUnavailable("mail_cutover_target", "configure_mail_cutover"),
+		)
+	} else if preflight, err := inspectMailCutoverPreflight(ctx, installation.OwnerDSNFile); err != nil {
+		checks = append(checks,
+			punarodiagnostic.Unavailable("mail_cutover_legacy_inventory", "inspect_legacy_inventory"),
+			punarodiagnostic.Unavailable("mail_cutover_recovery", "inspect_mail_cutover_recovery"),
+			punarodiagnostic.Unavailable("mail_cutover_target", "inspect_mail_cutover_target"),
+		)
+	} else {
+		checks = append(checks,
+			serverBoolDoctorCheck(preflight.LegacyPending == 0, "mail_cutover_legacy_inventory", "migrate_or_retire_pending_legacy_machines"),
+			serverBoolDoctorCheck(preflight.IncompleteEpochs == 0, "mail_cutover_recovery", "resume_or_abort_mail_cutover"),
+			serverBoolDoctorCheck(preflight.ActiveEpochs == 1 || preflight.TargetRows == 0, "mail_cutover_target", "empty_unintended_mail_cutover_target"),
+		)
+	}
+
 	base := strings.TrimRight(installation.HealthURL, "/")
 	if err := probe(ctx, base+"/healthz"); err != nil {
 		checks = append(checks, punarodiagnostic.Fail("health_endpoint", "repair_server_service"))
@@ -854,6 +884,13 @@ func diagnoseServer(ctx context.Context, installation operator.Installation, mac
 	}
 
 	return punarodiagnostic.NewComponentReport(punarodiagnostic.ComponentServer, identity, checks)
+}
+
+func serverBoolDoctorCheck(ok bool, code, remediation string) punarodiagnostic.Check {
+	if ok {
+		return punarodiagnostic.Pass(code)
+	}
+	return punarodiagnostic.Fail(code, remediation)
 }
 
 func serverDoctorCapabilities(installation operator.Installation) []string {

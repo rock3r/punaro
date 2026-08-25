@@ -145,8 +145,11 @@ func TestStateMatchRejectsCrossDeviceOriginAndLegacyIdentity(t *testing.T) {
 	if err != nil {
 		t.Fatalf("parse fresh identity: %v", err)
 	}
-	if err := fresh.Match("https://punaro.example", "11111111-1111-4111-8111-111111111111", "adapter-machine"); err != nil {
-		t.Fatalf("fresh identity adapter match: %v", err)
+	if err := fresh.Match("https://punaro.example", "11111111-1111-4111-8111-111111111111", ""); err != nil {
+		t.Fatalf("fresh identity match: %v", err)
+	}
+	if err := fresh.Match("https://punaro.example", "11111111-1111-4111-8111-111111111111", "adapter-machine"); err == nil {
+		t.Fatal("fresh identity unexpectedly changed to legacy mode")
 	}
 	if err := fresh.MatchLegacyAdapter("https://punaro.example", "11111111-1111-4111-8111-111111111111", "adapter-machine"); err == nil {
 		t.Fatal("fresh identity unexpectedly matched a legacy adapter")

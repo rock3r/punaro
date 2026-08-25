@@ -80,6 +80,33 @@ punaro doctor \
   --timeout 20s
 ```
 
+The profile contains exactly one relay credential reference. Before mail
+cutover, use the enrolled diagnostic machine's private key as above and migrate
+that same identity through the proof-bound legacy enrollment workflow. Keep the
+key-backed profile active until the server has published cutover and restarted
+with the PostgreSQL credential-transition runtime. Then create a new protected
+profile path (the writer never overwrites an existing file) using the staged
+device credential:
+
+```sh
+punaro doctor-profile write \
+  --out /absolute/private/server-doctor-device.env \
+  --relay-url https://punaro.example \
+  --machine-id server-doctor \
+  --device-credential-file /absolute/private/server-doctor.credential \
+  --access-token-file /absolute/private/server-doctor-access.env
+
+punaro doctor \
+  --directory /absolute/private/installation \
+  --machine-id punaro-lxc \
+  --relay-profile /absolute/private/server-doctor-device.env \
+  --timeout 20s
+```
+
+Supplying both credential-file flags or neither is rejected. The isolated
+profile helper reads the selected protected credential without placing it in
+the report, logs, argv, or environment.
+
 `--machine-id` is required and is the stable public identity used to match this
 report in fleet doctor. A separately deployed Telegram gateway is the default;
 its local-service checks are optional in the server report and its own
@@ -209,6 +236,15 @@ Database, storage, and update recovery: `database_connection`,
 `owner_credential_file`, `application_credential_file`,
 `attachment_blob_directory`, `blob_storage_private`.
 
+Mail cutover readiness: `mail_cutover_legacy_inventory`,
+`mail_cutover_recovery`, `mail_cutover_target`. Before activation these checks
+require no pending legacy machines, no incomplete epoch, and an empty target;
+after activation the bound active target is accepted. The content-free
+remediations are `configure_mail_cutover`, `inspect_legacy_inventory`,
+`inspect_mail_cutover_recovery`, `inspect_mail_cutover_target`,
+`migrate_or_retire_pending_legacy_machines`, `resume_or_abort_mail_cutover`,
+and `empty_unintended_mail_cutover_target`.
+
 `postgres_major` passes only when the running server reports the exact major
 compiled into that release and used by its release manifest; accepting any
 newer generic PostgreSQL floor would hide restore or partial-upgrade drift.
@@ -254,6 +290,9 @@ Installer-path alias resolution, private data-directory validation, and the
 mailbox snapshot/MCP inspection run together in a deadline-isolated child.
 Stalled installer-selected storage therefore makes these checks unavailable
 without extending the adapter doctor's total timeout.
+`machine_credential_file` accepts exactly one protected legacy Ed25519 key file
+or migrated device-credential file. Both configured together, an unsafe file,
+or a credential in an environment value fails configuration before transport.
 
 Relay and attachment state: `relay_transport`, `relay_origin`, `relay_access`,
 `relay_enrollment`, `relay_protocol`, `notification_transport`,
@@ -337,6 +376,8 @@ Configuration, service, and upstreams: `telegram_configuration`,
 `relay_transport`, `relay_origin`, `relay_access`, `relay_enrollment`,
 `relay_protocol`, `notification_transport`, `notification_origin`,
 `notification_access`, `notification_enrollment`, `notification_protocol`.
+The gateway applies the same exactly-one protected legacy-key or migrated
+device-credential-file rule as the adapter.
 On Linux, `gateway_service_executable` verifies both the installed unit and
 systemd's effective `ExecStart`, so a drop-in cannot redirect the running
 service while leaving the base unit apparently valid. On macOS, it

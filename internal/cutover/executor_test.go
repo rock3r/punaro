@@ -34,7 +34,7 @@ func TestExecutorCrossesBoundariesInOrderAndPublishesLast(t *testing.T) {
 	if err != nil || result.Phase != postgres.MailCutoverActive || result.SourcePhase != relay.MigrationSourceRetired {
 		t.Fatalf("result=%#v err=%v", result, err)
 	}
-	want := []string{"schema-readiness", "identity", "inspect", "coverage", "prepare", "coverage", "begin", "checkpoint:mail_endpoints", "read:mail_endpoints", "stage:mail_endpoints"}
+	want := []string{"schema-readiness", "identity", "inspect", "preflight", "coverage", "prepare", "coverage", "begin", "checkpoint:mail_endpoints", "read:mail_endpoints", "stage:mail_endpoints"}
 	if len(events) < len(want) || !reflect.DeepEqual(events[:len(want)], want) {
 		t.Fatalf("events=%v want prefix=%v", events, want)
 	}
@@ -101,7 +101,7 @@ func TestDryRunDoesNotMutateEitherAuthority(t *testing.T) {
 	manifest := testManifest(relay.MigrationSourceActive)
 	var events []string
 	plan, err := (Executor{Source: &fakeSource{manifest: manifest, events: &events}, Destination: &fakeDestination{identity: manifest.TargetIdentity, events: &events}}).DryRun(context.Background())
-	if err != nil || plan.SourceFingerprint != manifest.Fingerprint || plan.TargetIdentity != manifest.TargetIdentity || !reflect.DeepEqual(events, []string{"schema-readiness", "identity", "inspect"}) {
+	if err != nil || plan.SourceFingerprint != manifest.Fingerprint || plan.TargetIdentity != manifest.TargetIdentity || !plan.Ready || !reflect.DeepEqual(events, []string{"schema-readiness", "identity", "inspect", "preflight"}) {
 		t.Fatalf("plan=%#v events=%v err=%v", plan, events, err)
 	}
 }
@@ -136,8 +136,27 @@ func TestExecutorRefusesUncoveredEnrollmentBeforePreparingSource(t *testing.T) {
 		Enrollment:  "test-enrollment",
 	}
 	_, err := executor.Execute(context.Background(), Request{ActorPrincipalID: "11111111-1111-4111-8111-111111111111", EpochID: manifest.EpochID, ExpectedSourceFingerprint: manifest.Fingerprint, Cutoff: time.Now().UTC()})
-	if !errors.Is(err, coverageErr) || !reflect.DeepEqual(events, []string{"schema-readiness", "identity", "inspect", "coverage"}) || source.manifest.Phase != relay.MigrationSourceActive {
+	if !errors.Is(err, coverageErr) || !reflect.DeepEqual(events, []string{"schema-readiness", "identity", "inspect", "preflight", "coverage"}) || source.manifest.Phase != relay.MigrationSourceActive {
 		t.Fatalf("source=%#v events=%v err=%v", source.manifest, events, err)
+	}
+}
+
+func TestExecutorRefusesUnreadyPreflightBeforePreparingSource(t *testing.T) {
+	t.Parallel()
+	manifest := testManifest(relay.MigrationSourceActive)
+	for name, preflight := range map[string]postgres.MailCutoverPreflight{
+		"target":   {TargetRows: 1},
+		"legacy":   {LegacyPending: 1},
+		"recovery": {IncompleteEpochs: 1},
+	} {
+		t.Run(name, func(t *testing.T) {
+			var events []string
+			source := &fakeSource{manifest: manifest, events: &events}
+			executor := Executor{Source: source, Destination: &fakeDestination{identity: manifest.TargetIdentity, events: &events, preflight: preflight}, Publish: func(context.Context, operator.MailCutoverPublication) error { return nil }, Enrollment: "test-enrollment"}
+			if _, err := executor.Execute(context.Background(), Request{ActorPrincipalID: "11111111-1111-4111-8111-111111111111", EpochID: manifest.EpochID, ExpectedSourceFingerprint: manifest.Fingerprint, Cutoff: time.Now().UTC()}); err == nil || !reflect.DeepEqual(events, []string{"schema-readiness", "identity", "inspect", "preflight"}) || source.manifest.Phase != relay.MigrationSourceActive {
+				t.Fatalf("source=%#v events=%v err=%v", source.manifest, events, err)
+			}
+		})
 	}
 }
 
@@ -260,11 +279,16 @@ type fakeDestination struct {
 	statusErr          error
 	readinessErr       error
 	schemaReadinessErr error
+	preflight          postgres.MailCutoverPreflight
 }
 
 func (d *fakeDestination) CheckMailCutoverSchemaReadiness(context.Context) error {
 	*d.events = append(*d.events, "schema-readiness")
 	return d.schemaReadinessErr
+}
+func (d *fakeDestination) InspectMailCutoverPreflight(context.Context) (postgres.MailCutoverPreflight, error) {
+	*d.events = append(*d.events, "preflight")
+	return d.preflight, nil
 }
 func (d *fakeDestination) Identity(context.Context) (string, error) {
 	*d.events = append(*d.events, "identity")

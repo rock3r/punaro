@@ -614,7 +614,8 @@ epochs and retired SQLite sources are permanently non-abortable. A begin that
 failed before epoch insertion is aborted by durably reserving the exact epoch
 as terminal before SQLite reopens, fencing every delayed retry of that begin.
 
-M-5 mounts `POST /v1/enrollments/redeem`, authenticated
+M-5 mounts `POST /v1/enrollments/redeem`, the proof-bound legacy exchange at
+`POST /v1/legacy-enrollments/redeem`, authenticated
 `GET /v1/device/session`, and targetless `POST /v1/device/session/revoke`.
 Redemption requires exact `application/json`, a
 bounded object with four unique string fields, and the store's exact enrollment

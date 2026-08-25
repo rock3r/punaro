@@ -502,6 +502,16 @@ punaro-enroll prepare \
   --state-dir "$HOME/.config/punaro/device-enrollment"
 ```
 
+For a registered legacy adapter or gateway, bind preparation to its exact
+existing machine ID:
+
+```sh
+punaro-enroll prepare \
+  --origin https://punaro.example \
+  --state-dir "$HOME/.config/punaro/device-enrollment" \
+  --legacy-machine-id EXISTING_MACHINE_ID
+```
+
 The command prints only the canonical origin and an opaque `client_binding`.
 Give that public value to the server owner. The owner previews and creates the
 least-privilege grant with `punaro-admin client invite --machine-id ID`; the
@@ -513,6 +523,9 @@ unchanged through an approved protected channel into a current-user-only regular
 file on that client. Do not paste it
 into terminal commands, shell history, environment variables, diagnostic
 bundles, or source-controlled configuration.
+For a legacy exchange the owner also supplies the exact content-free
+`--legacy-principal-id` from `punaro-admin legacy list`; the new machine ID must
+remain the existing registered machine ID.
 
 Redeem that protected file on the client:
 
@@ -522,6 +535,23 @@ punaro-enroll redeem \
   --enrollment-file /absolute/private/enrollment-material.json \
   --credential-file "$HOME/.config/punaro/device-enrollment/device.credential"
 ```
+
+For the legacy state prepared above, add only the absolute protected old-key
+file path. The client signs a transcript binding the one-time material,
+idempotency key, and decoded code digest, and sends the public key and signature
+to the dedicated exchange route; it never sends or prints the private key:
+
+```sh
+punaro-enroll redeem \
+  --state-dir "$HOME/.config/punaro/device-enrollment" \
+  --enrollment-file /absolute/private/enrollment-material.json \
+  --credential-file "$HOME/.config/punaro/device-enrollment/device.credential" \
+  --legacy-private-key-file /absolute/private/existing-machine.key
+```
+
+Repeat the same legacy-key-file option with `recover` after an interrupted
+exchange. A wrong key, unregistered key, stale material, or already retired
+identity returns the same content-free rejection.
 
 If the public origin is protected by Cloudflare Access, create a distinct
 service token for this device and have its secret manager write the paired
@@ -553,7 +583,10 @@ recovery journal before redemption. If a network interruption occurs, rerun
 the same `redeem` command; if the transfer file is gone, use `punaro-enroll
 recover` with the state and credential paths, and include the same
 `--access-file` when the origin is Access-protected. The retry has the same
-idempotency key, so it cannot mint a second device credential. The server retains that
+idempotency key, so it cannot mint a second device credential. A legacy journal
+also binds the non-secret public key; supplying a different private-key file is
+rejected locally without contacting the server or discarding recovery state.
+The server retains that
 recovery record while its non-expiring credential and principal remain active;
 after revocation or disablement, request a new enrollment. A rejected (including
 expired-first-use, already-used, or revoked) enrollment fails closed and tells the user
@@ -561,6 +594,25 @@ to request a new enrollment; its private recovery journal is removed so the
 replacement material is not blocked. After success, remove the transferred material
 through its approved secret-handling process; the identity sidecar remains
 non-secret and the recovery journal is removed.
+
+For a legacy adapter or Telegram gateway, successful redemption only marks the
+server inventory `migrated` and stages the protected bearer credential. Keep
+the service running with its unchanged `PUNARO_MACHINE_PRIVATE_KEY_FILE` while
+the remaining legacy machines migrate. A bearer cannot authenticate the relay
+until the owner completes mail cutover and restarts the server with the
+published PostgreSQL relay and credential-transition settings; switching the
+profile earlier takes the client offline.
+
+Only after that server activation succeeds, replace
+`PUNARO_MACHINE_PRIVATE_KEY_FILE=...` with exactly one absolute
+`PUNARO_DEVICE_CREDENTIAL_FILE=/absolute/private/device.credential` entry, keep
+the same `PUNARO_MACHINE_ID`, relay origin, Access pair, and endpoint authority,
+then restart the client service and require its doctor report to pass. Never
+retain both credential entries. The adapter and gateway load the bearer only
+from the protected file, send it only in the `Authorization` header, and never
+place it in argv, environment values, reports, or logs. Keep the old private
+key until the new doctor probe passes; remove it later through the approved
+secret-retirement process.
 
 The server owner lists and permanently revokes installed clients with
 `punaro-admin client list` and `punaro-admin client revoke`, using only

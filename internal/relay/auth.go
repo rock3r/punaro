@@ -318,8 +318,11 @@ func (a *Authenticator) AuthenticateHTTPSession(request *http.Request, body []by
 // authentication escape hatch for mutating APIs.
 func (a *Authenticator) AuthenticateReadOnlyDoctor(request *http.Request, body []byte, now time.Time) (MachineSession, error) {
 	validRoute := request != nil && request.URL != nil && ((request.Method == http.MethodHead && request.URL.Path == DoctorPath) || (request.Method == http.MethodGet && request.URL.Path == DoctorNotificationsPath))
-	if a == nil || !validRoute || len(body) != 0 || request.Header.Get("Authorization") != "" {
+	if a == nil || !validRoute || len(body) != 0 {
 		return MachineSession{}, ErrForbidden
+	}
+	if authorization := request.Header.Get("Authorization"); authorization != "" {
+		return a.authenticateTransitionDevice(request, authorization)
 	}
 	timestamp, err := time.Parse(time.RFC3339Nano, request.Header.Get("X-Punaro-Timestamp"))
 	if err != nil {

@@ -26,8 +26,13 @@ const (
 	DoctorNotificationsPath = "/v1/doctor/notifications"
 	// ResponseNonceHeader confirms that a response came from the authenticated
 	// Punaro route rather than an Access or reverse-proxy intermediary which
-	// rejected the request without echoing the signed per-request nonce.
+	// rejected the request without echoing the per-request origin proof.
 	ResponseNonceHeader = "X-Punaro-Response-Nonce"
+	// RequestCorrelationHeader carries a random, non-secret bearer-client
+	// origin proof. Device credentials cannot send signed-request headers, so
+	// this separate token preserves intermediary-rejection detection without
+	// weakening the authentication boundary.
+	RequestCorrelationHeader = "X-Punaro-Request-Correlation"
 	// ProtocolHeader carries the bounded relay protocol identity.
 	ProtocolHeader = "X-Punaro-Protocol"
 	// DoctorEndpointHeader selects one endpoint owned by the authenticated
@@ -98,7 +103,7 @@ type handler struct {
 }
 
 func (h *handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
-	if nonce := r.Header.Get("X-Punaro-Nonce"); nonce != "" {
+	if nonce := responseNonce(r); nonce != "" {
 		w.Header().Set(ResponseNonceHeader, nonce)
 	}
 	h.serveHTTP(w, r)
@@ -136,7 +141,7 @@ func (h *handler) serveHTTP(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusUnauthorized, "authentication required")
 		return
 	}
-	w.Header().Set(ResponseNonceHeader, r.Header.Get("X-Punaro-Nonce"))
+	w.Header().Set(ResponseNonceHeader, responseNonce(r))
 	machineID := session.MachineID
 	authority := PrincipalAuthority{PrincipalID: session.PrincipalID, CredentialLookupID: session.CredentialLookupID, CredentialGeneration: session.CredentialGeneration}
 	now := h.now().UTC()
@@ -262,7 +267,7 @@ func (h *handler) doctor(w http.ResponseWriter, r *http.Request, body []byte) {
 		return
 	}
 	w.Header().Set("Cache-Control", "no-store")
-	w.Header().Set(ResponseNonceHeader, r.Header.Get("X-Punaro-Nonce"))
+	w.Header().Set(ResponseNonceHeader, responseNonce(r))
 	w.Header().Set(ProtocolHeader, strconv.Itoa(ProtocolVersion))
 	if backend, ok := h.store.(AttachmentDoctorBackend); ok {
 		if snapshot, snapshotErr := backend.DoctorAttachments(session.MachineID, h.now().UTC()); snapshotErr == nil {
@@ -289,13 +294,27 @@ func (h *handler) doctorNotifications(w http.ResponseWriter, r *http.Request, bo
 		return
 	}
 	w.Header().Set("Cache-Control", "no-store")
-	w.Header().Set(ResponseNonceHeader, r.Header.Get("X-Punaro-Nonce"))
+	w.Header().Set(ResponseNonceHeader, responseNonce(r))
 	w.Header().Set(ProtocolHeader, strconv.Itoa(ProtocolVersion))
 	connection, err := websocket.Accept(w, r, &websocket.AcceptOptions{CompressionMode: websocket.CompressionDisabled})
 	if err != nil {
 		return
 	}
 	_ = connection.Close(websocket.StatusNormalClosure, "")
+}
+
+func responseNonce(request *http.Request) string {
+	if request == nil {
+		return ""
+	}
+	if nonce := request.Header.Get("X-Punaro-Nonce"); nonce != "" {
+		return nonce
+	}
+	correlation := request.Header.Get(RequestCorrelationHeader)
+	if !ValidRequestToken(correlation) {
+		return ""
+	}
+	return correlation
 }
 
 func (h *handler) registerRole(w http.ResponseWriter, body []byte, machineID string, now time.Time, idempotencyKey string) {

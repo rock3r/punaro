@@ -227,6 +227,43 @@ func TestLoadConfigRequiresExplicitTelegramGatewayIdentity(t *testing.T) {
 	}
 }
 
+func TestLoadConfigAcceptsProtectedDeviceCredentialExclusively(t *testing.T) {
+	directory := t.TempDir()
+	credentialDirectory, err := os.MkdirTemp(".", ".telegram-device-credential-*")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(credentialDirectory) })
+	if err := os.Chmod(credentialDirectory, 0o700); err != nil { // #nosec G302 -- private credential fixture directory.
+		t.Fatal(err)
+	}
+	credentialDirectory, err = filepath.Abs(credentialDirectory)
+	if err != nil {
+		t.Fatal(err)
+	}
+	credentialFile := filepath.Join(credentialDirectory, "device.credential")
+	credential := "11111111-1111-4111-8111-111111111111.AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
+	if err := os.WriteFile(credentialFile, []byte(credential+"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PUNARO_ADAPTER_RELAY_URL", "https://relay.example")
+	t.Setenv("PUNARO_MACHINE_ID", "telegram-machine")
+	t.Setenv("PUNARO_MACHINE_PRIVATE_KEY_FILE", "")
+	t.Setenv("PUNARO_DEVICE_CREDENTIAL_FILE", credentialFile)
+	t.Setenv("PUNARO_TELEGRAM_BOT_TOKEN", "test-token")
+	t.Setenv("PUNARO_TELEGRAM_ALLOWED_USER_ID", "55")
+	t.Setenv("PUNARO_TELEGRAM_GATEWAY_ENDPOINT", relay.TelegramGatewayEndpoint)
+	t.Setenv("PUNARO_TELEGRAM_STATE_DIR", directory)
+	cfg, err := loadConfig()
+	if err != nil || cfg.deviceCredential != credential || len(cfg.privateKey) != 0 || cfg.deviceCredentialFile != credentialFile {
+		t.Fatalf("unexpected device configuration err=%v", err)
+	}
+	t.Setenv("PUNARO_MACHINE_PRIVATE_KEY_FILE", credentialFile)
+	if _, err := loadConfig(); err == nil {
+		t.Fatal("telegram accepted two machine credential modes")
+	}
+}
+
 func TestLoadConfigRejectsNonPrimaryGatewayEndpoint(t *testing.T) {
 	_, private, err := ed25519.GenerateKey(rand.Reader)
 	if err != nil {

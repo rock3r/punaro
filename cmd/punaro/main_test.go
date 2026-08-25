@@ -28,6 +28,7 @@ import (
 	"github.com/rock3r/punaro/internal/ingress"
 	"github.com/rock3r/punaro/internal/operator"
 	punaropostgres "github.com/rock3r/punaro/internal/postgres"
+	"github.com/rock3r/punaro/internal/relay"
 )
 
 const cliTestImage = "registry.example/punaro@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
@@ -445,6 +446,7 @@ func preserveDependencies(t *testing.T) {
 	originalBackup, originalListBackups, originalVerifyBackup, originalRestore := createOperatorBackup, listOperatorBackups, verifyOperatorBackup, restoreOperatorBackup
 	originalServerDoctorInspect, originalServerDoctorLoad := serverDoctorInspect, serverDoctorLoad
 	originalUpdateStageCheck := serverDoctorUpdateStageCheck
+	originalMailCutoverPreflight := inspectMailCutoverPreflight
 	t.Cleanup(func() {
 		inspectSchema, inspectOwner, migratePristinePair, maintenanceActive = originalInspect, originalOwner, originalMigrate, originalMaintenance
 		createOwner, recoverInstallationOwner = originalCreate, originalRecover
@@ -456,6 +458,7 @@ func preserveDependencies(t *testing.T) {
 		serverDoctorInspect = originalServerDoctorInspect
 		serverDoctorLoad = originalServerDoctorLoad
 		serverDoctorUpdateStageCheck = originalUpdateStageCheck
+		inspectMailCutoverPreflight = originalMailCutoverPreflight
 	})
 	inspectOwner = func(context.Context, string) (punaropostgres.Principal, error) {
 		return punaropostgres.Principal{ID: "11111111-1111-4111-8111-111111111111", DisplayName: "owner"}, nil
@@ -724,6 +727,23 @@ func TestDoctorRelayProfileCommandAndIsolationStayInsideDeadline(t *testing.T) {
 	var payload serverDoctorProfilePayload
 	if json.Unmarshal(stdout.Bytes(), &payload) != nil || payload.RelayURL != "https://punaro.example" || payload.MachineID != "server-doctor" {
 		t.Fatalf("relay-profile helper payload=%#v", payload)
+	}
+	credential := "22222222-2222-4222-8222-222222222222." + strings.Repeat("A", 43)
+	credentialPath := filepath.Join(root, "device.credential")
+	deviceProfilePath := filepath.Join(root, "device-doctor.env")
+	if err := os.WriteFile(credentialPath, []byte(credential+"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(deviceProfilePath, []byte("PUNARO_SERVER_DOCTOR_RELAY_URL=https://punaro.example\nPUNARO_SERVER_DOCTOR_MACHINE_ID=server-doctor\nPUNARO_SERVER_DOCTOR_DEVICE_CREDENTIAL_FILE="+credentialPath+"\nPUNARO_SERVER_DOCTOR_ACCESS_TOKEN_FILE="+accessPath+"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	stdout.Reset()
+	if code := runDoctorRelayProfileCheck([]string{"--path", deviceProfilePath}, &stdout); code != 0 {
+		t.Fatalf("device relay-profile helper code=%d", code)
+	}
+	payload = serverDoctorProfilePayload{}
+	if json.Unmarshal(stdout.Bytes(), &payload) != nil || payload.DeviceCredential != credential || payload.SigningKey != "" {
+		t.Fatalf("device relay-profile helper payload is invalid")
 	}
 	if runtime.GOOS == "windows" {
 		return
@@ -1216,6 +1236,48 @@ func TestServerDoctorUsesNonRelayPublicEdgeProbeWhenRelayDisabled(t *testing.T) 
 	}
 }
 
+func TestServerDoctorRequiresPreflightBeforeMailCutoverPublication(t *testing.T) {
+	preserveDependencies(t)
+	directory := testInstallation(t)
+	installation, err := operator.Load(directory)
+	if err != nil {
+		t.Fatal(err)
+	}
+	installation.RelayMachinesJSON = "configured"
+	if installation.MailCutover != nil {
+		t.Fatal("test requires a pre-publication installation")
+	}
+	inspectSchema = func(context.Context, string) (punaropostgres.SchemaState, error) {
+		return punaropostgres.SchemaState{Classification: punaropostgres.Compatible, Version: 44}, nil
+	}
+	probe = func(context.Context, string) error { return nil }
+	preflightCalls := 0
+	inspectMailCutoverPreflight = func(context.Context, string) (punaropostgres.MailCutoverPreflight, error) {
+		preflightCalls++
+		return punaropostgres.MailCutoverPreflight{LegacyPending: 1, TargetRows: 1}, nil
+	}
+	report, err := diagnoseServer(t.Context(), installation, "punaro-lxc", false, "")
+	if err != nil || preflightCalls != 1 || report.Healthy {
+		t.Fatalf("preflight_calls=%d healthy=%t err=%v", preflightCalls, report.Healthy, err)
+	}
+	want := map[string]punarodiagnostic.Status{
+		"mail_cutover_legacy_inventory": punarodiagnostic.StatusFail,
+		"mail_cutover_recovery":         punarodiagnostic.StatusPass,
+		"mail_cutover_target":           punarodiagnostic.StatusFail,
+	}
+	for _, check := range report.Checks {
+		if status, ok := want[check.Code]; ok {
+			if !check.Required || check.Status != status {
+				t.Fatalf("check=%#v want_status=%s", check, status)
+			}
+			delete(want, check.Code)
+		}
+	}
+	if len(want) != 0 {
+		t.Fatalf("missing preflight checks: %v", want)
+	}
+}
+
 func TestServerDoctorDoesNotSynthesizeEnabledLANRelayHealth(t *testing.T) {
 	installation := operator.Installation{Ingress: ingress.Policy{Mode: ingress.LAN}, RelayEnabled: true}
 	route, origin, access, enrollment, protocol := inspectServerRelay(t.Context(), installation, "")
@@ -1257,6 +1319,32 @@ func TestServerDoctorBindsEnabledRelayProbeToInstalledPublicURL(t *testing.T) {
 	}
 	if enrollment.Known || protocol.Known {
 		t.Fatalf("enrollment=%#v protocol=%#v", enrollment, protocol)
+	}
+}
+
+func TestServerDoctorUsesMigratedDeviceCredentialAfterCutover(t *testing.T) {
+	credential := "22222222-2222-4222-8222-222222222222." + strings.Repeat("A", 43)
+	server := httptest.NewServer(http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {
+		correlation := request.Header.Get(relay.RequestCorrelationHeader)
+		if request.Method != http.MethodHead || request.URL.Path != relay.DoctorPath || request.Header.Get("Authorization") != "Bearer "+credential || !relay.ValidRequestToken(correlation) {
+			t.Fatalf("invalid bearer doctor request")
+		}
+		response.Header().Set(relay.ResponseNonceHeader, correlation)
+		response.Header().Set(relay.ProtocolHeader, "1")
+		response.WriteHeader(http.StatusNoContent)
+	}))
+	defer server.Close()
+	previous := serverDoctorProfileLoad
+	serverDoctorProfileLoad = func(context.Context, string) (serverDoctorProfile, error) {
+		return serverDoctorProfile{RelayURL: server.URL, MachineID: "server-doctor", DeviceCredential: credential}, nil
+	}
+	t.Cleanup(func() { serverDoctorProfileLoad = previous })
+	installation := operator.Installation{Ingress: ingress.Policy{Mode: ingress.Internet, PublicURL: server.URL}, RelayEnabled: true}
+	route, origin, access, enrollment, protocol := inspectServerRelay(t.Context(), installation, "/protected/server-doctor.env")
+	for name, check := range map[string]knownDoctorBool{"route": route, "origin": origin, "access": access, "enrollment": enrollment, "protocol": protocol} {
+		if !check.Known || !check.OK {
+			t.Fatalf("%s=%#v", name, check)
+		}
 	}
 }
 
@@ -1543,6 +1631,17 @@ func TestServerDoctorProfileLoadsOnlyProtectedLeastPrivilegeInputs(t *testing.T)
 	if err != nil || profile.RelayURL != "https://punaro.example" || profile.MachineID != "server-doctor" || len(profile.PrivateKey) != ed25519.PrivateKeySize || profile.AccessToken.ClientID != "doctor-id" || profile.AccessToken.ClientSecret != "doctor-secret" {
 		t.Fatalf("protected server doctor profile did not load: %v", err)
 	}
+	credential := "22222222-2222-4222-8222-222222222222." + strings.Repeat("A", 43)
+	credentialPath := write("device.credential", credential+"\n", 0o600)
+	deviceProfilePath := write("device-doctor.env", "PUNARO_SERVER_DOCTOR_RELAY_URL=https://punaro.example\nPUNARO_SERVER_DOCTOR_MACHINE_ID=server-doctor\nPUNARO_SERVER_DOCTOR_DEVICE_CREDENTIAL_FILE="+credentialPath+"\nPUNARO_SERVER_DOCTOR_ACCESS_TOKEN_FILE="+accessPath+"\n", 0o600)
+	deviceProfile, err := loadServerDoctorProfile(t.Context(), deviceProfilePath)
+	if err != nil || len(deviceProfile.PrivateKey) != 0 || deviceProfile.DeviceCredential != credential || deviceProfile.AccessToken.ClientID != "doctor-id" {
+		t.Fatalf("protected device server doctor profile did not load: %v", err)
+	}
+	bothProfilePath := write("ambiguous-doctor.env", "PUNARO_SERVER_DOCTOR_RELAY_URL=https://punaro.example\nPUNARO_SERVER_DOCTOR_MACHINE_ID=server-doctor\nPUNARO_SERVER_DOCTOR_PRIVATE_KEY_FILE="+keyPath+"\nPUNARO_SERVER_DOCTOR_DEVICE_CREDENTIAL_FILE="+credentialPath+"\nPUNARO_SERVER_DOCTOR_ACCESS_TOKEN_FILE="+accessPath+"\n", 0o600)
+	if _, err := loadServerDoctorProfile(t.Context(), bothProfilePath); err == nil || strings.Contains(err.Error(), credential) {
+		t.Fatalf("ambiguous profile error=%q", err)
+	}
 
 	if runtime.GOOS != "windows" {
 		if err := os.Chmod(accessPath, 0o644); err != nil { // #nosec G302 -- deliberate insecure-permission diagnostic fixture.
@@ -1589,6 +1688,30 @@ func TestServerDoctorProfileWriterCreatesProtectedReusableProfile(t *testing.T) 
 	}
 	if code := run(args, io.Discard, io.Discard); code != 1 {
 		t.Fatalf("existing profile overwrite code=%d", code)
+	}
+	credential := "22222222-2222-4222-8222-222222222222." + strings.Repeat("A", 43)
+	credentialPath := filepath.Join(root, "device.credential")
+	if err := os.WriteFile(credentialPath, []byte(credential+"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	deviceProfilePath := filepath.Join(root, "device-doctor.env")
+	deviceArgs := []string{"doctor-profile", "write", "--out", deviceProfilePath, "--relay-url", "https://punaro.example", "--machine-id", "server-doctor", "--device-credential-file", credentialPath, "--access-token-file", accessPath}
+	stdout.Reset()
+	stderr.Reset()
+	if code := run(deviceArgs, &stdout, &stderr); code != 0 || strings.Contains(stdout.String()+stderr.String(), credential) {
+		t.Fatalf("device profile code=%d stdout=%q stderr=%q", code, stdout.String(), stderr.String())
+	}
+	deviceProfile, err := loadServerDoctorProfile(t.Context(), deviceProfilePath)
+	if err != nil || deviceProfile.DeviceCredential != credential || len(deviceProfile.PrivateKey) != 0 {
+		t.Fatalf("written device profile=%#v err=%v", deviceProfile, err)
+	}
+	ambiguousPath := filepath.Join(root, "ambiguous-doctor.env")
+	ambiguousArgs := []string{"doctor-profile", "write", "--out", ambiguousPath, "--relay-url", "https://punaro.example", "--machine-id", "server-doctor", "--private-key-file", keyPath, "--device-credential-file", credentialPath, "--access-token-file", accessPath}
+	if code := run(ambiguousArgs, io.Discard, io.Discard); code != 1 {
+		t.Fatalf("ambiguous profile code=%d", code)
+	}
+	if _, err := os.Lstat(ambiguousPath); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("ambiguous profile exists: %v", err)
 	}
 }
 

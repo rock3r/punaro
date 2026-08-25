@@ -127,7 +127,7 @@ func (s State) Encode() ([]byte, error) {
 // identity. It deliberately exposes no stored values in mismatch errors.
 func (s State) Match(origin, clientBinding, legacyMachineID string) error {
 	canonicalOrigin, ok := canonicalOriginForPolicy(origin, s.TransportPolicy())
-	if s.validate() != nil || !ok || !validBinding(clientBinding) || (legacyMachineID != "" && !validLegacyMachineID(legacyMachineID)) || s.Origin != canonicalOrigin || s.ClientBinding != clientBinding || (s.LegacyMachineID != "" && s.LegacyMachineID != legacyMachineID) {
+	if s.validate() != nil || !ok || !validBinding(clientBinding) || (legacyMachineID != "" && !validLegacyMachineID(legacyMachineID)) || s.Origin != canonicalOrigin || s.ClientBinding != clientBinding || s.LegacyMachineID != legacyMachineID {
 		return ErrStateMismatch
 	}
 	return nil

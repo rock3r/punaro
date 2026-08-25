@@ -106,21 +106,21 @@ var adapterBuildRelease string
 var (
 	adapterDoctorConfigLoad = loadConfig
 	adapterDoctorRelayProbe = func(ctx context.Context, config adapterConfig) (adapter.DoctorProbeResult, error) {
-		client, err := adapter.NewHTTPRelayClientWithPolicy(config.relayURL, config.machineID, config.privateKey, nil, config.accessToken, config.transportPolicy)
+		client, err := newAdapterRelayClient(config)
 		if err != nil {
 			return adapter.DoctorProbeResult{}, errors.New("relay doctor client is invalid")
 		}
 		return client.Doctor(ctx)
 	}
 	adapterDoctorNotificationProbe = func(ctx context.Context, config adapterConfig) (adapter.DoctorProbeResult, error) {
-		client, err := adapter.NewHTTPRelayClientWithPolicy(config.relayURL, config.machineID, config.privateKey, nil, config.accessToken, config.transportPolicy)
+		client, err := newAdapterRelayClient(config)
 		if err != nil {
 			return adapter.DoctorProbeResult{}, errors.New("relay notification doctor client is invalid")
 		}
 		return client.DoctorNotifications(ctx)
 	}
 	adapterDoctorEndpointProbe = func(ctx context.Context, config adapterConfig, endpoint string) (adapter.DoctorProbeResult, error) {
-		client, err := adapter.NewHTTPRelayClientWithPolicy(config.relayURL, config.machineID, config.privateKey, nil, config.accessToken, config.transportPolicy)
+		client, err := newAdapterRelayClient(config)
 		if err != nil {
 			return adapter.DoctorProbeResult{}, errors.New("relay endpoint doctor client is invalid")
 		}
@@ -415,7 +415,7 @@ func privateDoctorDirectory(path string) bool {
 }
 
 func distinctDoctorPaths(config adapterConfig) bool {
-	paths := []string{config.profileFile, config.privateKeyFile, config.identityFile, config.dataDir, config.mailboxState}
+	paths := []string{config.profileFile, config.machineCredentialFile(), config.identityFile, config.dataDir, config.mailboxState}
 	seen := map[string]struct{}{}
 	for _, path := range paths {
 		if path == "" || !filepath.IsAbs(path) || filepath.Clean(path) != path {
@@ -462,7 +462,7 @@ func inspectAdapterMailboxIsolated(ctx context.Context, config adapterConfig) (m
 	if err != nil {
 		return mailboxDoctorResult{}, errors.New("mailbox diagnostic is unavailable")
 	}
-	body, err := json.Marshal(mailboxDoctorRequest{Binary: config.mailboxBinary, State: config.mailboxState, Group: config.attachedGroup, DataDir: config.dataDir, ProfileFile: config.profileFile, PrivateKeyFile: config.privateKeyFile, IdentityFile: config.identityFile})
+	body, err := json.Marshal(mailboxDoctorRequest{Binary: config.mailboxBinary, State: config.mailboxState, Group: config.attachedGroup, DataDir: config.dataDir, ProfileFile: config.profileFile, PrivateKeyFile: config.machineCredentialFile(), IdentityFile: config.identityFile})
 	if err != nil || len(body) == 0 || len(body) > maximumMailboxDoctorOutput {
 		return mailboxDoctorResult{}, errors.New("mailbox diagnostic is unavailable")
 	}
