@@ -863,10 +863,16 @@ func mailboxToolSurfaceSupported(tools []struct {
 	for _, tool := range tools {
 		present[tool.Name] = struct{}{}
 	}
-	for _, prefix := range []string{"waypost_", "mailbox_"} {
+	for _, surface := range []struct {
+		prefix     string
+		operations []string
+	}{
+		{prefix: "waypost_", operations: []string{"status", "recv", "ack"}},
+		{prefix: "mailbox_", operations: []string{"status", "recv", "ack", "wait"}},
+	} {
 		supported := true
-		for _, operation := range []string{"status", "recv", "ack"} {
-			if _, ok := present[prefix+operation]; !ok {
+		for _, operation := range surface.operations {
+			if _, ok := present[surface.prefix+operation]; !ok {
 				supported = false
 				break
 			}

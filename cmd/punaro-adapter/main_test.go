@@ -483,7 +483,8 @@ func TestMailboxDoctorRequiresLegacyOrWaypostToolSurface(t *testing.T) {
 		wantErr bool
 	}{
 		{name: "waypost", tools: `[{"name":"waypost_status"},{"name":"waypost_recv"},{"name":"waypost_ack"}]`},
-		{name: "legacy", tools: `[{"name":"mailbox_status"},{"name":"mailbox_recv"},{"name":"mailbox_ack"}]`},
+		{name: "legacy", tools: `[{"name":"mailbox_status"},{"name":"mailbox_recv"},{"name":"mailbox_ack"},{"name":"mailbox_wait"}]`},
+		{name: "legacy missing wait", tools: `[{"name":"mailbox_status"},{"name":"mailbox_recv"},{"name":"mailbox_ack"}]`, wantErr: true},
 		{name: "unrelated", tools: `[{"name":"filesystem_read"}]`, wantErr: true},
 	} {
 		t.Run(test.name, func(t *testing.T) {
