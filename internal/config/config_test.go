@@ -485,12 +485,15 @@ func TestLoadCredentialTransitionIsOffByDefaultAndRequiresCompletePostgresRuntim
 	}
 	t.Setenv("PUNARO_RELAY_ENABLED", "true")
 	t.Setenv("PUNARO_RELAY_MACHINES_JSON", `[{"id":"machine-a","public_key":"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA","endpoint_prefixes":["agent/a/"]}]`)
-	t.Setenv("PUNARO_RELAY_STORE", "postgres")
 	t.Setenv("PUNARO_POSTGRES_ENABLED", "true")
 	t.Setenv("PUNARO_POSTGRES_DSN_FILE", "/run/secrets/punaro-app-dsn")
 	t.Setenv("PUNARO_DEVICE_AUTH_ENABLED", "true")
 	t.Setenv("PUNARO_INGRESS_MODE", "proxy")
 	t.Setenv("PUNARO_PUBLIC_URL", "https://punaro.example.test")
+	if _, err := Load(""); err == nil || !strings.Contains(err.Error(), "credential transition requires enabled PostgreSQL relay") {
+		t.Fatalf("credential transition with SQLite relay error=%v", err)
+	}
+	t.Setenv("PUNARO_RELAY_STORE", "postgres")
 	config, err = Load("")
 	if err != nil || !config.CredentialTransitionEnabled {
 		t.Fatalf("complete transition config=%#v err=%v", config, err)

@@ -206,7 +206,7 @@ consume the mail budget indefinitely.
 
 SQLite remains the default active relay. Maintainers may explicitly select an
 empty PostgreSQL relay with `PUNARO_RELAY_STORE=postgres` only after completing
-the supported update through schema v9. This selector does not import the SQLite file,
+the supported update through the exact current schema (currently v49). This selector does not import the SQLite file,
 does not dual-write, and is incompatible with the superseded directory and
 attachment routes. Do not point an established installation at an empty
 PostgreSQL relay as a migration shortcut; the verified one-shot mail cutover is
@@ -215,8 +215,8 @@ again while retaining both stores unchanged.
 
 ### One-shot mail cutover
 
-First complete the supported update through the exact current schema v9; the
-preview and execution both fail closed on runtime-compatible schema v8 before
+First complete the supported update through the exact current schema (currently
+v49); the preview and execution both fail closed on any runtime-compatible older schema before
 inspecting or preparing SQLite. Then stop ordinary operator changes, confirm every intended legacy machine is
 `migrated` or explicitly `retired`, and run the read-only preview:
 
@@ -261,6 +261,10 @@ begin can then only observe that tombstone and cannot recreate an import fence.
 
 After success, run `punaro up --directory /absolute/private/punaro` to recreate
 the daemon from the published PostgreSQL and credential-transition settings.
+Only after that server activation succeeds may migrated adapters and the
+Telegram gateway replace their legacy private-key profile entry with the staged
+device-credential-file entry and restart. Switch and doctor one client at a
+time; redemption alone does not make bearer relay authentication available.
 Never reopen or replace the retired SQLite file. Once PostgreSQL accepts new
 mail, recovery uses a PostgreSQL backup or forward repair.
 
