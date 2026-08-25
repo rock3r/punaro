@@ -40,6 +40,10 @@ accepts the legacy `mailbox.db`, flat membership array, and complete
 `mailbox_status` / `mailbox_recv` / `mailbox_ack` / `mailbox_wait` surface. Both database names
 in one configured state directory are ambiguous and fail closed; doctor never
 runs migration or chooses one on the operator's behalf.
+On Windows the disposable snapshot directory receives a protected,
+current-user-owned DACL before SQLite opens it, and the read-only SQLite URI
+uses canonical slash-separated drive paths. A snapshot that cannot satisfy
+either boundary fails closed without falling back to the live mailbox.
 Backup contents, mailbox state, and nested skill trees are traversed in bounded
 directory batches with total-entry ceilings and deadline checks between reads.
 Skill-set digests length-prefix every relative path and file body so arbitrary

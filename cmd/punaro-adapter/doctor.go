@@ -11,7 +11,6 @@ import (
 	"flag"
 	"fmt"
 	"io"
-	"net/url"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -138,7 +137,8 @@ var (
 	adapterDoctorBootstrapProbe             = func(ctx context.Context, directory, bootstrapRelease string) (punarodiagnostic.Report, error) {
 		return bootstrap.IsolatedDoctor(ctx, bootstrap.DoctorRequest{Directory: directory, BootstrapRelease: bootstrapRelease})
 	}
-	adapterDoctorPluginProbe = inspectAdapterPluginIsolated
+	adapterDoctorPluginProbe     = inspectAdapterPluginIsolated
+	mailboxDoctorSnapshotProtect = protectMailboxDoctorSnapshot
 )
 
 func runAdapterDoctor(args []string, stdout, stderr io.Writer) int {
@@ -544,26 +544,38 @@ func mailboxDoctorSnapshot(ctx context.Context, root string) (string, error) {
 			_ = os.RemoveAll(snapshot)
 		}
 	}()
+	if err := mailboxDoctorSnapshotProtect(snapshot); err != nil {
+		return "", fmt.Errorf("mailbox snapshot directory protection failed: %w", err)
+	}
+	if !privateDoctorDirectory(snapshot) {
+		return "", errors.New("mailbox snapshot directory is unsafe")
+	}
 	destination := filepath.Join(snapshot, filepath.Base(source))
-	uri := (&url.URL{Scheme: "file", Path: source, RawQuery: "mode=ro"}).String()
+	uri := mailboxDoctorReadOnlyURI(source)
 	database, err := sql.Open("sqlite", uri)
 	if err != nil {
-		return "", errors.New("mailbox snapshot is unavailable")
+		return "", fmt.Errorf("mailbox snapshot database open failed: %w", err)
 	}
 	database.SetMaxOpenConns(1)
 	database.SetMaxIdleConns(1)
 	if err := database.PingContext(ctx); err != nil {
 		_ = database.Close()
-		return "", errors.New("mailbox snapshot is unavailable")
+		return "", fmt.Errorf("mailbox snapshot database ping failed: %w", err)
 	}
 	_, snapshotErr := database.ExecContext(ctx, `VACUUM INTO ?`, destination)
 	closeErr := database.Close()
-	if snapshotErr != nil || closeErr != nil {
-		return "", errors.New("mailbox snapshot is unavailable")
+	if snapshotErr != nil {
+		return "", fmt.Errorf("mailbox snapshot copy failed: %w", snapshotErr)
+	}
+	if closeErr != nil {
+		return "", fmt.Errorf("mailbox snapshot database close failed: %w", closeErr)
 	}
 	copyInfo, err := os.Lstat(destination) // #nosec G703 -- fresh private snapshot destination.
-	if err != nil || !copyInfo.Mode().IsRegular() || copyInfo.Mode()&os.ModeSymlink != 0 || copyInfo.Size() < 0 || copyInfo.Size() > maximumMailboxDoctorBytes || os.Chmod(destination, 0o600) != nil {
+	if err != nil || !copyInfo.Mode().IsRegular() || copyInfo.Mode()&os.ModeSymlink != 0 || copyInfo.Size() < 0 || copyInfo.Size() > maximumMailboxDoctorBytes {
 		return "", errors.New("mailbox snapshot is unsafe")
+	}
+	if err := os.Chmod(destination, 0o600); err != nil {
+		return "", fmt.Errorf("mailbox snapshot file protection failed: %w", err)
 	}
 	cleanup = false
 	return snapshot, nil

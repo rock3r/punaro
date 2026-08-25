@@ -560,6 +560,44 @@ func TestMailboxDoctorSnapshotsLegacyAndWaypostDatabases(t *testing.T) {
 	}
 }
 
+func TestMailboxDoctorProtectsSnapshotDirectoryBeforeUse(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("POSIX private-directory fixture")
+	}
+	state := t.TempDir()
+	if err := os.Chmod(state, 0o700); err != nil { // #nosec G302 -- private mailbox fixture.
+		t.Fatal(err)
+	}
+	database, err := sql.Open("sqlite", filepath.Join(state, "waypost.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := database.ExecContext(t.Context(), `CREATE TABLE mailbox_fixture (value TEXT)`); err != nil {
+		t.Fatal(err)
+	}
+	if err := database.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	previous := mailboxDoctorSnapshotProtect
+	protected := ""
+	mailboxDoctorSnapshotProtect = func(path string) error {
+		protected = path
+		return errors.New("fixture protection failure")
+	}
+	t.Cleanup(func() { mailboxDoctorSnapshotProtect = previous })
+
+	if _, err := mailboxDoctorSnapshot(t.Context(), state); err == nil {
+		t.Fatal("snapshot protection failure was ignored")
+	}
+	if protected == "" {
+		t.Fatal("snapshot directory was not protected")
+	}
+	if _, err := os.Stat(protected); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("failed protected snapshot was not removed: %v", err)
+	}
+}
+
 func TestMailboxDoctorIsolationHonorsDeadline(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("POSIX blocking executable fixture")
@@ -930,12 +968,12 @@ func TestPluginDoctorValidatesAllAdaptersLauncherAndExactSkillTree(t *testing.T)
 		t.Fatal(err)
 	}
 	oldRelease, oldDigest, oldRuntimeDigest := adapterBuildRelease, adapterExpectedSkillSetDigest, adapterExpectedPluginRuntimeDigest
-	adapterBuildRelease, adapterExpectedSkillSetDigest, adapterExpectedPluginRuntimeDigest = "v0.1.0-alpha.4", digest, runtimeDigest
+	adapterBuildRelease, adapterExpectedSkillSetDigest, adapterExpectedPluginRuntimeDigest = "v0.1.0-alpha.5", digest, runtimeDigest
 	t.Cleanup(func() {
 		adapterBuildRelease, adapterExpectedSkillSetDigest, adapterExpectedPluginRuntimeDigest = oldRelease, oldDigest, oldRuntimeDigest
 	})
 	result := inspectAdapterPlugin(t.Context(), root)
-	if !result.Portable || !result.Codex || !result.Claude || !result.Launcher || result.Version != "v0.1.0-alpha.4" || result.SkillDigest != "sha256:"+digest {
+	if !result.Portable || !result.Codex || !result.Claude || !result.Launcher || result.Version != "v0.1.0-alpha.5" || result.SkillDigest != "sha256:"+digest {
 		t.Fatalf("plugin=%#v", result)
 	}
 	var helperOutput bytes.Buffer
