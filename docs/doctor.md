@@ -80,6 +80,33 @@ punaro doctor \
   --timeout 20s
 ```
 
+The profile contains exactly one relay credential reference. Before mail
+cutover, use the enrolled diagnostic machine's private key as above and migrate
+that same identity through the proof-bound legacy enrollment workflow. Keep the
+key-backed profile active until the server has published cutover and restarted
+with the PostgreSQL credential-transition runtime. Then create a new protected
+profile path (the writer never overwrites an existing file) using the staged
+device credential:
+
+```sh
+punaro doctor-profile write \
+  --out /absolute/private/server-doctor-device.env \
+  --relay-url https://punaro.example \
+  --machine-id server-doctor \
+  --device-credential-file /absolute/private/server-doctor.credential \
+  --access-token-file /absolute/private/server-doctor-access.env
+
+punaro doctor \
+  --directory /absolute/private/installation \
+  --machine-id punaro-lxc \
+  --relay-profile /absolute/private/server-doctor-device.env \
+  --timeout 20s
+```
+
+Supplying both credential-file flags or neither is rejected. The isolated
+profile helper reads the selected protected credential without placing it in
+the report, logs, argv, or environment.
+
 `--machine-id` is required and is the stable public identity used to match this
 report in fleet doctor. A separately deployed Telegram gateway is the default;
 its local-service checks are optional in the server report and its own

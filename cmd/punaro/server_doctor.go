@@ -78,11 +78,12 @@ type serverDoctorGatewayState struct {
 }
 
 type serverDoctorProfilePayload struct {
-	RelayURL       string `json:"relay_url"`
-	MachineID      string `json:"machine_id"`
-	SigningKey     string `json:"signing_key"`
-	AccessID       string `json:"access_id"`
-	AccessMaterial string `json:"access_material"`
+	RelayURL         string `json:"relay_url"`
+	MachineID        string `json:"machine_id"`
+	SigningKey       string `json:"signing_key,omitempty"`
+	DeviceCredential string `json:"device_credential,omitempty"`
+	AccessID         string `json:"access_id"`
+	AccessMaterial   string `json:"access_material"`
 }
 
 type serverDoctorRecoveryReceiptRequest struct {
@@ -127,11 +128,23 @@ func isolatedServerDoctorProfile(ctx context.Context, path string) (serverDoctor
 	if decoder.Decode(&payload) != nil || decoder.Decode(&struct{}{}) != io.EOF {
 		return serverDoctorProfile{}, errors.New("server doctor profile unavailable")
 	}
-	key, err := base64.RawURLEncoding.DecodeString(payload.SigningKey)
-	if err != nil || len(key) != ed25519.PrivateKeySize || payload.RelayURL == "" || payload.MachineID == "" || payload.AccessID == "" || payload.AccessMaterial == "" {
+	var key ed25519.PrivateKey
+	if payload.SigningKey != "" {
+		decoded, err := base64.RawURLEncoding.DecodeString(payload.SigningKey)
+		if err != nil || len(decoded) != ed25519.PrivateKeySize {
+			return serverDoctorProfile{}, errors.New("server doctor profile unavailable")
+		}
+		key = ed25519.PrivateKey(decoded)
+	}
+	hasKey := len(key) != 0
+	hasDeviceCredential := payload.DeviceCredential != ""
+	if hasKey == hasDeviceCredential || hasDeviceCredential && !validServerDoctorDeviceCredential(payload.DeviceCredential) {
 		return serverDoctorProfile{}, errors.New("server doctor profile unavailable")
 	}
-	return serverDoctorProfile{RelayURL: payload.RelayURL, MachineID: payload.MachineID, PrivateKey: ed25519.PrivateKey(key), AccessToken: adapter.AccessServiceToken{ClientID: payload.AccessID, ClientSecret: payload.AccessMaterial}}, nil
+	if payload.RelayURL == "" || payload.MachineID == "" || payload.AccessID == "" || payload.AccessMaterial == "" {
+		return serverDoctorProfile{}, errors.New("server doctor profile unavailable")
+	}
+	return serverDoctorProfile{RelayURL: payload.RelayURL, MachineID: payload.MachineID, PrivateKey: key, DeviceCredential: payload.DeviceCredential, AccessToken: adapter.AccessServiceToken{ClientID: payload.AccessID, ClientSecret: payload.AccessMaterial}}, nil
 }
 
 func runDoctorRelayProfileCheck(args []string, stdout io.Writer) int {
@@ -145,7 +158,10 @@ func runDoctorRelayProfileCheck(args []string, stdout io.Writer) int {
 	if err != nil {
 		return 1
 	}
-	payload := serverDoctorProfilePayload{RelayURL: profile.RelayURL, MachineID: profile.MachineID, SigningKey: base64.RawURLEncoding.EncodeToString(profile.PrivateKey), AccessID: profile.AccessToken.ClientID, AccessMaterial: profile.AccessToken.ClientSecret}
+	payload := serverDoctorProfilePayload{RelayURL: profile.RelayURL, MachineID: profile.MachineID, DeviceCredential: profile.DeviceCredential, AccessID: profile.AccessToken.ClientID, AccessMaterial: profile.AccessToken.ClientSecret}
+	if len(profile.PrivateKey) != 0 {
+		payload.SigningKey = base64.RawURLEncoding.EncodeToString(profile.PrivateKey)
+	}
 	if json.NewEncoder(stdout).Encode(payload) != nil {
 		return 1
 	}
@@ -744,7 +760,12 @@ func inspectServerRelay(parent context.Context, installation operator.Installati
 		route, origin, access := inspectServerPublicEdge(parent, installation.Ingress.PublicURL, profile, &http.Client{Timeout: 5 * time.Second})
 		return route, origin, access, knownDoctorBool{}, knownDoctorBool{}
 	}
-	client, err := adapter.NewHTTPRelayClient(profile.RelayURL, profile.MachineID, profile.PrivateKey, &http.Client{Timeout: 5 * time.Second}, profile.AccessToken)
+	var client *adapter.HTTPRelayClient
+	if profile.DeviceCredential != "" {
+		client, err = adapter.NewDeviceHTTPRelayClientWithPolicy(profile.RelayURL, profile.MachineID, profile.DeviceCredential, &http.Client{Timeout: 5 * time.Second}, profile.AccessToken, clienttransport.Policy{})
+	} else {
+		client, err = adapter.NewHTTPRelayClient(profile.RelayURL, profile.MachineID, profile.PrivateKey, &http.Client{Timeout: 5 * time.Second}, profile.AccessToken)
+	}
 	if err != nil {
 		return knownDoctorBool{}, knownDoctorBool{}, knownDoctorBool{}, knownDoctorBool{}, knownDoctorBool{}
 	}
@@ -809,10 +830,11 @@ func serverAccessRejectionStatus(status int) bool {
 }
 
 type serverDoctorProfile struct {
-	RelayURL    string
-	MachineID   string
-	PrivateKey  ed25519.PrivateKey
-	AccessToken adapter.AccessServiceToken
+	RelayURL         string
+	MachineID        string
+	PrivateKey       ed25519.PrivateKey
+	DeviceCredential string
+	AccessToken      adapter.AccessServiceToken
 }
 
 func loadServerDoctorProfile(ctx context.Context, path string) (serverDoctorProfile, error) {
@@ -825,7 +847,7 @@ func loadServerDoctorProfile(ctx context.Context, path string) (serverDoctorProf
 
 func parseServerDoctorProfile(ctx context.Context, body []byte) (serverDoctorProfile, error) {
 	values := map[string]string{}
-	allowed := map[string]bool{"PUNARO_SERVER_DOCTOR_RELAY_URL": true, "PUNARO_SERVER_DOCTOR_MACHINE_ID": true, "PUNARO_SERVER_DOCTOR_PRIVATE_KEY_FILE": true, "PUNARO_SERVER_DOCTOR_ACCESS_TOKEN_FILE": true}
+	allowed := map[string]bool{"PUNARO_SERVER_DOCTOR_RELAY_URL": true, "PUNARO_SERVER_DOCTOR_MACHINE_ID": true, "PUNARO_SERVER_DOCTOR_PRIVATE_KEY_FILE": true, "PUNARO_SERVER_DOCTOR_DEVICE_CREDENTIAL_FILE": true, "PUNARO_SERVER_DOCTOR_ACCESS_TOKEN_FILE": true}
 	for _, line := range strings.Split(strings.TrimSpace(string(body)), "\n") {
 		key, value, found := strings.Cut(line, "=")
 		if !found || value == "" || !allowed[key] || values[key] != "" || strings.ContainsAny(value, "\r\x00") {
@@ -833,16 +855,30 @@ func parseServerDoctorProfile(ctx context.Context, body []byte) (serverDoctorPro
 		}
 		values[key] = value
 	}
-	if len(values) != len(allowed) {
+	if len(values) != 4 || values["PUNARO_SERVER_DOCTOR_RELAY_URL"] == "" || values["PUNARO_SERVER_DOCTOR_MACHINE_ID"] == "" || values["PUNARO_SERVER_DOCTOR_ACCESS_TOKEN_FILE"] == "" || (values["PUNARO_SERVER_DOCTOR_PRIVATE_KEY_FILE"] == "") == (values["PUNARO_SERVER_DOCTOR_DEVICE_CREDENTIAL_FILE"] == "") {
 		return serverDoctorProfile{}, errors.New("server doctor profile invalid")
 	}
-	keyBody, err := readProtectedServerDoctorFile(ctx, values["PUNARO_SERVER_DOCTOR_PRIVATE_KEY_FILE"], 4<<10)
-	if err != nil {
-		return serverDoctorProfile{}, errors.New("server doctor credential unavailable")
-	}
-	key, err := base64.RawURLEncoding.DecodeString(strings.TrimSpace(string(keyBody)))
-	if err != nil || len(key) != ed25519.PrivateKeySize {
-		return serverDoctorProfile{}, errors.New("server doctor credential invalid")
+	var key ed25519.PrivateKey
+	deviceCredential := ""
+	if keyPath := values["PUNARO_SERVER_DOCTOR_PRIVATE_KEY_FILE"]; keyPath != "" {
+		keyBody, err := readProtectedServerDoctorFile(ctx, keyPath, 4<<10)
+		if err != nil {
+			return serverDoctorProfile{}, errors.New("server doctor credential unavailable")
+		}
+		decoded, err := base64.RawURLEncoding.DecodeString(strings.TrimSpace(string(keyBody)))
+		if err != nil || len(decoded) != ed25519.PrivateKeySize {
+			return serverDoctorProfile{}, errors.New("server doctor credential invalid")
+		}
+		key = ed25519.PrivateKey(decoded)
+	} else {
+		credentialBody, err := readProtectedServerDoctorFile(ctx, values["PUNARO_SERVER_DOCTOR_DEVICE_CREDENTIAL_FILE"], 4<<10)
+		if err != nil {
+			return serverDoctorProfile{}, errors.New("server doctor credential unavailable")
+		}
+		deviceCredential = strings.TrimSpace(string(credentialBody))
+		if !validServerDoctorDeviceCredential(deviceCredential) {
+			return serverDoctorProfile{}, errors.New("server doctor credential invalid")
+		}
 	}
 	accessBody, err := readProtectedServerDoctorFile(ctx, values["PUNARO_SERVER_DOCTOR_ACCESS_TOKEN_FILE"], 4<<10)
 	if err != nil {
@@ -857,7 +893,7 @@ func parseServerDoctorProfile(ctx context.Context, body []byte) (serverDoctorPro
 		accessValues[name] = value
 	}
 	profile := serverDoctorProfile{
-		RelayURL: values["PUNARO_SERVER_DOCTOR_RELAY_URL"], MachineID: values["PUNARO_SERVER_DOCTOR_MACHINE_ID"], PrivateKey: ed25519.PrivateKey(key),
+		RelayURL: values["PUNARO_SERVER_DOCTOR_RELAY_URL"], MachineID: values["PUNARO_SERVER_DOCTOR_MACHINE_ID"], PrivateKey: key, DeviceCredential: deviceCredential,
 		AccessToken: adapter.AccessServiceToken{ClientID: accessValues["PUNARO_CF_ACCESS_CLIENT_ID"], ClientSecret: accessValues["PUNARO_CF_ACCESS_CLIENT_SECRET"]},
 	}
 	if profile.RelayURL == "" || validServerMachineID(profile.MachineID) == "" || profile.AccessToken.ClientID == "" || profile.AccessToken.ClientSecret == "" {
@@ -869,19 +905,35 @@ func parseServerDoctorProfile(ctx context.Context, body []byte) (serverDoctorPro
 	return profile, nil
 }
 
-func writeServerDoctorProfile(path, relayURL, machineID, privateKeyFile, accessTokenFile string) error {
-	for _, value := range []string{relayURL, machineID, privateKeyFile, accessTokenFile} {
+func validServerDoctorDeviceCredential(credential string) bool {
+	return credential != "" && credential == strings.TrimSpace(credential) && len(credential) <= 1024 && !strings.ContainsAny(credential, "\r\n\x00")
+}
+
+func writeServerDoctorProfile(path, relayURL, machineID, privateKeyFile, deviceCredentialFile, accessTokenFile string) error {
+	if (privateKeyFile == "") == (deviceCredentialFile == "") {
+		return errors.New("server doctor profile invalid")
+	}
+	for _, value := range []string{relayURL, machineID, accessTokenFile} {
 		if value == "" || strings.ContainsAny(value, "\r\n\x00") {
+			return errors.New("server doctor profile invalid")
+		}
+	}
+	for _, value := range []string{privateKeyFile, deviceCredentialFile} {
+		if strings.ContainsAny(value, "\r\n\x00") {
 			return errors.New("server doctor profile invalid")
 		}
 	}
 	if path == "" || !filepath.IsAbs(path) || filepath.Clean(path) != path {
 		return errors.New("server doctor profile path invalid")
 	}
+	credentialLine := "PUNARO_SERVER_DOCTOR_PRIVATE_KEY_FILE=" + privateKeyFile + "\n"
+	if deviceCredentialFile != "" {
+		credentialLine = "PUNARO_SERVER_DOCTOR_DEVICE_CREDENTIAL_FILE=" + deviceCredentialFile + "\n"
+	}
 	body := []byte(
 		"PUNARO_SERVER_DOCTOR_RELAY_URL=" + relayURL + "\n" +
 			"PUNARO_SERVER_DOCTOR_MACHINE_ID=" + machineID + "\n" +
-			"PUNARO_SERVER_DOCTOR_PRIVATE_KEY_FILE=" + privateKeyFile + "\n" +
+			credentialLine +
 			"PUNARO_SERVER_DOCTOR_ACCESS_TOKEN_FILE=" + accessTokenFile + "\n",
 	)
 	ctx, cancel := context.WithTimeout(context.Background(), serverDoctorCommandTimeout)

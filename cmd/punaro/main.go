@@ -695,7 +695,7 @@ func runServerDoctor(args []string, stdout, stderr io.Writer) int {
 
 func runDoctorProfile(args []string, stdout, stderr io.Writer) int {
 	if len(args) == 0 || args[0] != "write" {
-		_, _ = fmt.Fprintln(stderr, "usage: punaro doctor-profile write --out FILE --relay-url URL --machine-id ID --private-key-file FILE --access-token-file FILE")
+		_, _ = fmt.Fprintln(stderr, "usage: punaro doctor-profile write --out FILE --relay-url URL --machine-id ID (--private-key-file FILE | --device-credential-file FILE) --access-token-file FILE")
 		return 2
 	}
 	flags := flag.NewFlagSet("doctor-profile write", flag.ContinueOnError)
@@ -704,11 +704,12 @@ func runDoctorProfile(args []string, stdout, stderr io.Writer) int {
 	relayURL := flags.String("relay-url", "", "fixed relay origin")
 	machineID := flags.String("machine-id", "", "enrolled relay diagnostic machine identity")
 	privateKeyFile := flags.String("private-key-file", "", "absolute protected Ed25519 private-key file")
+	deviceCredentialFile := flags.String("device-credential-file", "", "absolute protected device-credential file")
 	accessTokenFile := flags.String("access-token-file", "", "absolute protected Cloudflare Access service-token file")
 	if flags.Parse(args[1:]) != nil || flags.NArg() != 0 {
 		return 2
 	}
-	if err := writeServerDoctorProfile(strings.TrimSpace(*output), strings.TrimSpace(*relayURL), strings.TrimSpace(*machineID), strings.TrimSpace(*privateKeyFile), strings.TrimSpace(*accessTokenFile)); err != nil {
+	if err := writeServerDoctorProfile(strings.TrimSpace(*output), strings.TrimSpace(*relayURL), strings.TrimSpace(*machineID), strings.TrimSpace(*privateKeyFile), strings.TrimSpace(*deviceCredentialFile), strings.TrimSpace(*accessTokenFile)); err != nil {
 		_, _ = fmt.Fprintln(stderr, "punaro doctor-profile write failed")
 		return 1
 	}
