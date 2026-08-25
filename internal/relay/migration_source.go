@@ -293,7 +293,12 @@ func CheckMigrationSourceEnrollmentCoverage(ctx context.Context, path, enrollmen
 	}
 	for rows.Next() {
 		var endpoint, machineID string
-		if err := rows.Scan(&endpoint, &machineID); err != nil || (!authenticator.AllowsEndpoint(machineID, endpoint) && machineID != retiredMigrationMachineID(endpoint)) {
+		if err := rows.Scan(&endpoint, &machineID); err != nil {
+			_ = rows.Close()
+			return errors.New("relay migration enrollment does not cover every endpoint")
+		}
+		retiredRepairEndpoint := IsLegacyTelegramMigrationSource(manifest) && (manifest.Phase == MigrationSourcePrepared || manifest.Phase == MigrationSourceRetired) && machineID == retiredMigrationMachineID(endpoint)
+		if !authenticator.AllowsEndpoint(machineID, endpoint) && !retiredRepairEndpoint {
 			_ = rows.Close()
 			return errors.New("relay migration enrollment does not cover every endpoint")
 		}
@@ -404,6 +409,20 @@ func retiredMigrationMachineID(endpoint string) string {
 }
 
 func repairLegacyTelegramMigrationSource(ctx context.Context, conn *sql.Conn) error {
+	existing, err := conn.QueryContext(ctx, `SELECT endpoint,machine_id FROM endpoints ORDER BY endpoint COLLATE BINARY`)
+	if err != nil {
+		return errors.New("relay migration legacy endpoint provenance is unavailable")
+	}
+	for existing.Next() {
+		var endpoint, machineID string
+		if err := existing.Scan(&endpoint, &machineID); err != nil || machineID == retiredMigrationMachineID(endpoint) {
+			_ = existing.Close()
+			return errors.New("relay migration legacy endpoint provenance is invalid")
+		}
+	}
+	if err := existing.Close(); err != nil || existing.Err() != nil {
+		return errors.New("relay migration legacy endpoint provenance is unavailable")
+	}
 	rows, err := conn.QueryContext(ctx, `WITH referenced(endpoint) AS (
 		SELECT endpoint FROM memberships
 		UNION SELECT from_endpoint FROM messages
@@ -1269,6 +1288,7 @@ func verifyMigrationSourceSchema(ctx context.Context, q migrationQueryer, versio
 		for _, clause := range []string{
 			"\n        OR EXISTS (SELECT 1 FROM memberships AS membership LEFT JOIN endpoints AS endpoint ON endpoint.endpoint=membership.endpoint WHERE endpoint.endpoint IS NULL)",
 			"\n        OR EXISTS (SELECT 1 FROM messages AS message LEFT JOIN endpoints AS endpoint ON endpoint.endpoint=message.from_endpoint WHERE endpoint.endpoint IS NULL)",
+			"\n\t\tOR EXISTS (SELECT 1 FROM conversation_controls AS control\n\t\t\tLEFT JOIN endpoints AS actor ON actor.endpoint=control.actor_endpoint\n\t\t\tLEFT JOIN endpoints AS member ON member.endpoint=control.member_endpoint\n\t\t\tWHERE actor.endpoint IS NULL OR member.endpoint IS NULL)",
 		} {
 			logicalStateQuery = strings.ReplaceAll(logicalStateQuery, clause, "")
 		}
@@ -1281,6 +1301,9 @@ func verifyMigrationSourceSchema(ctx context.Context, q migrationQueryer, versio
 		logicalStateQuery = strings.Replace(logicalStateQuery,
 			`OR EXISTS (SELECT 1 FROM recipient_cursors AS cursor LEFT JOIN endpoints AS endpoint ON endpoint.endpoint=cursor.recipient_endpoint LEFT JOIN roles AS role ON substr(cursor.recipient_endpoint,7)=role.role WHERE (substr(cursor.recipient_endpoint,1,6)=char(30)||'role:' AND role.role IS NULL) OR (substr(cursor.recipient_endpoint,1,6)<>char(30)||'role:' AND endpoint.endpoint IS NULL))`,
 			`OR EXISTS (SELECT 1 FROM recipient_cursors AS cursor LEFT JOIN roles AS role ON substr(cursor.recipient_endpoint,7)=role.role WHERE substr(cursor.recipient_endpoint,1,6)=char(30)||'role:' AND role.role IS NULL)`, 1)
+		logicalStateQuery = strings.Replace(logicalStateQuery,
+			`WHERE role.role IS NULL OR endpoint.endpoint IS NULL`,
+			`WHERE role.role IS NULL`, 1)
 		logicalStateQuery = strings.Replace(logicalStateQuery,
 			`OR endpoint.machine_id<>binding.machine_id OR endpoint.ownership_generation<>binding.ownership_generation)`,
 			`OR (endpoint.endpoint IS NOT NULL AND endpoint.machine_id<>binding.machine_id))`, 1)
