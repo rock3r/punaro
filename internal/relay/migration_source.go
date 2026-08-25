@@ -94,21 +94,22 @@ type MigrationSourceHashes struct {
 // MigrationSourceManifest is a content-addressed logical view of one SQLite
 // relay. It never includes file bytes, page order, WAL state, or secrets.
 type MigrationSourceManifest struct {
-	Version                 int                   `json:"version"`
-	SourceID                string                `json:"source_id"`
-	Phase                   MigrationSourcePhase  `json:"phase"`
-	EpochID                 string                `json:"epoch_id,omitempty"`
-	TargetIdentity          string                `json:"target_identity,omitempty"`
-	Counts                  MigrationSourceCounts `json:"counts"`
-	TableSHA256             MigrationSourceHashes `json:"table_sha256"`
-	Fingerprint             string                `json:"fingerprint"`
-	ExpectedFingerprint     string                `json:"-"`
-	lastEpochID             string
-	lastTargetIdentity      string
-	lastExpectedFingerprint string
-	lastResultFingerprint   string
-	lastCutoff              int64
-	lastTransition          string
+	Version                     int                   `json:"version"`
+	SourceID                    string                `json:"source_id"`
+	Phase                       MigrationSourcePhase  `json:"phase"`
+	EpochID                     string                `json:"epoch_id,omitempty"`
+	TargetIdentity              string                `json:"target_identity,omitempty"`
+	Counts                      MigrationSourceCounts `json:"counts"`
+	TableSHA256                 MigrationSourceHashes `json:"table_sha256"`
+	Fingerprint                 string                `json:"fingerprint"`
+	ExpectedFingerprint         string                `json:"-"`
+	lastEpochID                 string
+	lastTargetIdentity          string
+	lastExpectedFingerprint     string
+	lastResultFingerprint       string
+	lastCutoff                  int64
+	lastTransition              string
+	legacyTelegramRepairLineage bool
 }
 
 // IsLegacyTelegramMigrationSource identifies the exact v7-shaped predecessor
@@ -126,6 +127,23 @@ func IsLegacyTelegramMigrationSource(manifest MigrationSourceManifest) bool {
 		manifest.Counts.DirectMessageIdempotency == 0 && manifest.TableSHA256.DirectMessageIdempotency == "" &&
 		manifest.Counts.DisplayNameIdempotency == 0 && manifest.TableSHA256.DisplayNameIdempotency == "" &&
 		manifest.Counts.TelegramClaimIdempotency == manifest.Counts.TelegramClaims && validMigrationDigest(manifest.TableSHA256.TelegramClaimIdempotency)
+}
+
+func isLegacyTelegramRepairLineage(manifest MigrationSourceManifest) bool {
+	return IsLegacyTelegramMigrationSource(manifest) || manifest.legacyTelegramRepairLineage
+}
+
+func legacyTelegramRepairJournalAllows(manifest MigrationSourceManifest) bool {
+	switch manifest.Phase {
+	case MigrationSourceActive:
+		return manifest.lastTransition == "aborted"
+	case MigrationSourcePrepared:
+		return manifest.lastTransition == "prepared"
+	case MigrationSourceRetired:
+		return manifest.lastTransition == "retired"
+	default:
+		return false
+	}
 }
 
 // MigrationSourceTablePresent reports whether one canonical cutover table is
@@ -373,7 +391,7 @@ func PrepareMigrationSource(ctx context.Context, path, epochID, targetIdentity, 
 		if current.Phase != MigrationSourceActive || current.Fingerprint != expectedFingerprint {
 			return MigrationSourceManifest{}, errors.New("relay migration source changed before preparation")
 		}
-		if IsLegacyTelegramMigrationSource(current) {
+		if isLegacyTelegramRepairLineage(current) {
 			if err := repairLegacyTelegramMigrationSource(ctx, conn, current); err != nil {
 				return MigrationSourceManifest{}, err
 			}
@@ -394,7 +412,7 @@ func PrepareMigrationSource(ctx context.Context, path, epochID, targetIdentity, 
 			ownership_generation=NULL,consumer_generation=NULL,lease_until=NULL`); err != nil {
 			return MigrationSourceManifest{}, errors.New("relay migration delivery fencing failed")
 		}
-		if IsLegacyTelegramMigrationSource(current) {
+		if isLegacyTelegramRepairLineage(current) {
 			if err := verifyRepairedLegacyTelegramMigrationSource(ctx, conn); err != nil {
 				return MigrationSourceManifest{}, err
 			}
@@ -434,7 +452,7 @@ func readLegacyMigrationEndpointRepairs(ctx context.Context, q migrationQueryer,
 	if tables == 0 {
 		return repairs, nil
 	}
-	journalAllowsRepairs := IsLegacyTelegramMigrationSource(manifest) && (manifest.Phase == MigrationSourcePrepared || manifest.Phase == MigrationSourceRetired || manifest.Phase == MigrationSourceActive && manifest.lastTransition == "aborted")
+	journalAllowsRepairs := isLegacyTelegramRepairLineage(manifest) && legacyTelegramRepairJournalAllows(manifest)
 	if !journalAllowsRepairs {
 		return nil, errors.New("relay migration legacy endpoint provenance is invalid")
 	}
@@ -698,6 +716,14 @@ func inspectMigrationSource(ctx context.Context, q migrationQueryer) (MigrationS
 	if claimIdempotencyTables == 1 && telegramTables != 3 {
 		return MigrationSourceManifest{}, errors.New("relay migration source schema is unavailable")
 	}
+	var repairTables, toRoleColumns int
+	if err := q.QueryRowContext(ctx, `SELECT count(*) FROM sqlite_master WHERE type='table' AND name=?`, legacyMigrationEndpointRepairsTable).Scan(&repairTables); err != nil || repairTables < 0 || repairTables > 1 {
+		return MigrationSourceManifest{}, errors.New("relay migration source schema is unavailable")
+	}
+	if err := q.QueryRowContext(ctx, `SELECT count(*) FROM pragma_table_info('messages') WHERE name='to_role'`).Scan(&toRoleColumns); err != nil || toRoleColumns < 0 || toRoleColumns > 1 {
+		return MigrationSourceManifest{}, errors.New("relay migration source schema is unavailable")
+	}
+	reopenedLegacyTelegram := repairTables == 1 && toRoleColumns == 1 && controlTables == 2 && profileTables == 2 && rateBucketTables == 1 && directTables == 3 && telegramTables == 3 && claimIdempotencyTables == 1
 	manifest := MigrationSourceManifest{Version: 3}
 	roleOnly := false
 	legacyTelegram := false
@@ -720,6 +746,10 @@ func inspectMigrationSource(ctx context.Context, q migrationQueryer) (MigrationS
 		legacyTelegram = true
 		manifest.Version = 7
 		tableSpecs, schema = legacyTelegramV7MigrationTableSpecs, legacyTelegramV7MigrationSourceSchema
+	case reopenedLegacyTelegram:
+		manifest.Version = 8
+		manifest.legacyTelegramRepairLineage = true
+		tableSpecs, schema = migrationTableSpecs, migrationSourceSchema+";legacy-telegram-repair-lineage"
 	case claimIdempotencyTables == 1 && telegramTables == 3:
 		manifest.Version = 8
 		tableSpecs, schema = migrationTableSpecs, migrationSourceSchema
@@ -764,7 +794,10 @@ func inspectMigrationSource(ctx context.Context, q migrationQueryer) (MigrationS
 	if manifest.lastTransition != "" && manifest.lastTransition != "prepared" && manifest.lastTransition != "aborted" && manifest.lastTransition != "retired" {
 		return MigrationSourceManifest{}, errors.New("relay migration transition journal is invalid")
 	}
-	if err := verifyMigrationSourceSchemaVersion(ctx, q, manifest.Version, controlTables == 2, profileTables == 2, rateBucketTables == 1, directTables == 3, legacyTelegram); err != nil {
+	if reopenedLegacyTelegram && !legacyTelegramRepairJournalAllows(manifest) {
+		return MigrationSourceManifest{}, errors.New("relay migration legacy endpoint provenance is invalid")
+	}
+	if err := verifyMigrationSourceSchemaVersion(ctx, q, manifest.Version, controlTables == 2, profileTables == 2, rateBucketTables == 1, directTables == 3, legacyTelegram, legacyTelegram || manifest.legacyTelegramRepairLineage); err != nil {
 		return MigrationSourceManifest{}, err
 	}
 	overall := sha256.New()
@@ -842,11 +875,11 @@ func conversationDisplayNameTypeCheck(version int) string {
 	return " OR (display_name IS NOT NULL AND typeof(display_name)<>'text')"
 }
 
-func verifyMigrationSourceSchemaVersion(ctx context.Context, q migrationQueryer, version int, controls, profiles, rateBuckets, direct, legacyTelegram bool) error {
+func verifyMigrationSourceSchemaVersion(ctx context.Context, q migrationQueryer, version int, controls, profiles, rateBuckets, direct, legacyTelegram, legacyTelegramRepairLineage bool) error {
 	if version == 1 {
 		return verifyLegacyMigrationSourceSchema(ctx, q)
 	}
-	return verifyMigrationSourceSchema(ctx, q, version, controls, profiles, rateBuckets, direct, legacyTelegram)
+	return verifyMigrationSourceSchema(ctx, q, version, controls, profiles, rateBuckets, direct, legacyTelegram, legacyTelegramRepairLineage)
 }
 
 func verifyLegacyMigrationSourceSchema(ctx context.Context, q migrationQueryer) error {
@@ -882,9 +915,9 @@ func verifyLegacyMigrationSourceSchema(ctx context.Context, q migrationQueryer) 
 	return foreignKeys.Close()
 }
 
-func verifyMigrationSourceSchema(ctx context.Context, q migrationQueryer, version int, controls, profiles, rateBuckets, direct, legacyTelegram bool) error {
+func verifyMigrationSourceSchema(ctx context.Context, q migrationQueryer, version int, controls, profiles, rateBuckets, direct, legacyTelegram, legacyTelegramRepairLineage bool) error {
 	var repairTables int
-	if err := q.QueryRowContext(ctx, `SELECT count(*) FROM sqlite_master WHERE type='table' AND name=?`, legacyMigrationEndpointRepairsTable).Scan(&repairTables); err != nil || repairTables < 0 || repairTables > 1 || repairTables == 1 && !legacyTelegram {
+	if err := q.QueryRowContext(ctx, `SELECT count(*) FROM sqlite_master WHERE type='table' AND name=?`, legacyMigrationEndpointRepairsTable).Scan(&repairTables); err != nil || repairTables < 0 || repairTables > 1 || repairTables == 1 && !legacyTelegramRepairLineage {
 		return errors.New("relay migration source schema is unavailable")
 	}
 	rows, err := q.QueryContext(ctx, `SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%' ORDER BY name`)
@@ -906,7 +939,7 @@ func verifyMigrationSourceSchema(ctx context.Context, q migrationQueryer, versio
 	case legacyTelegram:
 		want = []string{"conversation_control_idempotency", "conversation_controls", "conversation_idempotency", "conversations", "deliveries", "endpoints", "idempotency", "memberships", "messages", "recipient_cursors", "relay_migration_control", "request_nonces", "role_bindings", "role_memberships", "roles", "telegram_claim_events", "telegram_claims", "telegram_participants"}
 		if repairTables == 1 {
-			want = append(want[:11], append([]string{legacyMigrationEndpointRepairsTable}, want[11:]...)...)
+			want = append(want, legacyMigrationEndpointRepairsTable)
 		}
 	case direct:
 		want = []string{"conversation_control_idempotency", "conversation_controls", "conversation_display_name_idempotency", "conversation_idempotency", "conversations", "deliveries", "direct_conversations", "direct_message_idempotency", "endpoints", "idempotency", "memberships", "message_from_roles", "messages", "rate_buckets", "recipient_cursors", "relay_migration_control", "request_nonces", "role_bindings", "role_memberships", "role_profile_idempotency", "role_profiles", "roles", "telegram_claim_events", "telegram_claim_idempotency", "telegram_claims", "telegram_participants"}
@@ -916,6 +949,9 @@ func verifyMigrationSourceSchema(ctx context.Context, q migrationQueryer, versio
 		want = []string{"conversation_control_idempotency", "conversation_controls", "conversation_display_name_idempotency", "conversation_idempotency", "conversations", "deliveries", "endpoints", "idempotency", "memberships", "messages", "recipient_cursors", "relay_migration_control", "request_nonces", "role_bindings", "role_memberships", "role_profile_idempotency", "role_profiles", "roles", "telegram_claim_events", "telegram_claim_idempotency", "telegram_claims", "telegram_participants"}
 	case !controls:
 		want = []string{"conversation_display_name_idempotency", "conversation_idempotency", "conversations", "deliveries", "endpoints", "idempotency", "memberships", "messages", "recipient_cursors", "relay_migration_control", "request_nonces", "role_bindings", "role_memberships", "roles", "telegram_claim_events", "telegram_claim_idempotency", "telegram_claims", "telegram_participants"}
+	}
+	if legacyTelegramRepairLineage && !legacyTelegram {
+		want = append(want, legacyMigrationEndpointRepairsTable)
 	}
 	if version < 8 {
 		filtered := make([]string, 0, len(want))
@@ -937,6 +973,7 @@ func verifyMigrationSourceSchema(ctx context.Context, q migrationQueryer, versio
 		}
 		want = filtered
 	}
+	sort.Strings(want)
 	if strings.Join(names, "\x00") != strings.Join(want, "\x00") {
 		return errors.New("relay migration source has an unexpected schema")
 	}
@@ -989,6 +1026,8 @@ func verifyMigrationSourceSchema(ctx context.Context, q migrationQueryer, versio
 	}
 	if legacyTelegram {
 		delete(expectedColumns, "conversation_display_name_idempotency")
+	}
+	if legacyTelegramRepairLineage {
 		expectedColumns["messages"] = append(expectedColumns["messages"], "to_role:TEXT:0:0:-")
 	}
 	if version < 8 {
@@ -1408,8 +1447,11 @@ func verifyMigrationSourceSchema(ctx context.Context, q migrationQueryer, versio
 			`OR endpoint.machine_id<>binding.machine_id OR endpoint.ownership_generation<>binding.ownership_generation)`,
 			`OR (endpoint.endpoint IS NOT NULL AND endpoint.machine_id<>binding.machine_id))`, 1)
 		logicalStateQuery += `
-		OR EXISTS (SELECT 1 FROM messages WHERE to_role IS NOT NULL)
 		OR EXISTS (SELECT 1 FROM telegram_claims GROUP BY requested_by_machine,idempotency_key HAVING count(*)>1)`
+	}
+	if legacyTelegramRepairLineage {
+		logicalStateQuery += `
+		OR EXISTS (SELECT 1 FROM messages WHERE to_role IS NOT NULL)`
 	}
 	if !controls {
 		for _, clause := range []string{

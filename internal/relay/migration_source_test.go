@@ -1260,19 +1260,19 @@ func TestPrepareLegacyTelegramBranchRepairsDerivedOperationalState(t *testing.T)
 	if err != nil || aborted.Phase != MigrationSourceActive {
 		t.Fatalf("abort repaired legacy source=%#v err=%v", aborted, err)
 	}
-	db, err = openMigrationSourceDatabase(path, false)
+	reopened, err := Open(path)
 	if err != nil {
+		t.Fatalf("reopen aborted legacy source: %v", err)
+	}
+	if err := reopened.ConsumeRequestNonce("machine-a", "post-abort-write", now, now.Add(time.Hour)); err != nil {
+		_ = reopened.Close()
 		t.Fatal(err)
 	}
-	if _, err := db.ExecContext(ctx, `INSERT INTO request_nonces(machine_id,nonce,expires_at) VALUES('machine-a','post-abort-write',?)`, now.Add(time.Hour).UnixMilli()); err != nil {
-		_ = db.Close()
-		t.Fatal(err)
-	}
-	if err := db.Close(); err != nil {
+	if err := reopened.Close(); err != nil {
 		t.Fatal(err)
 	}
 	active, err := InspectMigrationSource(ctx, path)
-	if err != nil || active.Phase != MigrationSourceActive || active.Fingerprint == aborted.Fingerprint {
+	if err != nil || active.Version != 8 || active.Phase != MigrationSourceActive || active.Fingerprint == aborted.Fingerprint || !active.legacyTelegramRepairLineage {
 		t.Fatalf("inspect written aborted legacy source=%#v err=%v", active, err)
 	}
 	if err := CheckMigrationSourceEnrollmentCoverage(ctx, path, enrollment); err != nil {
@@ -1281,6 +1281,10 @@ func TestPrepareLegacyTelegramBranchRepairsDerivedOperationalState(t *testing.T)
 	retried, err := PrepareMigrationSource(ctx, path, uuid.NewString(), prepared.TargetIdentity, active.Fingerprint, now.Add(2*time.Minute))
 	if err != nil || retried.Phase != MigrationSourcePrepared {
 		t.Fatalf("retry repaired legacy source=%#v err=%v", retried, err)
+	}
+	reopenedPrepared, err := InspectMigrationSource(ctx, path)
+	if err != nil || reopenedPrepared.Version != 8 || reopenedPrepared.Phase != MigrationSourcePrepared || reopenedPrepared.Fingerprint != retried.Fingerprint || !reopenedPrepared.legacyTelegramRepairLineage {
+		t.Fatalf("inspect retried reopened legacy source=%#v err=%v", reopenedPrepared, err)
 	}
 }
 
