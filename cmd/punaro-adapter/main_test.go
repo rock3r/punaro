@@ -1282,7 +1282,7 @@ func TestLoadConfigLoadsProtectedDeviceCredentialExclusively(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = os.RemoveAll(credentialDirectory) })
-	if err := os.Chmod(credentialDirectory, 0o700); err != nil {
+	if err := os.Chmod(credentialDirectory, 0o700); err != nil { // #nosec G302 -- private credential fixture directory.
 		t.Fatal(err)
 	}
 	credentialDirectory, err = filepath.Abs(credentialDirectory)

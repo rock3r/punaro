@@ -214,7 +214,7 @@ func (c *HTTPRelayClient) authenticateRequest(request *http.Request, method, pat
 }
 
 func (c *HTTPRelayClient) authenticationHeaders(method, path string, body []byte) (http.Header, string, error) {
-	request, err := http.NewRequest(method, "http://punaro.invalid", nil)
+	request, err := http.NewRequestWithContext(context.Background(), method, "http://punaro.invalid", nil)
 	if err != nil {
 		return nil, "", err
 	}

@@ -292,7 +292,7 @@ func TestTransitionAuthenticatorAcceptsMigratedCredentialForReadOnlyDoctor(t *te
 	if err != nil {
 		t.Fatal(err)
 	}
-	request := httptest.NewRequest(http.MethodHead, DoctorPath, nil)
+	request := httptest.NewRequestWithContext(context.Background(), http.MethodHead, DoctorPath, nil)
 	request.Header.Set("Authorization", "Bearer "+testTransitionToken)
 	session, err := auth.AuthenticateReadOnlyDoctor(request, nil, time.Now().UTC())
 	if err != nil || session.MachineID != "machine-a" || session.CredentialLookupID == "" {
