@@ -2013,7 +2013,14 @@ The implementation is not internet-exposure-ready until these cases pass:
   artifacts, never these dispatcher copies. Doctor requires the adapter,
   enrollment, memory, and trusted-attachment dispatchers to be regular,
   byte-identical executables, while the client installer waits for every
-  Windows destination to become replaceable before overwriting it.
+  Windows destination to become replaceable before overwriting it. When that
+  installer replaces an enabled repeating Windows task, it disables the task
+  for the complete replacement critical section, stops instances even if they
+  started while the fence was acquired, and restores the prior enabled/running
+  state on failure. A restoration failure is reported together with the original
+  installation error. It terminates only processes whose verified image is the
+  exact fixed bootstrap path, confirms their bounded exit, and then applies the
+  same replaceability fence.
   Platform services launch `punaro-bootstrap run`, which supervises the
   current-slot adapter, requires a local ready signal within 60 seconds when a
   previous slot exists, rolls back once if the fresh catalog still allows that

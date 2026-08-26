@@ -44,9 +44,9 @@ function Get-PunaroProcessImage($Process) {
     return $image
 }
 
-function Get-PunaroMatchingAdapterPids([string]$WantPath) {
-    try { $listed = @(Get-Process -ErrorAction Stop) } catch { Stop-Install 'could not enumerate processes to recover run.pid' }
-    if ($listed.Count -eq 0) { Stop-Install 'could not enumerate processes to recover run.pid' }
+function Get-PunaroMatchingProcessPids([string]$WantPath) {
+    try { $listed = @(Get-Process -ErrorAction Stop) } catch { Stop-Install 'could not enumerate process images safely' }
+    if ($listed.Count -eq 0) { Stop-Install 'could not enumerate process images safely' }
     $usable = 0
     $matches = @()
     foreach ($proc in $listed) {
@@ -58,11 +58,11 @@ function Get-PunaroMatchingAdapterPids([string]$WantPath) {
             $matches += $proc.Id
         }
     }
-    if ($usable -eq 0) { Stop-Install 'could not enumerate processes to recover run.pid' }
+    if ($usable -eq 0) { Stop-Install 'could not enumerate process images safely' }
     return $matches
 }
 
-function Stop-PunaroMatchingAdapter([int]$ProcessId, [string]$WantPath, [switch]$RequireImage) {
+function Stop-PunaroMatchingProcess([int]$ProcessId, [string]$WantPath, [switch]$RequireImage) {
     $proc = Get-Process -Id $ProcessId -ErrorAction SilentlyContinue
     if ($null -eq $proc) { return }
     $image = Get-PunaroProcessImage $proc
@@ -72,6 +72,8 @@ function Stop-PunaroMatchingAdapter([int]$ProcessId, [string]$WantPath, [switch]
     }
     $got = [System.IO.Path]::GetFullPath($image)
     if (-not $WantPath.Equals($got, [System.StringComparison]::OrdinalIgnoreCase)) { return }
+    # Revalidate immediately before termination; Windows has no atomic
+    # path-bound process-stop primitive that also eliminates PID reuse.
     Stop-Process -Id $ProcessId -Force -ErrorAction SilentlyContinue
     $deadline = (Get-Date).AddSeconds(5)
     do {
@@ -79,8 +81,16 @@ function Stop-PunaroMatchingAdapter([int]$ProcessId, [string]$WantPath, [switch]
         $proc = Get-Process -Id $ProcessId -ErrorAction SilentlyContinue
     } while ($null -ne $proc -and (Get-Date) -lt $deadline)
     if ($null -ne (Get-Process -Id $ProcessId -ErrorAction SilentlyContinue)) {
-        Stop-Install 'could not stop a matching Punaro adapter'
+        Stop-Install 'could not stop a matching Punaro process'
     }
+}
+
+function Stop-PunaroMatchingProcesses([string]$WantPath) {
+    foreach ($matchPid in @(Get-PunaroMatchingProcessPids $WantPath)) {
+        Stop-PunaroMatchingProcess $matchPid $WantPath
+    }
+    $remaining = @(Get-PunaroMatchingProcessPids $WantPath)
+    if ($remaining.Count -gt 0) { Stop-Install 'could not stop a matching Punaro process' }
 }
 
 function Stop-PunaroOrphanAdapter([string]$BootstrapDirectory) {
@@ -110,14 +120,10 @@ function Stop-PunaroOrphanAdapter([string]$BootstrapDirectory) {
     $want = [System.IO.Path]::GetFullPath($orphanPath)
     # A starting marker (pid 0) is recovered by identity-killing matching adapter images.
     if ($starting -and $orphanPid -le 0) {
-        foreach ($matchPid in @(Get-PunaroMatchingAdapterPids $want)) {
-            Stop-PunaroMatchingAdapter $matchPid $want
-        }
-        $remaining = @(Get-PunaroMatchingAdapterPids $want)
-        if ($remaining.Count -gt 0) { Stop-Install 'could not stop a matching Punaro adapter' }
+        Stop-PunaroMatchingProcesses $want
         return
     }
-    Stop-PunaroMatchingAdapter $orphanPid $want -RequireImage
+    Stop-PunaroMatchingProcess $orphanPid $want -RequireImage
 }
 
 function Wait-PunaroReplaceableBinary([string]$Path) {
@@ -351,10 +357,13 @@ if ([string]::IsNullOrWhiteSpace($MailboxStateDir)) {
 }
 $MailboxStateDir = Get-FullPath $MailboxStateDir
 
+$fixedBootstrapPath = [System.IO.Path]::GetFullPath((Join-Path $binDir 'punaro-bootstrap.exe'))
 $adapterTaskName = 'Punaro Adapter'
 $adapterTaskWasRunning = $false
 $adapterTaskRestored = $false
 $adapterTaskWasDisabled = $false
+$adapterTaskTemporarilyDisabled = $false
+$installFailure = $null
 $existingAdapterTask = Get-ScheduledTask -TaskName $adapterTaskName -ErrorAction SilentlyContinue
 $hadRepeatTrigger = Test-PunaroRepeatTrigger $existingAdapterTask
 if ($null -ne $existingAdapterTask -and $existingAdapterTask.State -eq 'Disabled') {
@@ -363,6 +372,14 @@ if ($null -ne $existingAdapterTask -and $existingAdapterTask.State -eq 'Disabled
 }
 if ($null -ne $existingAdapterTask -and $existingAdapterTask.State -eq 'Running') {
     $adapterTaskWasRunning = $true
+}
+
+try {
+if ($null -ne $existingAdapterTask -and -not $adapterTaskWasDisabled -and ($adapterTaskWasRunning -or $hadRepeatTrigger)) {
+    Disable-ScheduledTask -TaskName $adapterTaskName
+    $adapterTaskTemporarilyDisabled = $true
+}
+if ($adapterTaskTemporarilyDisabled) {
     Stop-ScheduledTask -TaskName $adapterTaskName
     $deadline = (Get-Date).AddSeconds(30)
     do {
@@ -373,16 +390,23 @@ if ($null -ne $existingAdapterTask -and $existingAdapterTask.State -eq 'Running'
         Stop-Install 'could not stop the running Punaro Adapter task before replacing bootstrap'
     }
 }
-
-try {
+if ($adapterTaskTemporarilyDisabled) {
+    $existingAdapterTask = Get-ScheduledTask -TaskName $adapterTaskName -ErrorAction SilentlyContinue
+    if ($null -eq $existingAdapterTask -or $existingAdapterTask.State -ne 'Disabled') {
+        Stop-Install 'could not disable the Punaro Adapter task during binary replacement'
+    }
+}
 Stop-PunaroOrphanAdapter -BootstrapDirectory $bootstrapDir
+if ($adapterTaskTemporarilyDisabled) {
+    Stop-PunaroMatchingProcesses $fixedBootstrapPath
+}
 $dispatcherComponents = @('punaro-adapter.exe', 'punaro-trusted-attachment.exe', 'punaro-memory.exe', 'punaro-enroll.exe')
 foreach ($component in $dispatcherComponents) {
     Wait-PunaroReplaceableBinary -Path (Join-Path $binDir $component)
 }
-Wait-PunaroReplaceableBinary -Path (Join-Path $binDir 'punaro-bootstrap.exe')
+Wait-PunaroReplaceableBinary -Path $fixedBootstrapPath
 Build-PunaroBinary -Package (Join-Path $repoDir 'cmd\punaro-adapter') -Output (Join-Path $binDir 'punaro-adapter.exe') -LdFlags "-X main.adapterBuildRelease=$sourceRelease -X main.adapterExpectedSkillSetDigest=$skillSha256 -X main.adapterExpectedPluginRuntimeDigest=$pluginRuntimeSha256"
-Build-PunaroBinary -Package (Join-Path $repoDir 'cmd\punaro-bootstrap') -Output (Join-Path $binDir 'punaro-bootstrap.exe') -LdFlags "-X main.bootstrapBuildRelease=$sourceRelease"
+Build-PunaroBinary -Package (Join-Path $repoDir 'cmd\punaro-bootstrap') -Output $fixedBootstrapPath -LdFlags "-X main.bootstrapBuildRelease=$sourceRelease"
 Build-PunaroBinary -Package (Join-Path $repoDir 'cmd\punaro-trusted-attachment') -Output (Join-Path $binDir 'punaro-trusted-attachment.exe')
 Build-PunaroBinary -Package (Join-Path $repoDir 'cmd\punaro-memory') -Output (Join-Path $binDir 'punaro-memory.exe')
 Build-PunaroBinary -Package (Join-Path $repoDir 'cmd\punaro-enroll') -Output (Join-Path $binDir 'punaro-enroll.exe')
@@ -399,7 +423,7 @@ if (-not [string]::IsNullOrWhiteSpace($KeysFile)) {
     Get-RegularFile -Path $resolvedKeys -Label 'release keys file' | Out-Null
     $seedArguments += @('--keys-file', $resolvedKeys)
 }
-Invoke-Program -Program (Join-Path $binDir 'punaro-bootstrap.exe') -Arguments $seedArguments -Description 'bootstrap checkout seed'
+Invoke-Program -Program $fixedBootstrapPath -Arguments $seedArguments -Description 'bootstrap checkout seed'
 $launcherBuild = Join-Path $root ("punaro-launcher-" + [Guid]::NewGuid().ToString('N') + '.exe')
 try {
     Build-PunaroBinary -Package (Join-Path $repoDir 'cmd\punaro-launcher') -Output $launcherBuild
@@ -497,10 +521,10 @@ $settings.RestartInterval = [TimeSpan]::FromMinutes(1)
 Register-ScheduledTask -TaskName $adapterTaskName -Action $action -Trigger $triggers -Principal $principal -Settings $settings -Description 'Punaro local mailbox adapter' -Force | Out-Null
 if ($Enable -or $adapterTaskWasRunning) {
     Start-ScheduledTask -TaskName $adapterTaskName
-    $adapterTaskRestored = $true
 } elseif ($adapterTaskWasDisabled) {
     Disable-ScheduledTask -TaskName $adapterTaskName
 }
+$adapterTaskRestored = $true
 
 if (-not [string]::IsNullOrWhiteSpace($AgentGuidanceDir)) {
     & (Join-Path $repoDir 'scripts\install-agent-guidance.ps1') -Directory $AgentGuidanceDir
@@ -512,8 +536,21 @@ Get-Content -LiteralPath $enrollmentFile
 Write-Output 'Next: add this machine''s distinct Access token pair to adapter.env; bind and attach desired aliases; then rerun with -Enable.'
 Write-Output 'After device-credential enrollment, use punaro-trusted-attachment.exe with a protected credential file and safe download root.'
 Write-Output 'Run punaro-enroll.exe prepare before the server owner issues the one-time enrollment for this device; redeem only a protected enrollment-material file.'
+} catch {
+    $installFailure = $_
+    throw
 } finally {
-    if ($adapterTaskWasRunning -and -not $adapterTaskRestored) {
-        Start-ScheduledTask -TaskName $adapterTaskName -ErrorAction SilentlyContinue
+    if ($adapterTaskTemporarilyDisabled -and -not $adapterTaskRestored) {
+        try {
+            Enable-ScheduledTask -TaskName $adapterTaskName -ErrorAction Stop
+            if ($adapterTaskWasRunning) {
+                Start-ScheduledTask -TaskName $adapterTaskName -ErrorAction Stop
+            }
+        } catch {
+            if ($null -ne $installFailure) {
+                throw "$($installFailure.Exception.Message); additionally could not restore the Punaro Adapter task: $($_.Exception.Message)"
+            }
+            throw
+        }
     }
 }

@@ -41,16 +41,20 @@ for expected in \
 	'KeysFile' \
 	'--keys-file' \
 	'Stop-ScheduledTask' \
+	'Disable-ScheduledTask' \
+	'Enable-ScheduledTask' \
 	'Get-ScheduledTask' \
 	'could not stop the running Punaro Adapter task' \
+	'could not disable the Punaro Adapter task during binary replacement' \
+	'additionally could not restore the Punaro Adapter task' \
 	'Wait-PunaroReplaceableBinary' \
 	'Stop-PunaroOrphanAdapter' \
 	'run.pid is invalid' \
 	'PathType Leaf' \
 	'starting marker' \
-	'could not enumerate processes to recover run.pid' \
+	'could not enumerate process images safely' \
 	'run.pid image is unverifiable' \
-	'could not stop a matching Punaro adapter' \
+	'could not stop a matching Punaro process' \
 	'run.pid' \
 	'FileShare]::None' \
 	'main.adapterBuildRelease' \
