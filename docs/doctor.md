@@ -335,7 +335,10 @@ registration files to match the digest embedded by the release builder.
 `client_component_launchers` requires the stable adapter, enrollment, memory,
 and trusted-attachment dispatchers to be regular executable copies of the same
 installer build. This catches mixed fixed payloads left by older installers;
-the dispatchers always execute the selected signed-slot artifacts.
+the dispatchers always execute the selected signed-slot artifacts. Hashing is
+performed in a deadline-isolated helper with an 8 MiB bound per launcher; a
+stalled helper is reported as required-unavailable rather than outliving the
+shared doctor deadline.
 
 The adapter inspects and runs `version` on the fixed installer-owned
 `punaro-bootstrap` executable in a deadline-isolated child and passes that

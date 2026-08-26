@@ -4,12 +4,9 @@
 package main
 
 import (
-	"context"
 	"errors"
 	"fmt"
 	"os"
-	"os/exec"
-	"os/signal"
 	"path/filepath"
 	"runtime"
 	"strings"
@@ -37,22 +34,12 @@ func run() int {
 		fmt.Fprintln(os.Stderr, "punaro launcher: selected component is unavailable; run the Punaro client installer or bootstrap doctor")
 		return 1
 	}
-	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt)
-	defer stop()
-	command := exec.CommandContext(ctx, path, os.Args[1:]...) // #nosec G204,G702 -- executable path uses a closed component allowlist.
-	command.Stdin = os.Stdin
-	command.Stdout = os.Stdout
-	command.Stderr = os.Stderr
-	command.Env = os.Environ()
-	if err := command.Run(); err != nil {
-		var exitError *exec.ExitError
-		if errors.As(err, &exitError) {
-			return exitError.ExitCode()
-		}
+	code, err := executeSelectedComponent(path, os.Args[1:])
+	if err != nil {
 		fmt.Fprintln(os.Stderr, "punaro launcher: selected component could not start")
 		return 1
 	}
-	return 0
+	return code
 }
 
 func userHome() string {

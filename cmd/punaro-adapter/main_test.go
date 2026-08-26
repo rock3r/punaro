@@ -325,7 +325,7 @@ func TestAdapterDoctorEmitsStrictHealthyReport(t *testing.T) {
 	adapterDoctorPluginProbe = func(context.Context, string) pluginDoctorResult {
 		return pluginDoctorResult{Portable: true, Codex: true, Claude: true, Launcher: true, Version: "v0.1.0-alpha.1", SkillDigest: "sha256:" + strings.Repeat("a", 64)}
 	}
-	adapterDoctorClientLauncherProbe = func(context.Context) bool { return true }
+	adapterDoctorClientLauncherProbe = func(context.Context) (bool, error) { return true, nil }
 	var stdout, stderr bytes.Buffer
 	if code := runAdapterDoctor(nil, &stdout, &stderr); code != 0 {
 		t.Fatalf("code=%d stdout=%q stderr=%q", code, stdout.String(), stderr.String())
@@ -403,6 +403,7 @@ func TestAdapterDoctorReportsIndependentRelayFailures(t *testing.T) {
 	adapterDoctorServiceProbe = func(context.Context, adapterConfig) (serviceDoctorResult, error) {
 		return serviceDoctorResult{Installed: true, Enabled: true, Running: true, Executable: true, ExitStatus: true, RestartState: true}, nil
 	}
+	adapterDoctorClientLauncherProbe = func(context.Context) (bool, error) { return true, nil }
 	var stdout, stderr bytes.Buffer
 	if code := runAdapterDoctor(nil, &stdout, &stderr); code != 1 || stderr.Len() != 0 {
 		t.Fatalf("code=%d stdout=%q stderr=%q", code, stdout.String(), stderr.String())
@@ -435,6 +436,7 @@ func TestAdapterDoctorRejectsStaleMachineAttachmentForCurrentEndpoint(t *testing
 		return adapter.DoctorProbeResult{Transport: true, Origin: true, Access: true, Enrolled: true, Protocol: true}, nil
 	}
 	adapterDoctorServiceProbe = func(context.Context, adapterConfig) (serviceDoctorResult, error) { return serviceDoctorResult{}, nil }
+	adapterDoctorClientLauncherProbe = func(context.Context) (bool, error) { return true, nil }
 	var stdout bytes.Buffer
 	if code := runAdapterDoctor(nil, &stdout, io.Discard); code != 1 {
 		t.Fatalf("code=%d report=%s", code, stdout.String())
@@ -1033,7 +1035,7 @@ func preserveAdapterDoctorDependencies(t *testing.T) {
 	relayProbe, notificationProbe, endpointProbe := adapterDoctorRelayProbe, adapterDoctorNotificationProbe, adapterDoctorEndpointProbe
 	mailboxProbe, serviceProbe := adapterDoctorMailboxProbe, adapterDoctorServiceProbe
 	bootstrapReleaseProbe, bootstrapProbe, pluginProbe := adapterDoctorBootstrapReleaseProbe, adapterDoctorBootstrapProbe, adapterDoctorPluginProbe
-	launcherProbe := adapterDoctorClientLauncherProbe
+	launcherProbe, launcherExecutable := adapterDoctorClientLauncherProbe, adapterDoctorClientLaunchersExecutable
 	buildRelease := adapterBuildRelease
 	t.Cleanup(func() {
 		adapterDoctorConfigLoad = configLoad
@@ -1042,6 +1044,7 @@ func preserveAdapterDoctorDependencies(t *testing.T) {
 		adapterDoctorMailboxProbe, adapterDoctorServiceProbe = mailboxProbe, serviceProbe
 		adapterDoctorBootstrapReleaseProbe, adapterDoctorBootstrapProbe, adapterDoctorPluginProbe = bootstrapReleaseProbe, bootstrapProbe, pluginProbe
 		adapterDoctorClientLauncherProbe = launcherProbe
+		adapterDoctorClientLaunchersExecutable = launcherExecutable
 		adapterBuildRelease = buildRelease
 	})
 }
@@ -1068,6 +1071,44 @@ func TestClientComponentLaunchersMustBeIdenticalRegularExecutables(t *testing.T)
 	}
 	if clientComponentLaunchersMatch(t.Context(), root) {
 		t.Fatal("mixed client component launchers accepted")
+	}
+}
+
+func TestRunAdapterClientLaunchersInspectEmitsOneBoundedBoolean(t *testing.T) {
+	root := t.TempDir()
+	for _, component := range []string{"punaro-adapter", "punaro-enroll", "punaro-memory", "punaro-trusted-attachment"} {
+		if runtime.GOOS == "windows" {
+			component += ".exe"
+		}
+		if err := os.WriteFile(filepath.Join(root, component), []byte("stable-launcher"), 0o700); err != nil { // #nosec G306 -- executable launcher fixture.
+			t.Fatal(err)
+		}
+	}
+	var stdout bytes.Buffer
+	if code := runAdapterClientLaunchersInspect([]string{"--directory", root}, &stdout); code != 0 || stdout.String() != "true\n" {
+		t.Fatalf("code=%d stdout=%q", code, stdout.String())
+	}
+	if code := runAdapterClientLaunchersInspect([]string{"--directory", "relative"}, io.Discard); code != 2 {
+		t.Fatalf("relative directory code=%d", code)
+	}
+}
+
+func TestAdapterClientLauncherIsolationHonorsDeadline(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("POSIX blocking executable fixture")
+	}
+	blocker := filepath.Join(t.TempDir(), "blocked-client-launcher-doctor")
+	if err := os.WriteFile(blocker, []byte("#!/bin/sh\nexec sleep 10\n"), 0o700); err != nil { // #nosec G306 -- private executable deadline fixture.
+		t.Fatal(err)
+	}
+	previous := adapterDoctorClientLaunchersExecutable
+	adapterDoctorClientLaunchersExecutable = func() (string, error) { return blocker, nil }
+	t.Cleanup(func() { adapterDoctorClientLaunchersExecutable = previous })
+	ctx, cancel := context.WithTimeout(t.Context(), 20*time.Millisecond)
+	defer cancel()
+	started := time.Now()
+	if matched, err := inspectAdapterClientLaunchersIsolated(ctx, t.TempDir()); err == nil || matched || time.Since(started) > time.Second {
+		t.Fatalf("matched=%v err=%v elapsed=%s", matched, err, time.Since(started))
 	}
 }
 

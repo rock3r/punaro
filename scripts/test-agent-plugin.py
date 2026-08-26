@@ -149,8 +149,8 @@ def validate_skills() -> None:
         if "set --" in posix_launcher:
             raise ValidationError(f"POSIX skill launcher must preserve forwarded arguments: {skill_name}/{command}")
         windows_launcher = (skill_root / "scripts" / f"{command}.cmd").read_text(encoding="utf-8")
-        if f"%LOCALAPPDATA%\\Punaro\\bootstrap\\current\\{command}-windows-%PUNARO_SKILL_ARCH%.exe" not in windows_launcher or "\\Punaro\\bin\\" in windows_launcher or "%PATH%" in windows_launcher:
-            raise ValidationError(f"Windows skill launcher must use the selected bootstrap slot: {skill_name}/{command}")
+        if f"%LOCALAPPDATA%\\Punaro\\bin\\{command}.exe" not in windows_launcher or "powershell.exe" in windows_launcher.lower() or "\\bootstrap\\current\\" in windows_launcher or "%PATH%" in windows_launcher:
+            raise ValidationError(f"Windows skill launcher must use the stable installer-owned dispatcher: {skill_name}/{command}")
 
     if os.name == "posix":
         with tempfile.TemporaryDirectory(prefix="punaro-skill-launchers-") as fixture:
@@ -198,6 +198,9 @@ def validate_mcp() -> dict[str, Any]:
             raise ValidationError(f"mailbox launcher must be a regular package file: {launcher.name}")
     if not os.access(ROOT / "scripts/punaro-plugin-mcp", os.X_OK):
         raise ValidationError("POSIX mailbox launcher must be executable")
+    windows_launcher = (ROOT / "scripts/punaro-plugin-mcp.cmd").read_text(encoding="utf-8")
+    if "%LOCALAPPDATA%\\Punaro\\bin\\punaro-adapter.exe" not in windows_launcher or "powershell.exe" in windows_launcher.lower() or "\\bootstrap\\current\\" in windows_launcher or "%PATH%" in windows_launcher:
+        raise ValidationError("Windows mailbox launcher must use the stable installer-owned dispatcher")
     return config
 
 

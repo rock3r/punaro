@@ -45,7 +45,7 @@ var requiredComponentCheckCodes = map[Component][]string{
 	ComponentAdapter: {
 		"adapter_configuration", "adapter_data_directory", "adapter_profile_file", "adapter_service_enabled", "adapter_service_executable", "adapter_service_installed",
 		"adapter_service_last_exit", "adapter_service_restart_state", "adapter_service_running", "bootstrap_running_artifact", "bootstrap_selected_artifact", "bootstrap_supervisor",
-		"claude_plugin_registration", "client_identity_file", "codex_plugin_registration", "endpoint_attachment", "expired_endpoint_bindings", "expired_role_bindings",
+		"claude_plugin_registration", "client_component_launchers", "client_identity_file", "codex_plugin_registration", "endpoint_attachment", "expired_endpoint_bindings", "expired_role_bindings",
 		"installed_release", "installer_path_aliases", "machine_credential_file", "mailbox_executable", "mailbox_mcp", "mailbox_state_directory", "notification_access",
 		"notification_enrollment", "notification_origin", "notification_protocol", "notification_transport", "plugin_launcher", "plugin_version", "portable_plugin_registration",
 		"relay_access", "relay_enrollment", "relay_origin", "relay_protocol", "relay_transport", "skill_set_parity",

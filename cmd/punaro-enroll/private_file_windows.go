@@ -216,7 +216,7 @@ func protectEnrollmentMaterial(path string) error {
 	if err != nil || !after.Mode().IsRegular() || after.Size() < 1 || after.Size() > maxEnrollmentMaterial || !os.SameFile(opened, after) || !privateWindowsACL(path) {
 		return errors.New("protected enrollment material could not be verified")
 	}
-	return syncPrivateDirectory(filepath.Dir(path))
+	return nil
 }
 
 func writePrivateNew(path string, raw []byte) error {

@@ -66,6 +66,9 @@ func TestWindowsProtectTransferredMaterialReplacesInheritedACLWithOneACE(t *test
 	if _, err := readPrivate(path, maxEnrollmentMaterial); err == nil {
 		t.Fatal("inherited transfer ACL was accepted before remediation")
 	}
+	previousSync := syncPrivateDirectory
+	syncPrivateDirectory = func(string) error { return errors.New("parent is not writable") }
+	t.Cleanup(func() { syncPrivateDirectory = previousSync })
 	if err := protectEnrollmentMaterial(path); err != nil {
 		t.Fatal(err)
 	}
