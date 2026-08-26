@@ -7,6 +7,7 @@ import (
 	"crypto/rand"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -61,6 +62,36 @@ func TestBootstrapCLIRequiresAbsoluteDirectoryAndKeys(t *testing.T) {
 	}
 	if err := run([]string{"update", "--directory", abs, "--keys-file", "keys.json"}); err == nil {
 		t.Fatal("relative keys file accepted")
+	}
+}
+
+func TestBootstrapCLISeedCheckoutPublishesAllLocalClientArtifacts(t *testing.T) {
+	root := t.TempDir()
+	state := filepath.Join(root, "state")
+	if err := os.Mkdir(state, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	components := []string{"punaro-adapter", "punaro-trusted-attachment", "punaro-memory", "punaro-enroll"}
+	args := []string{"seed-checkout", "--directory", state}
+	for _, component := range components {
+		path := filepath.Join(root, component)
+		if err := os.WriteFile(path, []byte(component), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		args = append(args, "--"+strings.TrimPrefix(component, "punaro-"), path)
+	}
+	if err := run(args); err != nil {
+		t.Fatal(err)
+	}
+	for _, component := range components {
+		name := fmt.Sprintf("%s-%s-%s", component, runtime.GOOS, runtime.GOARCH)
+		if runtime.GOOS == "windows" {
+			name += ".exe"
+		}
+		body, err := os.ReadFile(filepath.Join(state, "current", name)) // #nosec G304 -- closed test component names under t.TempDir.
+		if err != nil || string(body) != component {
+			t.Fatalf("selected local artifact %s body=%q err=%v", name, body, err)
+		}
 	}
 }
 

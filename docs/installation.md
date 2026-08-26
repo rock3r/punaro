@@ -527,6 +527,31 @@ For a legacy exchange the owner also supplies the exact content-free
 `--legacy-principal-id` from `punaro-admin legacy list`; the new machine ID must
 remain the existing registered machine ID.
 
+For a non-agent service probe such as server doctor, the owner uses
+`--service` instead of `--project` or `--all-projects`. Its exact preview has an
+empty `grants` array and grants no project, conversation, memory, attachment,
+or installation capability. `--service` is mutually exclusive with project
+scope and legacy exchange; the resulting device credential authenticates only
+routes that require no capability grant.
+
+Windows file transfer tools commonly leave the destination with an inherited
+ACL. Before redemption, tighten that exact transferred file without displaying
+or parsing its contents:
+
+```powershell
+punaro-enroll protect-material `
+  --file C:\absolute\private\enrollment-material.json
+```
+
+The command accepts only an absolute regular file within the enrollment size
+bound, refuses a directory, reparse point, or replacement race, and replaces
+the inherited ACL with exactly one protected FullControl ACE for the current
+user. It does not weaken or modify parent directories. `redeem` then performs
+the normal strict private-file and enrollment-document validation. On
+macOS/Linux the same command is available when a transfer tool has broadened
+the mode; it verifies current-user ownership and changes only that exact file
+to `0600`.
+
 Redeem that protected file on the client:
 
 ```sh

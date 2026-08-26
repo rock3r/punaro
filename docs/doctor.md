@@ -216,7 +216,8 @@ Installation and provenance: `installation_configuration`,
 `attachment_blob_containment`, `storage_directory_separation`,
 `storage_credential_isolation`, `daemon_environment`, `compose_override`,
 `compose_manifest_binding`, `migration_manifest_binding`,
-`image_digest_binding`, `installed_release`, `running_image`,
+`image_digest_binding`, `installed_release`, `operator_binary_release`,
+`running_image`,
 `machine_identity`.
 
 For native release artifacts, `installed_release` compares the exact
@@ -226,6 +227,13 @@ it binds the release-tagged repository identity known at build time and
 requires the installation to use a digest-pinned image from that exact
 repository. Compose manifest hashing runs in a deadline-isolated helper, so a
 stalled mounted file cannot extend the total doctor timeout.
+
+`operator_binary_release` checks the host-side `punaro` executable against the
+latest durable update outcome: a committed transaction requires the target
+release, while an incomplete, aborted, or recovered transaction requires the
+source release. A fresh installation with no transaction accepts its identified
+release. Missing build identity or unavailable update state reports
+`unavailable`; drift reports `install_release_operator_binary`.
 
 Database, storage, and update recovery: `database_connection`,
 `database_listener_private`, `administration_listener_private`,
@@ -315,6 +323,7 @@ Service, release, and plugin state: `adapter_service_installed`,
 `adapter_service_executable`, `adapter_service_last_exit`,
 `adapter_service_restart_state`, `bootstrap_selected_artifact`,
 `bootstrap_running_artifact`, `bootstrap_supervisor`, `installed_release`,
+`client_component_launchers`,
 `portable_plugin_registration`, `codex_plugin_registration`,
 `claude_plugin_registration`, `plugin_launcher`, `plugin_version`,
 `skill_set_parity`.
@@ -322,6 +331,14 @@ Service, release, and plugin state: `adapter_service_installed`,
 `plugin_launcher` requires the platform launcher to be a safe executable and
 requires the exact bytes of both POSIX/Windows launchers and both MCP
 registration files to match the digest embedded by the release builder.
+
+`client_component_launchers` requires the stable adapter, enrollment, memory,
+and trusted-attachment dispatchers to be regular executable copies of the same
+installer build. This catches mixed fixed payloads left by older installers;
+the dispatchers always execute the selected signed-slot artifacts. Hashing is
+performed in a deadline-isolated helper with an 8 MiB bound per launcher; a
+stalled helper is reported as required-unavailable rather than outliving the
+shared doctor deadline.
 
 The adapter inspects and runs `version` on the fixed installer-owned
 `punaro-bootstrap` executable in a deadline-isolated child and passes that
@@ -447,7 +464,8 @@ operator explicitly approves that separate action.
   `install_matching_plugin`, `install_matching_release`,
   `install_matching_skill_set`, `install_platform_release`,
   `install_release_keys`, `install_second_signed_release`,
-  `install_signed_release`, `install_unblocked_release`,
+  `install_release_operator_binary`, `install_signed_release`,
+  `install_unblocked_release`,
   `repair_release_catalog`, `repair_release_manifest`,
   `repair_release_origin`,
   `reinstall_release_compose_manifest`,
@@ -474,6 +492,7 @@ operator explicitly approves that separate action.
   `repair_mailbox_mcp`, `repair_mailbox_state_directory`,
   `repair_plugin_registration`, `repair_codex_plugin_registration`,
   `repair_claude_plugin_registration`, `repair_plugin_launcher`,
+  `reinstall_client_launchers`,
   `repair_bootstrap_directory`, `repair_bootstrap_lock_state`,
   `repair_bootstrap_state`, and `repair_previous_slot` mean stop and use the
   reviewed installer or documented bootstrap recovery path. Do not weaken

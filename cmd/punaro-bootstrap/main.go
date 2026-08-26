@@ -197,6 +197,9 @@ func runSeedCheckout(args []string) error {
 	flags.SetOutput(io.Discard)
 	directory := flags.String("directory", "", "absolute private bootstrap directory")
 	adapter := flags.String("adapter", "", "absolute checkout adapter binary")
+	trustedAttachment := flags.String("trusted-attachment", "", "absolute checkout trusted-attachment binary")
+	memory := flags.String("memory", "", "absolute checkout memory binary")
+	enroll := flags.String("enroll", "", "absolute checkout enrollment binary")
 	keysFile := flags.String("keys-file", "", "release public key set")
 	if err := flags.Parse(args); err != nil {
 		return errors.New("bootstrap seed-checkout is invalid")
@@ -212,7 +215,9 @@ func runSeedCheckout(args []string) error {
 		}
 		keys = loaded
 	}
-	return bootstrap.SeedLocalCheckout(*directory, *adapter, keys)
+	return bootstrap.SeedLocalCheckoutArtifacts(*directory, bootstrap.LocalCheckoutArtifacts{
+		Adapter: *adapter, TrustedAttachment: *trustedAttachment, Memory: *memory, Enroll: *enroll,
+	}, keys)
 }
 
 func loadKeys(path string) (map[string]ed25519.PublicKey, error) {

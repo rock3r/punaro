@@ -128,6 +128,40 @@ func TestDoctorDetectsArtifactTamperAndDoesNotRepairInvalidJournal(t *testing.T)
 	}
 }
 
+func TestVerifyLocalCheckoutSlotAcceptsAndProtectsClientArtifacts(t *testing.T) {
+	directory := privateDir(t)
+	artifacts := LocalCheckoutArtifacts{}
+	for component, target := range map[string]*string{
+		adapterComponent:            &artifacts.Adapter,
+		"punaro-trusted-attachment": &artifacts.TrustedAttachment,
+		"punaro-memory":             &artifacts.Memory,
+		"punaro-enroll":             &artifacts.Enroll,
+	} {
+		path := filepath.Join(t.TempDir(), component)
+		if err := os.WriteFile(path, []byte(component+"-body"), 0o700); err != nil { // #nosec G306 -- private executable fixture.
+			t.Fatal(err)
+		}
+		*target = path
+	}
+	if err := SeedLocalCheckoutArtifacts(directory, artifacts, nil); err != nil {
+		t.Fatal(err)
+	}
+	slot, err := readSlot(filepath.Join(directory, currentSlot))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := verifyLocalCheckoutSlot(t.Context(), filepath.Join(directory, currentSlot), runtime.GOOS, runtime.GOARCH, slot.ManifestSHA256); !ok {
+		t.Fatal("seeded client artifacts failed local checkout verification")
+	}
+	memory := filepath.Join(directory, currentSlot, artifactName("punaro-memory", runtime.GOOS, runtime.GOARCH))
+	if err := os.WriteFile(memory, []byte("tampered"), 0o755); err != nil { // #nosec G306 -- private executable fixture.
+		t.Fatal(err)
+	}
+	if _, ok := verifyLocalCheckoutSlot(t.Context(), filepath.Join(directory, currentSlot), runtime.GOOS, runtime.GOARCH, slot.ManifestSHA256); ok {
+		t.Fatal("tampered client artifact passed local checkout verification")
+	}
+}
+
 func TestDoctorCancellationProducesExplicitPartialFailureWithoutMutation(t *testing.T) {
 	origin := newSignedOrigin(t, originSpec{payload: testArtifact, goos: runtime.GOOS, goarch: runtime.GOARCH})
 	directory := privateDir(t)

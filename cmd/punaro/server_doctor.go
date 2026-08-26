@@ -108,6 +108,7 @@ var (
 	serverDoctorProfileExecutable         = os.Executable
 	serverDoctorRecoveryReceiptCheck      = isolatedServerDoctorRecoveryReceipt
 	serverDoctorRecoveryReceiptExecutable = os.Executable
+	serverDoctorRunningImageCommand       = boundedCommandInDirectory
 )
 
 func isolatedServerDoctorProfile(ctx context.Context, path string) (serverDoctorProfile, error) {
@@ -554,7 +555,7 @@ func inspectServerDoctorState(parent context.Context, installation operator.Inst
 		state.AdminPrivate = known(listenerErr == nil, private)
 		_ = administration.Close()
 	}
-	state.UpdateTransaction, state.RecoveryReceipt, state.UpdateRecovery = inspectUpdateState(ctx, installation)
+	state.UpdateTransaction, state.RecoveryReceipt, state.UpdateRecovery, state.OperatorBinaryRelease = inspectUpdateState(ctx, installation)
 	return state
 }
 
@@ -707,11 +708,11 @@ func inspectRunningImage(parent context.Context, installation operator.Installat
 	if err != nil {
 		return knownDoctorBool{}
 	}
-	container, ok := boundedCommand(parent, "docker", "compose", "--project-name", project, "--env-file", operator.EnvFile(installation.Directory), "-f", operator.OverrideFile(installation.Directory), "ps", "--quiet", "punarod")
+	container, ok := serverDoctorRunningImageCommand(parent, installation.Directory, "docker", "compose", "--project-name", project, "--env-file", operator.EnvFile(installation.Directory), "-f", operator.OverrideFile(installation.Directory), "ps", "--quiet", "punarod")
 	if !ok || strings.TrimSpace(container) == "" || strings.Contains(strings.TrimSpace(container), "\n") {
 		return known(ok, false)
 	}
-	image, ok := boundedCommand(parent, "docker", "inspect", "--format", "{{.Config.Image}}", strings.TrimSpace(container))
+	image, ok := serverDoctorRunningImageCommand(parent, installation.Directory, "docker", "inspect", "--format", "{{.Config.Image}}", strings.TrimSpace(container))
 	return known(ok, strings.TrimSpace(image) == installation.Image)
 }
 
@@ -1094,31 +1095,46 @@ func serverGatewaySystemdExecStartBound(body string) bool {
 	return fields["path"] == executable && fields["argv[]"] == executable
 }
 
-func inspectUpdateState(parent context.Context, installation operator.Installation) (knownDoctorBool, knownDoctorBool, knownDoctorBool) {
+func inspectUpdateState(parent context.Context, installation operator.Installation) (knownDoctorBool, knownDoctorBool, knownDoctorBool, knownDoctorBool) {
 	admin, err := openServerDoctorAdministration(parent, installation.OwnerDSNFile)
 	if err != nil {
-		return knownDoctorBool{}, knownDoctorBool{}, knownDoctorBool{}
+		return knownDoctorBool{}, knownDoctorBool{}, knownDoctorBool{}, knownDoctorBool{}
 	}
 	defer func() { _ = admin.Close() }()
 	transaction, err := admin.LatestUpdate(parent)
 	if errors.Is(err, punaropostgres.ErrNotFound) {
-		return known(true, true), serverDoctorRecoveryReceiptCheck(parent, serverDoctorRecoveryReceiptRequest{Directory: installation.Directory, ExpectAbsent: true}), known(true, true)
+		return known(true, true), serverDoctorRecoveryReceiptCheck(parent, serverDoctorRecoveryReceiptRequest{Directory: installation.Directory, ExpectAbsent: true}), known(true, true), operatorBinaryReleaseState(serverBuildRelease, punaropostgres.UpdateTransaction{}, false)
 	}
 	if err != nil {
-		return knownDoctorBool{}, knownDoctorBool{}, knownDoctorBool{}
+		return knownDoctorBool{}, knownDoctorBool{}, knownDoctorBool{}, knownDoctorBool{}
 	}
+	operatorRelease := operatorBinaryReleaseState(serverBuildRelease, transaction, true)
 	terminal := transaction.Phase == punaropostgres.UpdateCommitted || transaction.Phase == punaropostgres.UpdateRecovered || transaction.Phase == punaropostgres.UpdateAborted
 	if transaction.Phase == punaropostgres.UpdateCommitted && serverBuildRelease != "" {
 		terminal = transaction.TargetRelease == serverBuildRelease && transaction.TargetImage == installation.Image && transaction.ComposeSHA256 == serverBuildComposeSHA256 && transaction.MigrationManifestSHA256 == serverBuildMigrationSHA256
 	}
 	if terminal {
-		return known(true, true), serverDoctorRecoveryReceiptCheck(parent, serverDoctorRecoveryReceiptRequest{Directory: installation.Directory, ExpectAbsent: true}), known(true, true)
+		return known(true, true), serverDoctorRecoveryReceiptCheck(parent, serverDoctorRecoveryReceiptRequest{Directory: installation.Directory, ExpectAbsent: true}), known(true, true), operatorRelease
 	}
 	if !updatePhaseRequiresRecoveryReceipt(transaction.Phase) {
-		return known(true, false), serverDoctorRecoveryReceiptCheck(parent, serverDoctorRecoveryReceiptRequest{Directory: installation.Directory, ExpectAbsent: true}), known(true, false)
+		return known(true, false), serverDoctorRecoveryReceiptCheck(parent, serverDoctorRecoveryReceiptRequest{Directory: installation.Directory, ExpectAbsent: true}), known(true, false), operatorRelease
 	}
 	receipt := serverDoctorRecoveryReceiptRequest{Directory: installation.Directory, UpdateID: transaction.UpdateID, BackupID: transaction.BackupID, TargetRelease: transaction.TargetRelease, ManifestSHA256: transaction.BackupManifestSHA256}
-	return known(true, false), serverDoctorRecoveryReceiptCheck(parent, receipt), known(true, false)
+	return known(true, false), serverDoctorRecoveryReceiptCheck(parent, receipt), known(true, false), operatorRelease
+}
+
+func operatorBinaryReleaseState(release string, transaction punaropostgres.UpdateTransaction, found bool) knownDoctorBool {
+	if release == "" {
+		return knownDoctorBool{}
+	}
+	if !found {
+		return known(true, true)
+	}
+	expected := transaction.SourceRelease
+	if transaction.Phase == punaropostgres.UpdateCommitted {
+		expected = transaction.TargetRelease
+	}
+	return known(expected != "", release == expected)
 }
 
 func updatePhaseRequiresRecoveryReceipt(phase punaropostgres.UpdatePhase) bool {
@@ -1133,13 +1149,21 @@ func updatePhaseRequiresRecoveryReceipt(phase punaropostgres.UpdatePhase) bool {
 }
 
 func boundedCommand(parent context.Context, executable string, arguments ...string) (string, bool) {
-	return boundedCommandLimit(parent, serverDoctorOutputLimit, executable, arguments...)
+	return boundedCommandLimitInDirectory(parent, serverDoctorOutputLimit, "", executable, arguments...)
 }
 
 func boundedCommandLimit(parent context.Context, maximum int, executable string, arguments ...string) (string, bool) {
+	return boundedCommandLimitInDirectory(parent, maximum, "", executable, arguments...)
+}
+
+func boundedCommandInDirectory(parent context.Context, directory, executable string, arguments ...string) (string, bool) {
+	return boundedCommandLimitInDirectory(parent, serverDoctorOutputLimit, directory, executable, arguments...)
+}
+
+func boundedCommandLimitInDirectory(parent context.Context, maximum int, directory, executable string, arguments ...string) (string, bool) {
 	ctx, cancel := context.WithTimeout(parent, serverDoctorCommandTimeout)
 	defer cancel()
-	command := exec.CommandContext(ctx, executable, arguments...) // #nosec G204 -- fixed audited executable and structured arguments.
+	command := newServerDoctorCommand(ctx, directory, executable, arguments...)
 	command.Stdin = nil
 	command.Stderr = io.Discard
 	output := boundedServerDoctorOutput{maximum: maximum}
@@ -1148,4 +1172,10 @@ func boundedCommandLimit(parent context.Context, maximum int, executable string,
 		return "", false
 	}
 	return output.buffer.String(), true
+}
+
+func newServerDoctorCommand(ctx context.Context, directory, executable string, arguments ...string) *exec.Cmd {
+	command := exec.CommandContext(ctx, executable, arguments...) // #nosec G204 -- fixed audited executable and structured arguments.
+	command.Dir = directory
+	return command
 }

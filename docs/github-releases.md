@@ -77,6 +77,12 @@ release-named identity is embedded metadata, not a pushed tag. It then builds:
   `linux/arm64`, and `windows/amd64`
 - `punaro`, `punaro-telegram`, and `punaro-relay-adopt-prepare` for Linux
 
+The Linux `punaro-linux-{amd64,arm64}` artifact is also the supported
+host-operator handoff for a server update. Operators verify its manifest
+signature and manifest-bound length/digest before an atomic root-owned install;
+server doctor then checks `operator_binary_release` against the durable update
+outcome.
+
 Darwin adapter builds use `CGO_ENABLED=1` so the supported ACL path is compiled
 in. The workflow then writes unsigned `punaro-release.json` and
 `punaro-catalog.json` and creates a **draft** GitHub Release. The private
@@ -136,6 +142,12 @@ Only the offline-signature publisher can make those stable assets visible.
    Set `supported_from` to the comma-separated installed releases that
    may upgrade directly to this release; this is required for rolling fleet
    transitions after the first release.
+
+   Alpha.8 introduces the selected-component dispatcher and the full local
+   checkout slot. Dispatch `v0.1.0-alpha.8` with
+   `minimum_bootstrap_release=v0.1.0-alpha.8`; upgrading from an older fixed
+   bootstrap requires one client-installer handoff before built-in updates can
+   safely manage every selected component.
 3. Wait for the draft release to appear. The live `catalog` prerelease is not
    touched by the unsigned workflow.
 4. Generate the offline key once, on an air-gapped or owner-only machine, and

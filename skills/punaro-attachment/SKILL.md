@@ -19,8 +19,9 @@ the retired v2/v3 controller.
 
 Before the first trusted-attachment operation in a task, or after a local,
 relay, service, or authorization failure, run the installed adapter's read-only
-doctor from its installer-owned fixed path (`$HOME/.local/bin/punaro-adapter`
-on macOS/Linux or `%LOCALAPPDATA%\Punaro\bin\punaro-adapter.exe` on Windows).
+doctor through its stable installer-owned dispatcher (`$HOME/.local/bin/punaro-adapter`
+on macOS/Linux or `%LOCALAPPDATA%\Punaro\bin\punaro-adapter.exe` on Windows),
+which resolves the adapter from the selected signed bootstrap slot.
 Resolve the plugin root as the directory two levels above this `SKILL.md` and
 pass its absolute path with `--plugin-root`; never discover the adapter through
 `PATH`.

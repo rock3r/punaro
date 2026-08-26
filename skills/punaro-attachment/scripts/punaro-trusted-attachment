@@ -45,6 +45,16 @@ if [ -z "$user_home" ]; then
 	esac
 fi
 
-client="$user_home/.local/bin/punaro-trusted-attachment"
-[ -f "$client" ] && [ ! -L "$client" ] && [ -x "$client" ] || fail "installed trusted-attachment client is unavailable at $client; run the Punaro client installer first"
+case "$(uname -s)" in
+Darwin) adapter_os=darwin ;;
+Linux) adapter_os=linux ;;
+*) fail 'this launcher supports macOS and Linux' ;;
+esac
+case "$(uname -m)" in
+x86_64|amd64) adapter_arch=amd64 ;;
+arm64|aarch64) adapter_arch=arm64 ;;
+*) fail 'this launcher does not support the current architecture' ;;
+esac
+client="$user_home/.local/state/punaro-bootstrap/current/punaro-trusted-attachment-$adapter_os-$adapter_arch"
+[ -f "$client" ] && [ ! -L "$client" ] && [ -x "$client" ] || fail 'selected trusted-attachment client is unavailable; run the Punaro client installer or bootstrap doctor'
 exec "$client" "$@"

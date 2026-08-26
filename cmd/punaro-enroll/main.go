@@ -112,20 +112,37 @@ func main() { os.Exit(run(os.Args[1:], os.Stdout, os.Stderr)) }
 
 func run(args []string, stdout, stderr io.Writer) int {
 	if len(args) == 0 {
-		_, _ = fmt.Fprintln(stderr, "usage: punaro-enroll prepare|redeem|recover")
+		_, _ = fmt.Fprintln(stderr, "usage: punaro-enroll prepare|protect-material|redeem|recover")
 		return 2
 	}
 	switch args[0] {
 	case "prepare":
 		return runPrepare(args[1:], stdout, stderr)
+	case "protect-material":
+		return runProtectMaterial(args[1:], stdout, stderr)
 	case "redeem":
 		return runRedeem(args[1:], stdout, stderr, false)
 	case "recover":
 		return runRedeem(args[1:], stdout, stderr, true)
 	default:
-		_, _ = fmt.Fprintln(stderr, "usage: punaro-enroll prepare|redeem|recover")
+		_, _ = fmt.Fprintln(stderr, "usage: punaro-enroll prepare|protect-material|redeem|recover")
 		return 2
 	}
+}
+
+func runProtectMaterial(args []string, stdout, stderr io.Writer) int {
+	flags := flag.NewFlagSet("protect-material", flag.ContinueOnError)
+	flags.SetOutput(io.Discard)
+	path := flags.String("file", "", "absolute transferred enrollment-material file")
+	if flags.Parse(args) != nil || flags.NArg() != 0 || *path == "" {
+		return invalid(stderr)
+	}
+	if protectEnrollmentMaterial(*path) != nil {
+		_, _ = fmt.Fprintln(stderr, "punaro-enroll protect-material failed")
+		return 1
+	}
+	_, _ = fmt.Fprintln(stdout, "enrollment material protected")
+	return 0
 }
 
 func runPrepare(args []string, stdout, stderr io.Writer) int {
@@ -379,7 +396,7 @@ func loadMaterial(path string) (enrollmentMaterial, error) {
 		return enrollmentMaterial{}, errors.New("invalid enrollment material")
 	}
 	var preview enrollmentPreview
-	if err := decodeExact(records[0], &preview, "template", "preview_hash", "grants"); err != nil || preview.Template != "trusted-agent" || !validPreviewHash(preview.PreviewHash) || !validGrantPreview(preview.Grants) {
+	if err := decodeExact(records[0], &preview, "template", "preview_hash", "grants"); err != nil || !validEnrollmentPreview(preview) {
 		return enrollmentMaterial{}, errors.New("invalid enrollment material")
 	}
 	envelope, err := decodeEnrollmentEnvelope(records[1])
@@ -391,7 +408,7 @@ func loadMaterial(path string) (enrollmentMaterial, error) {
 
 func decodeEnrollmentEnvelope(raw []byte) (enrollmentEnvelope, error) {
 	var envelope enrollmentEnvelope
-	if err := decodeExact(raw, &envelope, "enrollment_id", "client_binding", "code", "expires_at", "preview_hash", "grants"); err != nil || !validMaterial(enrollmentMaterial{EnrollmentID: envelope.EnrollmentID, ClientBinding: envelope.ClientBinding, Code: envelope.Code}) || envelope.ExpiresAt.IsZero() || !validPreviewHash(envelope.PreviewHash) || !validGrantPreview(envelope.Grants) {
+	if err := decodeExact(raw, &envelope, "enrollment_id", "client_binding", "code", "expires_at", "preview_hash", "grants"); err != nil || !validMaterial(enrollmentMaterial{EnrollmentID: envelope.EnrollmentID, ClientBinding: envelope.ClientBinding, Code: envelope.Code}) || envelope.ExpiresAt.IsZero() || !validPreviewHash(envelope.PreviewHash) || !validGrantPreview(envelope.Grants, true) {
 		return enrollmentEnvelope{}, errors.New("invalid enrollment material")
 	}
 	return envelope, nil
@@ -427,9 +444,23 @@ func validPreviewHash(value string) bool {
 	return err == nil && len(decoded) == 32 && hex.EncodeToString(decoded) == value
 }
 
-func validGrantPreview(rawGrants []json.RawMessage) bool {
-	if len(rawGrants) == 0 {
+func validEnrollmentPreview(preview enrollmentPreview) bool {
+	if !validPreviewHash(preview.PreviewHash) {
 		return false
+	}
+	switch preview.Template {
+	case "trusted-agent":
+		return validGrantPreview(preview.Grants, false)
+	case "service":
+		return len(preview.Grants) == 0
+	default:
+		return false
+	}
+}
+
+func validGrantPreview(rawGrants []json.RawMessage, allowEmpty bool) bool {
+	if len(rawGrants) == 0 {
+		return allowEmpty
 	}
 	for _, raw := range rawGrants {
 		var grant enrollmentGrantPreview

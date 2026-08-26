@@ -115,6 +115,8 @@ func main() {
 		os.Exit(runAdapterServiceInspect(os.Args[2:], os.Stdout))
 	case os.Args[1] == "doctor-bootstrap-release-inspect":
 		os.Exit(runAdapterBootstrapReleaseInspect(os.Args[2:], os.Stdout))
+	case os.Args[1] == "doctor-client-launchers-inspect":
+		os.Exit(runAdapterClientLaunchersInspect(os.Args[2:], os.Stdout))
 	case os.Args[1] == "version":
 		if adapterBuildRelease == "" {
 			os.Exit(1)

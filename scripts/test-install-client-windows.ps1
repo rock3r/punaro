@@ -19,6 +19,16 @@ $installer = [System.IO.File]::ReadAllText((Join-Path $repoDir 'scripts\install-
 foreach ($expected in @('LogonType Interactive', 'ExecutionTimeLimit ([TimeSpan]::Zero)', 'RestartCount', 'RepetitionInterval', 'RepetitionDuration', '-WindowStyle Hidden', '-Hidden', 'SetAccessRuleProtection($true, $false)', '-ExecutionPolicy Bypass', 'ForEach-Object { $_.address }', 'punaro-trusted-attachment.exe', 'punaro-memory.exe', 'punaro-enroll.exe', 'agent-mailbox', '[string]$AgentMailboxBin', '$mailboxIsWaypost', 'AgentGuidanceDir', 'AllowLanHttp', 'PUNARO_ADAPTER_TRUSTED_LAN_CIDR')) {
     if (-not $installer.Contains($expected)) { throw "Windows installer is missing required behavior: $expected" }
 }
+$dispatcherWait = 'Wait-PunaroReplaceableBinary -Path $destination'
+$dispatcherCopy = '[System.IO.File]::Copy($launcherBuild, $destination, $true)'
+if ($installer.IndexOf($dispatcherWait, [System.StringComparison]::Ordinal) -lt 0 -or $installer.IndexOf($dispatcherWait, [System.StringComparison]::Ordinal) -gt $installer.IndexOf($dispatcherCopy, [System.StringComparison]::Ordinal)) {
+    throw 'Windows installer must wait for every dispatcher destination before replacing any dispatcher'
+}
+$initialDispatcherWait = 'Wait-PunaroReplaceableBinary -Path (Join-Path $binDir $component)'
+$firstBinaryBuild = 'Build-PunaroBinary -Package'
+if ($installer.IndexOf($initialDispatcherWait, [System.StringComparison]::Ordinal) -lt 0 -or $installer.IndexOf($initialDispatcherWait, [System.StringComparison]::Ordinal) -gt $installer.IndexOf($firstBinaryBuild, [System.StringComparison]::Ordinal)) {
+    throw 'Windows installer must wait for all installed dispatchers before building over their destinations'
+}
 $allScripts = ($paths | ForEach-Object { [System.IO.File]::ReadAllText($_) }) -join "`n"
 if (-not $allScripts.Contains('existing Punaro guidance predates trusted attachments')) {
     throw 'Windows guidance installer does not fail closed on retired guidance'
@@ -116,6 +126,12 @@ try {
     }
     & (Join-Path $repoDir 'scripts\punaro-plugin-mcp.cmd')
     if ($LASTEXITCODE -ne 0) { throw 'Windows plugin launcher could not start the installer-owned adapter' }
+    $fixedAdapter = Join-Path $root 'bin\punaro-adapter.exe'
+    $savedFixedAdapter = $fixedAdapter + '.dispatcher-presence-test'
+    [System.IO.File]::Move($fixedAdapter, $savedFixedAdapter)
+    & (Join-Path $repoDir 'scripts\punaro-plugin-mcp.cmd')
+    if ($LASTEXITCODE -eq 0) { throw 'Windows plugin launcher did not require the stable selected-slot dispatcher' }
+    [System.IO.File]::Move($savedFixedAdapter, $fixedAdapter)
     foreach ($path in @((Join-Path $root 'bin\punaro-attachment.exe'), (Join-Path $root 'bin\punaro-directory.exe'), (Join-Path $root 'bin\punaro-dpapi.exe'), (Join-Path $root 'Run-PunaroAttachment.ps1'))) {
         if (Test-Path -LiteralPath $path) { throw "Windows client installer must not create retired attachment artifact $path" }
     }

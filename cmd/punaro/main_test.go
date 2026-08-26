@@ -503,7 +503,7 @@ func TestServerDoctorDeadlineIncludesInstallationLoad(t *testing.T) {
 func healthyServerDoctorState() serverDoctorState {
 	return serverDoctorState{
 		MachineID: "punaro-lxc", Release: "v0.1.0-alpha.1", ReleaseSequence: 1, CatalogSequence: 1, Protocol: 1,
-		InstalledRelease: knownDoctorBool{Known: true, OK: true}, RunningImage: knownDoctorBool{Known: true, OK: true},
+		InstalledRelease: knownDoctorBool{Known: true, OK: true}, OperatorBinaryRelease: knownDoctorBool{Known: true, OK: true}, RunningImage: knownDoctorBool{Known: true, OK: true},
 		ComposeBinding: knownDoctorBool{Known: true, OK: true}, MigrationBinding: knownDoctorBool{Known: true, OK: true},
 		PostgresMajor: 18, ExpectedPostgresMajor: 18, PostgresKnown: true, Storage: knownDoctorBool{Known: true, OK: true},
 		BackupAvailable: knownDoctorBool{Known: true, OK: true}, BackupFresh: knownDoctorBool{Known: true, OK: true},
@@ -1379,6 +1379,7 @@ func TestDoctorClassifiesEveryExtendedServerDependency(t *testing.T) {
 	state.ReleaseSequence = 2
 	state.CatalogSequence = 4
 	state.InstalledRelease.OK = false
+	state.OperatorBinaryRelease.OK = false
 	state.RunningImage.OK = false
 	state.ComposeBinding.OK = false
 	state.MigrationBinding.Known = false
@@ -1419,7 +1420,7 @@ func TestDoctorClassifiesEveryExtendedServerDependency(t *testing.T) {
 		t.Fatalf("identity=%#v", report.Identity)
 	}
 	want := map[string]punarodiagnostic.Status{
-		"installed_release": "fail", "running_image": "fail", "compose_manifest_binding": "fail",
+		"installed_release": "fail", "operator_binary_release": "fail", "running_image": "fail", "compose_manifest_binding": "fail",
 		"migration_manifest_binding": "unavailable", "postgres_major": "unavailable", "storage_capacity": "fail",
 		"verified_backup": "fail", "backup_freshness": "unavailable", "update_transaction": "fail", "recovery_receipt": "unavailable", "update_recovery": "fail",
 		"database_listener_private": "fail", "health_listener_private": "fail", "administration_listener_private": "fail",
@@ -1606,6 +1607,89 @@ func TestServerDoctorRequiresReleasePostgreSQLMajor(t *testing.T) {
 			}
 			t.Fatal("postgres_major check missing")
 		})
+	}
+}
+
+func TestServerDoctorInspectsRunningImageFromInstallationDirectory(t *testing.T) {
+	directory := t.TempDir()
+	original := serverDoctorRunningImageCommand
+	t.Cleanup(func() { serverDoctorRunningImageCommand = original })
+	var calls int
+	serverDoctorRunningImageCommand = func(_ context.Context, actualDirectory, executable string, arguments ...string) (string, bool) {
+		calls++
+		if actualDirectory != directory || executable != "docker" {
+			t.Fatalf("directory=%q executable=%q", actualDirectory, executable)
+		}
+		switch arguments[0] {
+		case "compose":
+			return "punaro-container\n", true
+		case "inspect":
+			return cliTestImage + "\n", true
+		default:
+			t.Fatalf("arguments=%q", arguments)
+			return "", false
+		}
+	}
+	state := inspectRunningImage(t.Context(), operator.Installation{
+		Directory:        directory,
+		Image:            cliTestImage,
+		OwnerPrincipalID: "11111111-1111-4111-8111-111111111111",
+	})
+	if !state.Known || !state.OK || calls != 2 {
+		t.Fatalf("running image state=%#v calls=%d", state, calls)
+	}
+}
+
+func TestServerDoctorRunningImageDistinguishesMismatchAndUnavailable(t *testing.T) {
+	original := serverDoctorRunningImageCommand
+	t.Cleanup(func() { serverDoctorRunningImageCommand = original })
+	installation := operator.Installation{
+		Directory:        t.TempDir(),
+		Image:            cliTestImage,
+		OwnerPrincipalID: "11111111-1111-4111-8111-111111111111",
+	}
+	serverDoctorRunningImageCommand = func(_ context.Context, _ string, _ string, arguments ...string) (string, bool) {
+		if arguments[0] == "compose" {
+			return "punaro-container\n", true
+		}
+		return "ghcr.io/rock3r/punaro@sha256:" + strings.Repeat("b", 64) + "\n", true
+	}
+	if state := inspectRunningImage(t.Context(), installation); !state.Known || state.OK {
+		t.Fatalf("mismatched running image state=%#v", state)
+	}
+	serverDoctorRunningImageCommand = func(context.Context, string, string, ...string) (string, bool) {
+		return "", false
+	}
+	if state := inspectRunningImage(t.Context(), installation); state.Known || state.OK {
+		t.Fatalf("unavailable running image state=%#v", state)
+	}
+}
+
+func TestOperatorBinaryReleaseFollowsDurableUpdateOutcome(t *testing.T) {
+	transaction := punaropostgres.UpdateTransaction{UpdateRequest: punaropostgres.UpdateRequest{SourceRelease: "v0.1.0-alpha.7", TargetRelease: "v0.1.0-alpha.8"}, Phase: punaropostgres.UpdateCommitted}
+	if state := operatorBinaryReleaseState("v0.1.0-alpha.7", transaction, true); !state.Known || state.OK {
+		t.Fatalf("stale committed operator state=%#v", state)
+	}
+	if state := operatorBinaryReleaseState("v0.1.0-alpha.8", transaction, true); !state.Known || !state.OK {
+		t.Fatalf("updated committed operator state=%#v", state)
+	}
+	transaction.Phase = punaropostgres.UpdateRecovered
+	if state := operatorBinaryReleaseState("v0.1.0-alpha.7", transaction, true); !state.Known || !state.OK {
+		t.Fatalf("recovered source operator state=%#v", state)
+	}
+	if state := operatorBinaryReleaseState("", punaropostgres.UpdateTransaction{}, false); state.Known || state.OK {
+		t.Fatalf("unidentified fresh operator state=%#v", state)
+	}
+	if state := operatorBinaryReleaseState("v0.1.0-alpha.8", punaropostgres.UpdateTransaction{}, false); !state.Known || !state.OK {
+		t.Fatalf("fresh identified operator state=%#v", state)
+	}
+}
+
+func TestServerDoctorCommandUsesRequestedWorkingDirectory(t *testing.T) {
+	directory := t.TempDir()
+	command := newServerDoctorCommand(t.Context(), directory, "docker", "version")
+	if command.Dir != directory {
+		t.Fatalf("command directory=%q want=%q", command.Dir, directory)
 	}
 }
 

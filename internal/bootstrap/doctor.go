@@ -5,6 +5,7 @@ import (
 	"crypto/ed25519"
 	"crypto/sha256"
 	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"io"
 	"os"
@@ -660,13 +661,69 @@ func verifySignedSlot(ctx context.Context, directory string, manifest punarorele
 }
 
 func verifyLocalCheckoutSlot(ctx context.Context, directory, goos, goarch, expectedDigest string) (string, bool) {
-	name := artifactName(adapterComponent, goos, goarch)
-	entries, ok := readDoctorDirectoryEntries(ctx, directory, 2)
-	if !ok || len(entries) != 2 {
+	adapterName := artifactName(adapterComponent, goos, goarch)
+	stateBody, stateExists, stateErr := doctorReadOptionalState(ctx, filepath.Join(directory, localCheckoutStateFile), maximumDoctorStateBytes)
+	if stateErr != nil {
 		return "", false
 	}
-	digest, ok := hashExactArtifact(ctx, filepath.Join(directory, name), -1, 0o755)
-	return digest, ok && digest == expectedDigest
+	if !stateExists {
+		entries, ok := readDoctorDirectoryEntries(ctx, directory, 2)
+		if !ok || len(entries) != 2 {
+			return "", false
+		}
+		digest, ok := hashExactArtifact(ctx, filepath.Join(directory, adapterName), -1, 0o755)
+		return digest, ok && digest == expectedDigest
+	}
+	state, ok := parseLocalCheckoutState(stateBody, goos, goarch)
+	if !ok || state.Artifacts[adapterName] != expectedDigest {
+		return "", false
+	}
+	entries, ok := readDoctorDirectoryEntries(ctx, directory, len(state.Artifacts)+2)
+	if !ok || len(entries) != len(state.Artifacts)+2 {
+		return "", false
+	}
+	for _, entry := range entries {
+		if entry.Name() == slotRecord || entry.Name() == localCheckoutStateFile {
+			continue
+		}
+		expected, found := state.Artifacts[entry.Name()]
+		if !found {
+			return "", false
+		}
+		digest, valid := hashExactArtifact(ctx, filepath.Join(directory, entry.Name()), -1, 0o755)
+		if !valid || digest != expected {
+			return "", false
+		}
+	}
+	return expectedDigest, true
+}
+
+func parseLocalCheckoutState(body []byte, goos, goarch string) (localCheckoutState, bool) {
+	if rejectDuplicateJSONFields(body) != nil {
+		return localCheckoutState{}, false
+	}
+	decoder := json.NewDecoder(strings.NewReader(string(body)))
+	decoder.DisallowUnknownFields()
+	var state localCheckoutState
+	if decoder.Decode(&state) != nil {
+		return localCheckoutState{}, false
+	}
+	var trailing any
+	if !errors.Is(decoder.Decode(&trailing), io.EOF) || state.Schema != 1 || len(state.Artifacts) < 1 || len(state.Artifacts) > 4 {
+		return localCheckoutState{}, false
+	}
+	allowed := map[string]struct{}{
+		artifactName(adapterComponent, goos, goarch):            {},
+		artifactName("punaro-trusted-attachment", goos, goarch): {},
+		artifactName("punaro-memory", goos, goarch):             {},
+		artifactName("punaro-enroll", goos, goarch):             {},
+	}
+	for name, digest := range state.Artifacts {
+		if _, found := allowed[name]; !found || !validManifestDigest(digest) {
+			return localCheckoutState{}, false
+		}
+	}
+	return state, true
 }
 
 func readDoctorDirectoryEntries(ctx context.Context, directory string, maximum int) ([]os.DirEntry, bool) {

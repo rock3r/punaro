@@ -37,7 +37,7 @@ var requiredComponentCheckCodes = map[Component][]string{
 		"backup_directory", "backup_freshness", "blob_storage_private", "compose_manifest_binding", "compose_override", "daemon_environment", "data_directory",
 		"database_connection", "database_listener_private", "database_owner", "database_pair", "database_schema", "gateway_release", "gateway_service_enabled",
 		"gateway_service_executable", "gateway_service_installed", "gateway_service_last_exit", "gateway_service_restart_state", "gateway_service_running", "health_endpoint",
-		"health_listener_private", "host_update_stage", "image_digest_binding", "installed_release", "installation_configuration", "installation_directory", "machine_identity",
+		"health_listener_private", "host_update_stage", "image_digest_binding", "installed_release", "operator_binary_release", "installation_configuration", "installation_directory", "machine_identity",
 		"installation_paths", "maintenance_fence", "migration_manifest_binding", "owner_credential_file", "postgres_major", "readiness_endpoint", "recovery_receipt", "relay_enrollment",
 		"relay_protocol", "running_image", "storage_capacity", "storage_credential_isolation", "storage_directory_separation", "tunnel_origin", "tunnel_route",
 		"update_recovery", "update_transaction", "verified_backup",
@@ -45,7 +45,7 @@ var requiredComponentCheckCodes = map[Component][]string{
 	ComponentAdapter: {
 		"adapter_configuration", "adapter_data_directory", "adapter_profile_file", "adapter_service_enabled", "adapter_service_executable", "adapter_service_installed",
 		"adapter_service_last_exit", "adapter_service_restart_state", "adapter_service_running", "bootstrap_running_artifact", "bootstrap_selected_artifact", "bootstrap_supervisor",
-		"claude_plugin_registration", "client_identity_file", "codex_plugin_registration", "endpoint_attachment", "expired_endpoint_bindings", "expired_role_bindings",
+		"claude_plugin_registration", "client_component_launchers", "client_identity_file", "codex_plugin_registration", "endpoint_attachment", "expired_endpoint_bindings", "expired_role_bindings",
 		"installed_release", "installer_path_aliases", "machine_credential_file", "mailbox_executable", "mailbox_mcp", "mailbox_state_directory", "notification_access",
 		"notification_enrollment", "notification_origin", "notification_protocol", "notification_transport", "plugin_launcher", "plugin_version", "portable_plugin_registration",
 		"relay_access", "relay_enrollment", "relay_origin", "relay_protocol", "relay_transport", "skill_set_parity",

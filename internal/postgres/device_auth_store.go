@@ -307,7 +307,14 @@ func (a *Administration) CreateEnrollment(ctx context.Context, actorPrincipalID 
 	if err := a.requireClientLifecycleSchema(ctx); err != nil {
 		return PendingEnrollment{}, err
 	}
-	grants, previewHash, err := PreviewTrustedAgentEnrollment(request.ProjectIDs, request.AllProjects)
+	var grants []GrantSpec
+	var previewHash string
+	var err error
+	if request.ServiceOnly {
+		grants, previewHash, err = PreviewServiceEnrollment()
+	} else {
+		grants, previewHash, err = PreviewTrustedAgentEnrollment(request.ProjectIDs, request.AllProjects)
+	}
 	if err != nil || subtle.ConstantTimeCompare([]byte(previewHash), []byte(confirmedPreviewHash)) != 1 {
 		return PendingEnrollment{}, errors.New("enrollment preview was not confirmed")
 	}

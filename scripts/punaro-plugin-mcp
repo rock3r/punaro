@@ -34,6 +34,16 @@ if [ -z "$user_home" ]; then
 	esac
 fi
 
-adapter="$user_home/.local/bin/punaro-adapter"
-[ -f "$adapter" ] && [ ! -L "$adapter" ] && [ -x "$adapter" ] || fail "installed adapter is unavailable at $adapter; run the Punaro client installer first"
+case "$(uname -s)" in
+	Darwin) adapter_os=darwin ;;
+	Linux) adapter_os=linux ;;
+	*) fail 'this launcher supports macOS and Linux' ;;
+esac
+case "$(uname -m)" in
+	x86_64|amd64) adapter_arch=amd64 ;;
+	arm64|aarch64) adapter_arch=arm64 ;;
+	*) fail 'this launcher does not support the current architecture' ;;
+esac
+adapter="$user_home/.local/state/punaro-bootstrap/current/punaro-adapter-$adapter_os-$adapter_arch"
+[ -f "$adapter" ] && [ ! -L "$adapter" ] && [ -x "$adapter" ] || fail "selected adapter is unavailable; run the Punaro client installer or bootstrap doctor"
 exec "$adapter" mailbox-mcp

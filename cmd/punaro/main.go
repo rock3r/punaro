@@ -193,6 +193,7 @@ type serverDoctorState struct {
 	CatalogSequence       int64
 	Protocol              int64
 	InstalledRelease      knownDoctorBool
+	OperatorBinaryRelease knownDoctorBool
 	RunningImage          knownDoctorBool
 	ComposeBinding        knownDoctorBool
 	MigrationBinding      knownDoctorBool
@@ -722,7 +723,7 @@ func unavailableServerDoctorChecks(gatewayColocated bool) []punarodiagnostic.Che
 		"access_admission", "administration_listener_private", "application_credential_file", "attachment_blob_containment", "attachment_blob_directory",
 		"backup_directory", "backup_freshness", "blob_storage_private", "compose_manifest_binding", "compose_override", "daemon_environment", "data_directory",
 		"database_connection", "database_listener_private", "database_owner", "database_pair", "database_schema",
-		"health_endpoint", "health_listener_private", "host_update_stage", "image_digest_binding", "installed_release", "installation_directory", "installation_paths", "machine_identity",
+		"health_endpoint", "health_listener_private", "host_update_stage", "image_digest_binding", "installed_release", "operator_binary_release", "installation_directory", "installation_paths", "machine_identity",
 		"maintenance_fence", "migration_manifest_binding", "owner_credential_file", "postgres_major", "readiness_endpoint", "recovery_receipt", "relay_enrollment",
 		"relay_protocol", "running_image", "storage_capacity", "storage_credential_isolation", "storage_directory_separation", "tunnel_origin", "tunnel_route",
 		"update_recovery", "update_transaction", "verified_backup",
@@ -756,6 +757,7 @@ func diagnoseServer(ctx context.Context, installation operator.Installation, mac
 	identity.Protocol = extended.Protocol
 	identity.Capabilities = serverDoctorCapabilities(installation)
 	checks = appendKnownServerCheck(checks, "installed_release", "install_signed_release", extended.InstalledRelease)
+	checks = appendKnownServerCheck(checks, "operator_binary_release", "install_release_operator_binary", extended.OperatorBinaryRelease)
 	if extended.MachineID == "" {
 		checks = append(checks, punarodiagnostic.Fail("machine_identity", "configure_server_machine_identity"))
 	} else {

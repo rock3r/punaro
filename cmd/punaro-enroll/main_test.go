@@ -600,6 +600,49 @@ func TestEnrollmentMaterialAcceptsStrictAdminEnvelope(t *testing.T) {
 	}
 }
 
+func TestEnrollmentMaterialAcceptsExactServiceAdminOutput(t *testing.T) {
+	grants, previewHash, err := punaropostgres.PreviewServiceEnrollment()
+	if err != nil {
+		t.Fatal(err)
+	}
+	preview := struct {
+		Template    string                     `json:"template"`
+		PreviewHash string                     `json:"preview_hash"`
+		Grants      []punaropostgres.GrantSpec `json:"grants"`
+	}{Template: "service", PreviewHash: previewHash, Grants: grants}
+	pending := punaropostgres.PendingEnrollment{ID: "33333333-3333-4333-8333-333333333333", ClientBinding: "44444444-4444-4444-8444-444444444444", Code: strings.Repeat("A", 43), ExpiresAt: time.Date(2030, 1, 2, 3, 4, 5, 0, time.UTC), PreviewHash: previewHash, Grants: grants}
+	previewRaw, err := json.MarshalIndent(preview, "", "  ")
+	if err != nil {
+		t.Fatal(err)
+	}
+	pendingRaw, err := json.MarshalIndent(pending, "", "  ")
+	if err != nil {
+		t.Fatal(err)
+	}
+	material, err := loadMaterial(writeTestMaterial(t, string(append(append(previewRaw, '\n'), append(pendingRaw, '\n')...))))
+	if err != nil || material.EnrollmentID != pending.ID {
+		t.Fatalf("service admin output material=%#v err=%v", material, err)
+	}
+}
+
+func TestProtectMaterialTightensTransferredFileWithoutReadingIt(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "enrollment-material.json")
+	want := []byte("private enrollment material")
+	if err := os.WriteFile(path, want, 0o644); err != nil { // #nosec G306 -- deliberately models a transferred file with an inherited broad mode.
+		t.Fatal(err)
+	}
+	var stdout, stderr bytes.Buffer
+	if code := run([]string{"protect-material", "--file", path}, &stdout, &stderr); code != 0 || stdout.String() != "enrollment material protected\n" || stderr.Len() != 0 {
+		t.Fatalf("code=%d stdout=%q stderr=%q", code, stdout.String(), stderr.String())
+	}
+	if _, err := readPrivate(path, maxEnrollmentMaterial); err != nil {
+		t.Fatalf("protected material remained unreadable: %v", err)
+	}
+	if got, err := os.ReadFile(path); err != nil || !bytes.Equal(got, want) { // #nosec G304 -- fixed child of t.TempDir verifies that permission repair did not rewrite contents.
+		t.Fatalf("protected material content changed: got=%q err=%v", got, err)
+	}
+}
+
 func TestEnrollmentMaterialAcceptsExactAdminOutputAtProjectLimit(t *testing.T) {
 	projectIDs := make([]string, 100)
 	for i := range projectIDs {

@@ -3,6 +3,7 @@ package main
 import (
 	"bufio"
 	"context"
+	"crypto/sha256"
 	"database/sql"
 	"encoding/base64"
 	"encoding/json"
@@ -34,6 +35,7 @@ const (
 	maximumAdapterDoctorTimeout         = 30 * time.Second
 	maximumMailboxDoctorOutput          = 64 << 10
 	maximumMailboxDoctorBytes           = 64 << 20
+	maximumClientLauncherBytes          = 8 << 20
 	maximumMailboxDoctorEndpoints       = 256
 	maximumBootstrapVersionOutput       = 256
 	maximumBootstrapReleaseDoctorOutput = 512
@@ -137,8 +139,12 @@ var (
 	adapterDoctorBootstrapProbe             = func(ctx context.Context, directory, bootstrapRelease string) (punarodiagnostic.Report, error) {
 		return bootstrap.IsolatedDoctor(ctx, bootstrap.DoctorRequest{Directory: directory, BootstrapRelease: bootstrapRelease})
 	}
-	adapterDoctorPluginProbe     = inspectAdapterPluginIsolated
-	mailboxDoctorSnapshotProtect = protectMailboxDoctorSnapshot
+	adapterDoctorPluginProbe         = inspectAdapterPluginIsolated
+	adapterDoctorClientLauncherProbe = func(ctx context.Context) (bool, error) {
+		return inspectAdapterClientLaunchersIsolated(ctx, defaultAdapterBinDirectory())
+	}
+	adapterDoctorClientLaunchersExecutable = os.Executable
+	mailboxDoctorSnapshotProtect           = protectMailboxDoctorSnapshot
 )
 
 func runAdapterDoctor(args []string, stdout, stderr io.Writer) int {
@@ -178,6 +184,7 @@ func runAdapterDoctor(args []string, stdout, stderr io.Writer) int {
 			punarodiagnostic.Unavailable("bootstrap_running_artifact", "repair_adapter_configuration"),
 			punarodiagnostic.Unavailable("bootstrap_supervisor", "repair_adapter_configuration"),
 			punarodiagnostic.Unavailable("installed_release", "repair_adapter_configuration"),
+			punarodiagnostic.Unavailable("client_component_launchers", "repair_adapter_configuration"),
 			punarodiagnostic.Unavailable("portable_plugin_registration", "repair_adapter_configuration"),
 			punarodiagnostic.Unavailable("codex_plugin_registration", "repair_adapter_configuration"),
 			punarodiagnostic.Unavailable("claude_plugin_registration", "repair_adapter_configuration"),
@@ -196,6 +203,12 @@ func runAdapterDoctor(args []string, stdout, stderr io.Writer) int {
 		punarodiagnostic.Pass("machine_credential_file"),
 		boolDoctorCheck(config.profileFile != "", "adapter_profile_file", "install_adapter_profile"),
 		boolDoctorCheck(config.identityFile != "", "client_identity_file", "install_client_identity"),
+	}
+	launchers, launcherErr := adapterDoctorClientLauncherProbe(ctx)
+	if launcherErr != nil {
+		checks = append(checks, punarodiagnostic.Unavailable("client_component_launchers", "reinstall_client_launchers"))
+	} else {
+		checks = append(checks, boolDoctorCheck(launchers, "client_component_launchers", "reinstall_client_launchers"))
 	}
 	mailbox, mailboxErr := adapterDoctorMailboxProbe(ctx, config)
 	if mailboxErr != nil {
@@ -746,6 +759,97 @@ func defaultAdapterBootstrapDirectory() string {
 		return ""
 	}
 	return filepath.Join(home, ".local", "state", "punaro-bootstrap")
+}
+
+func defaultAdapterBinDirectory() string {
+	if runtime.GOOS == "windows" {
+		root := strings.TrimSpace(os.Getenv("LOCALAPPDATA"))
+		if root == "" {
+			return ""
+		}
+		return filepath.Join(root, "Punaro", "bin")
+	}
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return ""
+	}
+	return filepath.Join(home, ".local", "bin")
+}
+
+func clientComponentLaunchersMatch(ctx context.Context, root string) bool {
+	if ctx == nil || ctx.Err() != nil || root == "" || !filepath.IsAbs(root) {
+		return false
+	}
+	var expected [sha256.Size]byte
+	for index, component := range []string{"punaro-adapter", "punaro-enroll", "punaro-memory", "punaro-trusted-attachment"} {
+		if runtime.GOOS == "windows" {
+			component += ".exe"
+		}
+		path := filepath.Join(root, component)
+		info, err := os.Lstat(path) // #nosec G703 -- closed component names below the installer-owned bin root.
+		if err != nil || !info.Mode().IsRegular() || info.Mode()&os.ModeSymlink != 0 || info.Size() < 1 || info.Size() > maximumClientLauncherBytes || runtime.GOOS != "windows" && info.Mode().Perm()&0o111 == 0 {
+			return false
+		}
+		file, err := os.Open(path) // #nosec G304,G703 -- closed component names below the installer-owned bin root.
+		if err != nil {
+			return false
+		}
+		hash := sha256.New()
+		copied, copyErr := io.Copy(hash, io.LimitReader(pluginDoctorContextReader{ctx: ctx, reader: file}, maximumClientLauncherBytes+1))
+		opened, statErr := file.Stat()
+		closeErr := file.Close()
+		if copyErr != nil || statErr != nil || closeErr != nil || !opened.Mode().IsRegular() || !os.SameFile(info, opened) || opened.Size() != info.Size() || copied != info.Size() {
+			return false
+		}
+		var digest [sha256.Size]byte
+		copy(digest[:], hash.Sum(nil))
+		if index == 0 {
+			expected = digest
+		} else if digest != expected {
+			return false
+		}
+	}
+	return true
+}
+
+func inspectAdapterClientLaunchersIsolated(ctx context.Context, directory string) (bool, error) {
+	if ctx == nil || ctx.Err() != nil || directory == "" || !filepath.IsAbs(directory) {
+		return false, errors.New("client launcher diagnostic is unavailable")
+	}
+	executable, err := adapterDoctorClientLaunchersExecutable()
+	if err != nil {
+		return false, errors.New("client launcher diagnostic is unavailable")
+	}
+	command := exec.CommandContext(ctx, executable, "doctor-client-launchers-inspect", "--directory", directory) // #nosec G204,G702 -- os.Executable self helper with one explicit local directory.
+	command.Stdin = nil
+	command.Stderr = io.Discard
+	output := boundedDoctorOutput{maximum: 16}
+	command.Stdout = &output
+	if command.Run() != nil || ctx.Err() != nil || output.overflow {
+		return false, errors.New("client launcher diagnostic is unavailable")
+	}
+	switch strings.TrimSpace(output.buffer.String()) {
+	case "true":
+		return true, nil
+	case "false":
+		return false, nil
+	default:
+		return false, errors.New("client launcher diagnostic is unavailable")
+	}
+}
+
+func runAdapterClientLaunchersInspect(args []string, stdout io.Writer) int {
+	flags := flag.NewFlagSet("punaro-adapter doctor-client-launchers-inspect", flag.ContinueOnError)
+	flags.SetOutput(io.Discard)
+	directory := flags.String("directory", "", "installer-owned client bin directory")
+	if flags.Parse(args) != nil || flags.NArg() != 0 || *directory == "" || !filepath.IsAbs(*directory) {
+		return 2
+	}
+	_, err := fmt.Fprintln(stdout, clientComponentLaunchersMatch(context.Background(), *directory))
+	if err != nil {
+		return 1
+	}
+	return 0
 }
 
 func defaultAdapterBootstrapExecutable() string {

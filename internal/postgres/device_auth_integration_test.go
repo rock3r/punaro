@@ -555,4 +555,22 @@ WHERE id = $1`, legacyPending.ID, uuid.NewString(), owner.ID, credential.LookupI
 	if resolvedPublicKey, err := app.ResolveMigratedLegacyPublicKey(ctx, legacyAuthenticated); err != nil || !bytes.Equal(resolvedPublicKey, legacyPublic) {
 		t.Fatalf("migrated relay authority failed after legacy disable: key=%x err=%v", resolvedPublicKey, err)
 	}
+
+	serviceRequest := EnrollmentRequest{ClientBinding: uuid.NewString(), MachineID: "server-doctor", Label: "server doctor", ServiceOnly: true, TTL: 10 * time.Minute}
+	serviceGrants, serviceHash, err := PreviewServiceEnrollment()
+	if err != nil || len(serviceGrants) != 0 {
+		t.Fatalf("service preview=%#v hash=%q err=%v", serviceGrants, serviceHash, err)
+	}
+	servicePending, err := admin.CreateEnrollment(ctx, owner.ID, serviceRequest, serviceHash)
+	if err != nil || len(servicePending.Grants) != 0 {
+		t.Fatalf("service pending=%#v err=%v", servicePending, err)
+	}
+	serviceCredential, err := app.RedeemEnrollment(ctx, RedeemEnrollment{EnrollmentID: servicePending.ID, ClientBinding: serviceRequest.ClientBinding, Code: servicePending.Code, IdempotencyKey: uuid.NewString()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var serviceGrantCount int
+	if err := ownerDB.QueryRowContext(ctx, `SELECT count(*) FROM auth.capability_grants WHERE principal_id = $1`, serviceCredential.PrincipalID).Scan(&serviceGrantCount); err != nil || serviceGrantCount != 0 {
+		t.Fatalf("service grant count=%d err=%v", serviceGrantCount, err)
+	}
 }
