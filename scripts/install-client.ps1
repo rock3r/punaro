@@ -376,7 +376,10 @@ if ($null -ne $existingAdapterTask -and $existingAdapterTask.State -eq 'Running'
 
 try {
 Stop-PunaroOrphanAdapter -BootstrapDirectory $bootstrapDir
-Wait-PunaroReplaceableBinary -Path (Join-Path $binDir 'punaro-adapter.exe')
+$dispatcherComponents = @('punaro-adapter.exe', 'punaro-trusted-attachment.exe', 'punaro-memory.exe', 'punaro-enroll.exe')
+foreach ($component in $dispatcherComponents) {
+    Wait-PunaroReplaceableBinary -Path (Join-Path $binDir $component)
+}
 Wait-PunaroReplaceableBinary -Path (Join-Path $binDir 'punaro-bootstrap.exe')
 Build-PunaroBinary -Package (Join-Path $repoDir 'cmd\punaro-adapter') -Output (Join-Path $binDir 'punaro-adapter.exe') -LdFlags "-X main.adapterBuildRelease=$sourceRelease -X main.adapterExpectedSkillSetDigest=$skillSha256 -X main.adapterExpectedPluginRuntimeDigest=$pluginRuntimeSha256"
 Build-PunaroBinary -Package (Join-Path $repoDir 'cmd\punaro-bootstrap') -Output (Join-Path $binDir 'punaro-bootstrap.exe') -LdFlags "-X main.bootstrapBuildRelease=$sourceRelease"
@@ -400,7 +403,11 @@ Invoke-Program -Program (Join-Path $binDir 'punaro-bootstrap.exe') -Arguments $s
 $launcherBuild = Join-Path $root ("punaro-launcher-" + [Guid]::NewGuid().ToString('N') + '.exe')
 try {
     Build-PunaroBinary -Package (Join-Path $repoDir 'cmd\punaro-launcher') -Output $launcherBuild
-    foreach ($component in @('punaro-adapter.exe', 'punaro-trusted-attachment.exe', 'punaro-memory.exe', 'punaro-enroll.exe')) {
+    foreach ($component in $dispatcherComponents) {
+        $destination = Join-Path $binDir $component
+        Wait-PunaroReplaceableBinary -Path $destination
+    }
+    foreach ($component in $dispatcherComponents) {
         $destination = Join-Path $binDir $component
         [System.IO.File]::Copy($launcherBuild, $destination, $true)
         Protect-PunaroPath -Path $destination

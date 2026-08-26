@@ -286,6 +286,15 @@ Punaro separates four principals:
 | Role | `role/plan-reviewer` or `role/<machine>/<slug>` | A durable conversation identity owned by one enrolled machine and bound to one live endpoint at a time. Canonical `role/<machine>/<slug>` handles are opt-in public addresses; legacy names remain valid conversation members until explicitly registered. |
 | Conversation | `conv_01…` | The durable room/thread which has members and messages. |
 
+Enrollment templates are server-owned authorization choices, not client
+labels. A `trusted-agent` template expands only the exact confirmed project or
+all-project capability grants. A `service` template expands to an exactly empty
+grant set and creates a revocable device principal that can authenticate only
+routes requiring no capability grant, such as server doctor probes. Template,
+scope, and grants are bound into the owner-confirmed preview hash and pending
+enrollment; `service` cannot be combined with project scope, all-project scope,
+or legacy exchange.
+
 An endpoint belongs to exactly one currently connected machine lease. A machine
 can only advertise endpoints in its configured namespace (for example,
 `agent/`) and only after local attachment is confirmed. A machine may instead
@@ -1997,6 +2006,14 @@ The implementation is not internet-exposure-ready until these cases pass:
   signed release; it never supplies a URL, command, or unsigned `latest`
   pointer. `punaro-bootstrap update` verifies catalog/manifest signatures and
   exact artifact digests, then publishes `current`/`previous` slots.
+  Familiar client command names are installer-owned copies of one stable,
+  closed-allowlist dispatcher. On POSIX it replaces itself with the selected
+  signed-slot payload; on Windows it starts that exact payload with inherited
+  stdio and propagates its exit status. Built-in updates replace signed slot
+  artifacts, never these dispatcher copies. Doctor requires the adapter,
+  enrollment, memory, and trusted-attachment dispatchers to be regular,
+  byte-identical executables, while the client installer waits for every
+  Windows destination to become replaceable before overwriting it.
   Platform services launch `punaro-bootstrap run`, which supervises the
   current-slot adapter, requires a local ready signal within 60 seconds when a
   previous slot exists, rolls back once if the fresh catalog still allows that
