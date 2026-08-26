@@ -182,6 +182,23 @@ Get-ScheduledTask -TaskName 'Punaro Adapter'
   --plugin-root C:\absolute\installed\punaro-plugin
 ```
 
+When reinstalling over an enabled repeating task, the installer disables it
+for the complete replacement critical section. It then stops every task instance,
+including one that started while the disable fence was being acquired, and every
+process using the exact installed bootstrap image before replacing any managed
+executable. It verifies process image identity and bounded exit first, restores
+the prior enabled and running state on failure, reports restoration failures with
+the original installer error, and does not terminate unrelated processes or
+weaken the binary replaceability fence.
+
+An alpha.8 failure may leave that bootstrap image running after the scheduled
+task has already returned to **Ready**. When the enabled repeating task still
+exists, alpha.9 fences it and terminates only the process whose image is exactly
+`%LOCALAPPDATA%\Punaro\bin\punaro-bootstrap.exe`. If that task definition no
+longer exists or is deliberately disabled, verify and stop that exact image
+manually before rerunning the installer. Do not disable the replaceability fence
+or terminate by name.
+
 The installer also builds `%LOCALAPPDATA%\Punaro\bin\punaro-trusted-attachment.exe`.
 After ordinary device enrollment, the operator separately provisions its fixed
 HTTPS origin, protected credential file, project UUID, and safe download root.

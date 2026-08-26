@@ -64,11 +64,41 @@ try {
     $global:punaroRegisteredTriggers = $null
     $global:punaroExistingTask = $null
     $global:punaroDisableTaskCalled = $false
+    $global:punaroEnableTaskCalled = $false
     $global:punaroStartTaskCalled = $false
+    $global:punaroStopTaskCalled = $false
+    $global:punaroStopTaskFailure = $false
+    $global:punaroDisableStateFailure = $false
+    $global:punaroTaskStartsDuringDisable = $false
+    $global:punaroEnableTaskFailure = $false
     function Get-ScheduledTask { param([string]$TaskName) return $global:punaroExistingTask }
-    function Disable-ScheduledTask { param([string]$TaskName) $global:punaroDisableTaskCalled = $true }
-    function Start-ScheduledTask { param([string]$TaskName) $global:punaroStartTaskCalled = $true }
-    function Stop-ScheduledTask { param([string]$TaskName) }
+    function Disable-ScheduledTask {
+        param([string]$TaskName)
+        $global:punaroDisableTaskCalled = $true
+        if ($null -ne $global:punaroExistingTask -and $global:punaroTaskStartsDuringDisable) {
+            $global:punaroExistingTask.State = 'Running'
+        } elseif ($null -ne $global:punaroExistingTask -and -not $global:punaroDisableStateFailure) {
+            $global:punaroExistingTask.State = 'Disabled'
+        }
+    }
+    function Enable-ScheduledTask {
+        param([string]$TaskName, [string]$ErrorAction)
+        $global:punaroEnableTaskCalled = $true
+        if ($global:punaroEnableTaskFailure) { throw 'simulated scheduled task restore failure' }
+        if ($null -ne $global:punaroExistingTask) { $global:punaroExistingTask.State = 'Ready' }
+    }
+    function Start-ScheduledTask { param([string]$TaskName, [string]$ErrorAction) $global:punaroStartTaskCalled = $true }
+    function Stop-ScheduledTask {
+        param([string]$TaskName)
+        $global:punaroStopTaskCalled = $true
+        if (-not $global:punaroDisableTaskCalled) {
+            throw 'simulated repeating task retriggered before replacement fence'
+        }
+        if ($global:punaroStopTaskFailure) { throw 'simulated scheduled task stop failure' }
+        if ($null -ne $global:punaroExistingTask -and -not $global:punaroDisableStateFailure) {
+            $global:punaroExistingTask.State = 'Disabled'
+        }
+    }
     function New-ScheduledTaskAction { param([string]$Execute, [string]$Argument) return [pscustomobject]@{ Execute = $Execute; Argument = $Argument } }
     function New-ScheduledTaskTrigger {
         param(
@@ -139,6 +169,106 @@ try {
     if (@($global:punaroRegisteredTriggers | Where-Object { $_.Once }).Count -ne 0 -or $global:punaroStartTaskCalled) {
         throw 'Windows client installer armed or started a fresh adapter without -Enable'
     }
+    $fixedBootstrap = Join-Path $root 'bin\punaro-bootstrap.exe'
+    $savedFixedBootstrap = $fixedBootstrap + '.service-parent-test'
+    $decoyBootstrapDirectory = Join-Path $fixture 'decoy'
+    [System.IO.Directory]::CreateDirectory($decoyBootstrapDirectory) | Out-Null
+    $decoyBootstrap = Join-Path $decoyBootstrapDirectory 'punaro-bootstrap.exe'
+    $pingExecutable = Join-Path $env:SystemRoot 'System32\PING.EXE'
+    [System.IO.File]::Move($fixedBootstrap, $savedFixedBootstrap)
+    [System.IO.File]::Copy($pingExecutable, $fixedBootstrap)
+    [System.IO.File]::Copy($pingExecutable, $decoyBootstrap)
+    $fakeBootstrapProcess = Start-Process -FilePath $fixedBootstrap -ArgumentList @('-t', '127.0.0.1') -PassThru -WindowStyle Hidden
+    $decoyBootstrapProcess = Start-Process -FilePath $decoyBootstrap -ArgumentList @('-t', '127.0.0.1') -PassThru -WindowStyle Hidden
+    try {
+        Start-Sleep -Milliseconds 500
+        if ($fakeBootstrapProcess.HasExited -or $decoyBootstrapProcess.HasExited) { throw 'Windows installer regression fixture bootstrap exited early' }
+        $global:punaroDisableTaskCalled = $false
+        $global:punaroExistingTask = [pscustomobject]@{ State = 'Running'; Triggers = @() }
+        & (Join-Path $repoDir 'scripts\install-client.ps1') -RelayUrl 'https://relay.example.test' -MachineId 'windows-test' -AgentMailboxBin $mailbox -AgentGuidanceDir $project
+        if ($LASTEXITCODE -ne 0) { throw 'Windows client installer failed while replacing a stopped task bootstrap parent' }
+        if (-not $global:punaroDisableTaskCalled) { throw 'Windows client installer did not fence the repeating task before stopping it' }
+        $fakeBootstrapProcess.Refresh()
+        if (-not $fakeBootstrapProcess.HasExited) { throw 'Windows client installer left the stopped task bootstrap parent running' }
+        $decoyBootstrapProcess.Refresh()
+        if ($decoyBootstrapProcess.HasExited) { throw 'Windows client installer stopped a different-path bootstrap process' }
+    } finally {
+        foreach ($fixtureProcess in @($fakeBootstrapProcess, $decoyBootstrapProcess)) {
+            if ($null -ne $fixtureProcess) {
+                $fixtureProcess.Refresh()
+                if (-not $fixtureProcess.HasExited) { Stop-Process -Id $fixtureProcess.Id -Force -ErrorAction SilentlyContinue }
+            }
+        }
+        if (Test-Path -LiteralPath $savedFixedBootstrap -PathType Leaf) {
+            if (Test-Path -LiteralPath $fixedBootstrap) { Remove-Item -LiteralPath $fixedBootstrap -Force }
+            [System.IO.File]::Move($savedFixedBootstrap, $fixedBootstrap)
+        }
+        $global:punaroExistingTask = $null
+    }
+    $global:punaroDisableTaskCalled = $false
+    $global:punaroEnableTaskCalled = $false
+    $global:punaroStartTaskCalled = $false
+    $global:punaroStopTaskFailure = $true
+    $global:punaroExistingTask = [pscustomobject]@{ State = 'Running'; Triggers = @() }
+    $stopFailureRestored = $false
+    try {
+        & (Join-Path $repoDir 'scripts\install-client.ps1') -RelayUrl 'https://relay.example.test' -MachineId 'windows-test' -AgentMailboxBin $mailbox -AgentGuidanceDir $project
+    } catch {
+        if ($_.Exception.Message.Contains('simulated scheduled task stop failure')) { $stopFailureRestored = $true } else { throw }
+    }
+    if (-not $stopFailureRestored -or -not $global:punaroDisableTaskCalled -or -not $global:punaroEnableTaskCalled -or -not $global:punaroStartTaskCalled) {
+        throw 'Windows client installer did not restore a temporarily disabled running task after failure'
+    }
+    $global:punaroStopTaskFailure = $false
+    $global:punaroDisableTaskCalled = $false
+    $global:punaroEnableTaskCalled = $false
+    $global:punaroStartTaskCalled = $false
+    $global:punaroStopTaskCalled = $false
+    $global:punaroRegisteredTriggers = $null
+    $repeat = [pscustomobject]@{ Repetition = [pscustomobject]@{ Interval = 'PT1M' } }
+    $global:punaroExistingTask = [pscustomobject]@{ State = 'Ready'; Triggers = @($repeat) }
+    $global:punaroTaskStartsDuringDisable = $true
+    & (Join-Path $repoDir 'scripts\install-client.ps1') -RelayUrl 'https://relay.example.test' -MachineId 'windows-test' -AgentMailboxBin $mailbox -AgentGuidanceDir $project
+    if ($LASTEXITCODE -ne 0) { throw 'Windows client installer failed to reinstall over an idle repeating task' }
+    if (-not $global:punaroDisableTaskCalled) { throw 'Windows client installer did not fence an idle repeating task during replacement' }
+    if (-not $global:punaroStopTaskCalled) { throw 'Windows client installer did not stop a repeating task instance that started while the replacement fence was acquired' }
+    if ($global:punaroEnableTaskCalled -or $global:punaroStartTaskCalled) { throw 'Windows client installer changed idle repeating task runtime state during successful replacement' }
+    if (@($global:punaroRegisteredTriggers | Where-Object { $_.Once }).Count -ne 1) {
+        throw 'Windows client installer did not preserve the repeating trigger for an idle task'
+    }
+    $global:punaroTaskStartsDuringDisable = $false
+    $global:punaroDisableTaskCalled = $false
+    $global:punaroEnableTaskCalled = $false
+    $global:punaroStartTaskCalled = $false
+    $global:punaroDisableStateFailure = $true
+    $global:punaroExistingTask = [pscustomobject]@{ State = 'Ready'; Triggers = @($repeat) }
+    $disableFenceFailedClosed = $false
+    try {
+        & (Join-Path $repoDir 'scripts\install-client.ps1') -RelayUrl 'https://relay.example.test' -MachineId 'windows-test' -AgentMailboxBin $mailbox -AgentGuidanceDir $project
+    } catch {
+        if ($_.Exception.Message.Contains('could not disable the Punaro Adapter task during binary replacement')) { $disableFenceFailedClosed = $true } else { throw }
+    }
+    if (-not $disableFenceFailedClosed -or -not $global:punaroDisableTaskCalled -or -not $global:punaroEnableTaskCalled -or $global:punaroStartTaskCalled) {
+        throw 'Windows client installer did not fail closed and restore an idle repeating task when its replacement fence failed'
+    }
+    $global:punaroDisableTaskCalled = $false
+    $global:punaroEnableTaskCalled = $false
+    $global:punaroStartTaskCalled = $false
+    $global:punaroDisableStateFailure = $true
+    $global:punaroEnableTaskFailure = $true
+    $global:punaroExistingTask = [pscustomobject]@{ State = 'Ready'; Triggers = @($repeat) }
+    $restoreFailurePreservedContext = $false
+    try {
+        & (Join-Path $repoDir 'scripts\install-client.ps1') -RelayUrl 'https://relay.example.test' -MachineId 'windows-test' -AgentMailboxBin $mailbox -AgentGuidanceDir $project
+    } catch {
+        $restoreFailurePreservedContext = $_.Exception.Message.Contains('could not disable the Punaro Adapter task during binary replacement') -and $_.Exception.Message.Contains('simulated scheduled task restore failure') -and -not $_.Exception.Message.Contains('punaro installer: punaro installer:')
+    }
+    if (-not $restoreFailurePreservedContext -or -not $global:punaroDisableTaskCalled -or -not $global:punaroEnableTaskCalled -or $global:punaroStartTaskCalled) {
+        throw 'Windows client installer did not report task restoration failure with the original installation error context'
+    }
+    $global:punaroEnableTaskFailure = $false
+    $global:punaroDisableStateFailure = $false
+    $global:punaroExistingTask = $null
     $global:punaroRegisteredTriggers = $null
     $global:punaroStartTaskCalled = $false
     & (Join-Path $repoDir 'scripts\install-client.ps1') -RelayUrl 'https://relay.example.test' -MachineId 'windows-test' -AgentMailboxBin $mailbox -AgentGuidanceDir $project -Enable

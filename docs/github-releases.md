@@ -148,6 +148,12 @@ Only the offline-signature publisher can make those stable assets visible.
    `minimum_bootstrap_release=v0.1.0-alpha.8`; upgrading from an older fixed
    bootstrap requires one client-installer handoff before built-in updates can
    safely manage every selected component.
+
+   Alpha.9 fixes the Windows client-installer handoff without changing the
+   signed-slot or fixed-bootstrap protocol. Dispatch `v0.1.0-alpha.9` with
+   `minimum_bootstrap_release=v0.1.0-alpha.8` and
+   `supported_from=v0.1.0-alpha.8`; alpha.8 clients can use the built-in signed
+   update, while the alpha.9 checkout supplies the corrected Windows installer.
 3. Wait for the draft release to appear. The live `catalog` prerelease is not
    touched by the unsigned workflow.
 4. Generate the offline key once, on an air-gapped or owner-only machine, and
