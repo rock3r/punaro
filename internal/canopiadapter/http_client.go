@@ -21,11 +21,6 @@ func NewDeliveryClient(caFile string) (*http.Client, error) {
 	// route that bearer-authenticated private-LAN traffic through a shell or
 	// desktop proxy inherited by the coding-agent process.
 	transport.Proxy = nil
-	// The collector's small private deployment serves HTTP/1.1 reliably across
-	// the supported desktops. Avoid inheriting a platform-specific HTTP/2
-	// transport from the Go default and keep the worker's request path simple.
-	transport.ForceAttemptHTTP2 = false
-	transport.TLSNextProto = map[string]func(string, *tls.Conn) http.RoundTripper{}
 	caFile = strings.TrimSpace(caFile)
 	if caFile == "" {
 		return &http.Client{Timeout: 3 * time.Second, Transport: transport}, nil
@@ -43,7 +38,6 @@ func NewDeliveryClient(caFile string) (*http.Client, error) {
 	}
 	transport.TLSClientConfig = &tls.Config{
 		MinVersion: tls.VersionTLS12,
-		NextProtos: []string{"http/1.1"},
 		RootCAs:    pool,
 	}
 	return &http.Client{Timeout: 3 * time.Second, Transport: transport}, nil
