@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"errors"
 	"image/png"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -125,11 +126,11 @@ func TestCodexHookExampleLoadsInInstalledCodex(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(filepath.Join(project, ".codex", "hooks.json"), payload, 0o600); err != nil {
+	if err := os.WriteFile(filepath.Join(project, ".codex", "hooks.json"), payload, 0o600); err != nil { // #nosec G703 -- project is created by this test with t.TempDir.
 		t.Fatal(err)
 	}
 	codexHome := t.TempDir()
-	if err := os.WriteFile(filepath.Join(codexHome, "hooks.json"), payload, 0o600); err != nil {
+	if err := os.WriteFile(filepath.Join(codexHome, "hooks.json"), payload, 0o600); err != nil { // #nosec G703 -- codexHome is created by this test with t.TempDir.
 		t.Fatal(err)
 	}
 	context, cancel := context.WithTimeout(t.Context(), 15*time.Second)
@@ -195,7 +196,7 @@ func TestGrokBuildHookExampleLoadsInInstalledInspector(t *testing.T) {
 		t.Skip("git is not installed on this test host")
 	}
 	project := t.TempDir()
-	if output, err := exec.Command(gitPath, "init", "--quiet", project).CombinedOutput(); err != nil { // #nosec G204 -- fixed local git initialization in a temporary contract-test project.
+	if output, err := exec.CommandContext(t.Context(), gitPath, "init", "--quiet", project).CombinedOutput(); err != nil { // #nosec G204 -- fixed local git initialization in a temporary contract-test project.
 		t.Fatalf("initialize temporary Grok Build project: %v: %s", err, output)
 	}
 	payload, err := os.ReadFile(filepath.Join("..", "..", "canopi", "providers", "grok-build-hooks.example.json"))
@@ -207,7 +208,7 @@ func TestGrokBuildHookExampleLoadsInInstalledInspector(t *testing.T) {
 	if err := os.MkdirAll(hooksDirectory, 0o700); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(filepath.Join(hooksDirectory, "canopi.json"), payload, 0o600); err != nil {
+	if err := os.WriteFile(filepath.Join(hooksDirectory, "canopi.json"), payload, 0o600); err != nil { // #nosec G703 -- hooksDirectory is created by this test with t.TempDir.
 		t.Fatal(err)
 	}
 	context, cancel := context.WithTimeout(t.Context(), 15*time.Second)
@@ -243,7 +244,7 @@ func TestPiExtensionEmitsSessionStartToCollector(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	collector, store := testCollector(t)
+	collector, _, observed := testCollectorWithEvents(t)
 	outputPath := filepath.Join(t.TempDir(), "canopi-provider-hook")
 	buildContext, cancelBuild := context.WithTimeout(t.Context(), 30*time.Second)
 	defer cancelBuild()
@@ -264,7 +265,7 @@ func TestPiExtensionEmitsSessionStartToCollector(t *testing.T) {
 		"CANOPI_PROVIDER_HOOK="+outputPath,
 		"PI_CODING_AGENT_DIR="+t.TempDir(),
 	)
-	prepare := exec.Command(outputPath, "pi", "prepare") // #nosec G204 -- fixed provider runner built above.
+	prepare := exec.CommandContext(t.Context(), outputPath, "pi", "prepare") // #nosec G204 -- fixed provider runner built above.
 	prepare.Env = environment
 	if output, err := prepare.CombinedOutput(); err != nil {
 		t.Fatalf("prepare Pi spool: %v: %s", err, output)
@@ -290,13 +291,11 @@ func TestPiExtensionEmitsSessionStartToCollector(t *testing.T) {
 	tick := time.NewTicker(25 * time.Millisecond)
 	defer tick.Stop()
 	for {
-		if agents := store.Snapshot(time.Now()).Agents; len(agents) == 1 {
-			if agents[0].Source != protocol.SourcePi || agents[0].State != protocol.StateWorking {
-				t.Fatalf("Pi collector state = %+v", agents[0])
-			}
-			return
-		}
 		select {
+		case event := <-observed:
+			if event.Source == protocol.SourcePi && event.Metadata["hook"] == "session_start" && event.State == protocol.StateWorking {
+				return
+			}
 		case <-deadline.C:
 			t.Fatalf("Pi extension did not reach collector; stdout=%s stderr=%s", stdout.String(), stderr.String())
 		case <-tick.C:
@@ -364,7 +363,7 @@ func TestProvidersDeliverARealLifecycleToCollectorAndRender(t *testing.T) {
 	if len(store.Snapshot(time.Now()).Agents) != 3 {
 		t.Fatalf("collector agents = %d, want 3", len(store.Snapshot(time.Now()).Agents))
 	}
-	request, err := http.NewRequest(http.MethodGet, collector.URL+"/v1/render/800x480.png", nil)
+	request, err := http.NewRequestWithContext(t.Context(), http.MethodGet, collector.URL+"/v1/render/800x480.png", nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -373,7 +372,7 @@ func TestProvidersDeliverARealLifecycleToCollectorAndRender(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer response.Body.Close()
+	defer func() { _ = response.Body.Close() }()
 	if response.StatusCode != http.StatusOK || response.Header.Get("Content-Type") != "image/png" {
 		t.Fatalf("render response = %d %q", response.StatusCode, response.Header.Get("Content-Type"))
 	}
@@ -388,6 +387,12 @@ func TestProvidersDeliverARealLifecycleToCollectorAndRender(t *testing.T) {
 
 func testCollector(t *testing.T) (*httptest.Server, *canopi.Store) {
 	t.Helper()
+	server, store, _ := testCollectorWithEvents(t)
+	return server, store
+}
+
+func testCollectorWithEvents(t *testing.T) (*httptest.Server, *canopi.Store, <-chan protocol.Event) {
+	t.Helper()
 	store := canopi.NewStore(canopi.DefaultConfig())
 	handler, err := canopi.NewHandler(canopi.HandlerConfig{
 		Store:  store,
@@ -397,9 +402,25 @@ func testCollector(t *testing.T) (*httptest.Server, *canopi.Store) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	server := httptest.NewServer(handler)
+	observed := make(chan protocol.Event, 16)
+	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		if request.Method == http.MethodPost && request.URL.Path == "/v1/events" {
+			payload, readErr := io.ReadAll(request.Body)
+			if readErr == nil {
+				var event protocol.Event
+				if json.Unmarshal(payload, &event) == nil {
+					select {
+					case observed <- event:
+					default:
+					}
+				}
+				request.Body = io.NopCloser(bytes.NewReader(payload))
+			}
+		}
+		handler.ServeHTTP(writer, request)
+	}))
 	t.Cleanup(server.Close)
-	return server, store
+	return server, store, observed
 }
 
 func testProviderEnvironment(t *testing.T) map[string]string {

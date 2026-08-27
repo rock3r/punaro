@@ -174,7 +174,7 @@ func spawnDetached(selected provider) error {
 	if err != nil {
 		return err
 	}
-	command := exec.CommandContext(context.Background(), executable, string(selected), "supervise") // #nosec G204 -- the executable and provider values are fixed by this binary.
+	command := exec.CommandContext(context.Background(), executable, string(selected), "supervise") // #nosec G204,G702 -- the executable is this binary and the provider is validated by parseProvider.
 	command.Stdout = io.Discard
 	command.Stderr = io.Discard
 	if err := command.Start(); err != nil {
@@ -188,7 +188,7 @@ func relayHookDetached(selected provider) error {
 	if err != nil {
 		return err
 	}
-	command := exec.CommandContext(context.Background(), executable, string(selected), "hook") // #nosec G204 -- the executable and provider values are fixed by this binary.
+	command := exec.CommandContext(context.Background(), executable, string(selected), "hook") // #nosec G204,G702 -- the executable is this binary and the provider is validated by parseProvider.
 	command.Stdin = os.Stdin
 	command.Stdout = io.Discard
 	command.Stderr = io.Discard

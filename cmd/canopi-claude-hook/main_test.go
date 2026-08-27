@@ -161,7 +161,7 @@ func TestClaudeHookDeliversToCollectorAndRendersDashboard(t *testing.T) {
 	if len(store.Snapshot(time.Now()).Agents) != 1 {
 		t.Fatalf("collector agents = %d, want 1", len(store.Snapshot(time.Now()).Agents))
 	}
-	request, err := http.NewRequest(http.MethodGet, collector.URL+"/v1/render/800x480.png", nil)
+	request, err := http.NewRequestWithContext(t.Context(), http.MethodGet, collector.URL+"/v1/render/800x480.png", nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -170,7 +170,7 @@ func TestClaudeHookDeliversToCollectorAndRendersDashboard(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer response.Body.Close()
+	defer func() { _ = response.Body.Close() }()
 	if response.StatusCode != http.StatusOK || response.Header.Get("Content-Type") != "image/png" {
 		t.Fatalf("render response = %d %q", response.StatusCode, response.Header.Get("Content-Type"))
 	}
