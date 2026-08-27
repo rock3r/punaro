@@ -16,7 +16,7 @@ foreach ($path in $paths) {
 }
 
 $installer = [System.IO.File]::ReadAllText((Join-Path $repoDir 'scripts\install-client.ps1'))
-foreach ($expected in @('LogonType Interactive', 'ExecutionTimeLimit ([TimeSpan]::Zero)', 'RestartCount', 'RepetitionInterval', 'RepetitionDuration', '-WindowStyle Hidden', '-Hidden', 'SetAccessRuleProtection($true, $false)', '-ExecutionPolicy Bypass', 'ForEach-Object { $_.address }', 'punaro-trusted-attachment.exe', 'punaro-memory.exe', 'punaro-enroll.exe', 'agent-mailbox', '[string]$AgentMailboxBin', '$mailboxIsWaypost', 'AgentGuidanceDir', 'AllowLanHttp', 'PUNARO_ADAPTER_TRUSTED_LAN_CIDR')) {
+foreach ($expected in @('LogonType Interactive', 'ExecutionTimeLimit ([TimeSpan]::Zero)', 'RestartCount', "RestartInterval = 'PT1M'", 'RepetitionInterval', 'RepetitionDuration', '-WindowStyle Hidden', '-Hidden', 'SetAccessRuleProtection($true, $false)', '-ExecutionPolicy Bypass', 'Get-PunaroGroupAddresses', "PSObject.Properties['items']", "PSObject.Properties['address']", 'punaro-trusted-attachment.exe', 'punaro-memory.exe', 'punaro-enroll.exe', 'agent-mailbox', '[string]$AgentMailboxBin', '$mailboxIsWaypost', 'AgentGuidanceDir', 'AllowLanHttp', 'PUNARO_ADAPTER_TRUSTED_LAN_CIDR')) {
     if (-not $installer.Contains($expected)) { throw "Windows installer is missing required behavior: $expected" }
 }
 $dispatcherWait = 'Wait-PunaroReplaceableBinary -Path $destination'
@@ -166,6 +166,7 @@ try {
         if (Test-Path -LiteralPath $path) { throw "Windows client installer must not create retired attachment artifact $path" }
     }
     if ($global:punaroRegisteredTask -ne 'Punaro Adapter') { throw 'Windows client installer did not register the expected per-user task' }
+    if ($global:punaroRegisteredSettings.RestartInterval -ne 'PT1M') { throw 'Windows client adapter task restart interval must use an ISO 8601 duration' }
     if (@($global:punaroRegisteredTriggers | Where-Object { $_.Once }).Count -ne 0 -or $global:punaroStartTaskCalled) {
         throw 'Windows client installer armed or started a fresh adapter without -Enable'
     }
@@ -303,14 +304,41 @@ if not errorlevel 1 (
 )
 echo %* | findstr /C:"group list --json" >nul
 if not errorlevel 1 (
-  echo [{"group_id":"grp_test","address":"group/punaro-attached","created_at":"2026-01-01T00:00:00Z"}]
+  echo {"items":[{"group_id":"grp_test","address":"group/punaro-attached","created_at":"2026-01-01T00:00:00Z"}]}
   exit /b 0
 )
 exit /b 0
 '@
     [System.IO.File]::WriteAllText($mailbox, $existingGroupMailbox, [System.Text.Encoding]::ASCII)
     & (Join-Path $repoDir 'scripts\install-client.ps1') -RelayUrl 'https://relay.example.test' -MachineId 'windows-test' -AgentMailboxBin $mailbox -AgentGuidanceDir $project
-    if ($LASTEXITCODE -ne 0) { throw 'Windows client installer was not idempotent' }
+    if ($LASTEXITCODE -ne 0) { throw 'Windows client installer was not idempotent with wrapped group JSON' }
+    $legacyArrayGroupMailbox = $existingGroupMailbox.Replace(
+        'echo {"items":[{"group_id":"grp_test","address":"group/punaro-attached","created_at":"2026-01-01T00:00:00Z"}]}',
+        'echo [{"group_id":"grp_test","address":"group/punaro-attached","created_at":"2026-01-01T00:00:00Z"}]'
+    )
+    [System.IO.File]::WriteAllText($mailbox, $legacyArrayGroupMailbox, [System.Text.Encoding]::ASCII)
+    & (Join-Path $repoDir 'scripts\install-client.ps1') -RelayUrl 'https://relay.example.test' -MachineId 'windows-test' -AgentMailboxBin $mailbox -AgentGuidanceDir $project
+    if ($LASTEXITCODE -ne 0) { throw 'Windows client installer was not idempotent with legacy array group JSON' }
+    $legacyMultiGroupMailbox = $existingGroupMailbox.Replace(
+        'echo {"items":[{"group_id":"grp_test","address":"group/punaro-attached","created_at":"2026-01-01T00:00:00Z"}]}',
+        'echo [{"group_id":"grp_other","address":"group/other","created_at":"2026-01-01T00:00:00Z"},{"group_id":"grp_test","address":"group/punaro-attached","created_at":"2026-01-01T00:00:00Z"}]'
+    )
+    [System.IO.File]::WriteAllText($mailbox, $legacyMultiGroupMailbox, [System.Text.Encoding]::ASCII)
+    & (Join-Path $repoDir 'scripts\install-client.ps1') -RelayUrl 'https://relay.example.test' -MachineId 'windows-test' -AgentMailboxBin $mailbox -AgentGuidanceDir $project
+    if ($LASTEXITCODE -ne 0) { throw 'Windows client installer was not idempotent with multi-element legacy array group JSON' }
+    $emptyWrappedGroupMailbox = $existingGroupMailbox.Replace(
+        'echo {"items":[{"group_id":"grp_test","address":"group/punaro-attached","created_at":"2026-01-01T00:00:00Z"}]}',
+        'echo {"items":[]}'
+    )
+    [System.IO.File]::WriteAllText($mailbox, $emptyWrappedGroupMailbox, [System.Text.Encoding]::ASCII)
+    $emptyWrappedBlocked = $false
+    try {
+        & (Join-Path $repoDir 'scripts\install-client.ps1') -RelayUrl 'https://relay.example.test' -MachineId 'windows-test' -AgentMailboxBin $mailbox -AgentGuidanceDir $project
+    } catch {
+        if ($_.Exception.Message.Contains('could not create the local Punaro attachment group')) { $emptyWrappedBlocked = $true } else { throw }
+    }
+    if (-not $emptyWrappedBlocked) { throw 'Windows client installer accepted empty wrapped group JSON' }
+    [System.IO.File]::WriteAllText($mailbox, $existingGroupMailbox, [System.Text.Encoding]::ASCII)
     $adapterEnvironment = Join-Path $root 'config\adapter.env'
     $prePolicyProfile = @([System.IO.File]::ReadAllLines($adapterEnvironment) | Where-Object { $_ -notmatch '^PUNARO_ADAPTER_(ALLOW_LAN_HTTP|TRUSTED_LAN_CIDR)=' })
     [System.IO.File]::WriteAllLines($adapterEnvironment, $prePolicyProfile, [System.Text.Encoding]::UTF8)

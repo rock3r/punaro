@@ -257,6 +257,28 @@ function Invoke-Program([string]$Program, [string[]]$Arguments, [string]$Descrip
     return (($result.Output | ForEach-Object { [string]$_ }) -join "`n").Trim()
 }
 
+function Get-PunaroGroupAddresses($Parsed) {
+    if ($null -eq $Parsed) { return @() }
+    $entries = @()
+    $itemsProperty = $Parsed.PSObject.Properties['items']
+    if ($null -ne $itemsProperty) {
+        $entries = @($itemsProperty.Value)
+    } else {
+        # Windows PowerShell may unwrap a one-element top-level JSON array;
+        # @() preserves scalars while continuing to enumerate larger arrays.
+        $entries = @($Parsed)
+    }
+    $addresses = @()
+    foreach ($entry in $entries) {
+        if ($null -eq $entry) { continue }
+        $addressProperty = $entry.PSObject.Properties['address']
+        if ($null -ne $addressProperty -and $null -ne $addressProperty.Value) {
+            $addresses += [string]$addressProperty.Value
+        }
+    }
+    return $addresses
+}
+
 if ($env:OS -ne 'Windows_NT') { Stop-Install 'Windows client installation must run on Windows' }
 if ($MachineId -notmatch '^[A-Za-z0-9][A-Za-z0-9._-]*$') { Stop-Install 'machine ID must start with a letter or digit and contain only letters, digits, dot, underscore, or hyphen' }
 if ($AttachedGroup -notmatch '^group/[A-Za-z0-9._/-]+$') { Stop-Install 'attached group must be a group/ address' }
@@ -487,7 +509,7 @@ if (Test-Path -LiteralPath $configFile) {
 $groupCreate = Invoke-NativeProgramRaw -Program $mailbox -Arguments @('--state-dir', $MailboxStateDir, 'group', 'create', '--group', $AttachedGroup)
 if ($groupCreate.ExitCode -ne 0) {
     $groups = Invoke-Program -Program $mailbox -Arguments @('--state-dir', $MailboxStateDir, 'group', 'list', '--json') -Description 'attachment group lookup' | ConvertFrom-Json
-    $groupAddresses = @($groups | ForEach-Object { $_.address })
+    $groupAddresses = @(Get-PunaroGroupAddresses -Parsed $groups)
     if ($groupAddresses -notcontains $AttachedGroup) { Stop-Install 'could not create the local Punaro attachment group' }
 }
 
@@ -517,7 +539,9 @@ if ($Enable -or $adapterTaskWasRunning -or $hadRepeatTrigger) { $triggers += $re
 $principal = New-ScheduledTaskPrincipal -UserId $user -LogonType Interactive -RunLevel Limited
 $settings = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -Hidden -ExecutionTimeLimit ([TimeSpan]::Zero)
 $settings.RestartCount = 255
-$settings.RestartInterval = [TimeSpan]::FromMinutes(1)
+# The ScheduledTasks CIM property is an XML-duration string. Assigning a
+# TimeSpan produces 00:01:00, which Register-ScheduledTask rejects.
+$settings.RestartInterval = 'PT1M'
 Register-ScheduledTask -TaskName $adapterTaskName -Action $action -Trigger $triggers -Principal $principal -Settings $settings -Description 'Punaro local mailbox adapter' -Force | Out-Null
 if ($Enable -or $adapterTaskWasRunning) {
     Start-ScheduledTask -TaskName $adapterTaskName
