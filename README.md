@@ -8,10 +8,10 @@ operator.
 
 Punaro now also contains the first end-to-end MVP of **Canopi** (provisional
 name), its “what are my agents doing?” surface: normalized lifecycle events,
-multi-machine current state, an 800x480 monochrome renderer, a Claude Code
-adapter, simulator, and XIAO e-paper firmware path. Canopi is independently
-deployable and its event protocol does not depend on Punaro transport. See the
-[Canopi guide](docs/canopi.md).
+multi-machine current state, an 800x480 monochrome renderer, Claude Code,
+Codex/ChatGPT, Pi, and Grok Build adapters, a simulator, and XIAO e-paper
+firmware path. Canopi is independently deployable and its event protocol does
+not depend on Punaro transport. See the [Canopi guide](docs/canopi.md).
 
 ![Canopi MVP e-paper dashboard](artifacts/canopi-implementation.png)
 

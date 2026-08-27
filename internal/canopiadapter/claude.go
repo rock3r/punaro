@@ -103,11 +103,15 @@ func MapClaudeHook(raw []byte, config AdapterConfig, now time.Time) (protocol.Ev
 }
 
 func newClaudeEventID() (string, error) {
+	return newProviderEventID(protocol.SourceClaudeCode)
+}
+
+func newProviderEventID(source protocol.Source) (string, error) {
 	var random [32]byte
 	if _, err := rand.Read(random[:]); err != nil {
-		return "", fmt.Errorf("generate Claude event ID: %w", err)
+		return "", fmt.Errorf("generate %s event ID: %w", source, err)
 	}
-	return "claude_code:" + hex.EncodeToString(random[:]), nil
+	return string(source) + ":" + hex.EncodeToString(random[:]), nil
 }
 
 func truncateRunes(value string, maximum int) string {

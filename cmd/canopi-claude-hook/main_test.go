@@ -3,12 +3,16 @@ package main
 import (
 	"bytes"
 	"errors"
+	"image/png"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"testing"
 	"time"
 
 	"github.com/rock3r/punaro/canopi/protocol"
+	"github.com/rock3r/punaro/internal/canopi"
 	"github.com/rock3r/punaro/internal/canopiadapter"
 )
 
@@ -119,5 +123,62 @@ func TestHookUsesInvocationTimeBeforeInputProcessing(t *testing.T) {
 	}
 	if !event.ActivityAt.Equal(invokedAt.UTC()) || !event.EmittedAt.Equal(invokedAt.UTC()) {
 		t.Fatalf("event timestamps = %s/%s, want invocation time %s", event.ActivityAt, event.EmittedAt, invokedAt.UTC())
+	}
+}
+
+func TestClaudeHookDeliversToCollectorAndRendersDashboard(t *testing.T) {
+	store := canopi.NewStore(canopi.DefaultConfig())
+	handler, err := canopi.NewHandler(canopi.HandlerConfig{
+		Store:  store,
+		Token:  "test-token-123456",
+		Render: canopi.RenderConfig{Width: 800, Height: 480, Grid: canopi.GridConfig{Columns: 2, Rows: 6}, RelativeTimeBucket: time.Minute, Title: "CANOPI"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	collector := httptest.NewServer(handler)
+	t.Cleanup(collector.Close)
+	tokenPath := filepath.Join(t.TempDir(), "token")
+	if err := os.WriteFile(tokenPath, []byte("test-token-123456\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	environment := map[string]string{
+		"CANOPI_ENDPOINT":   collector.URL,
+		"CANOPI_TOKEN_FILE": tokenPath,
+		"CANOPI_MACHINE_ID": "studio-m2",
+		"CANOPI_SPOOL_DIR":  filepath.Join(t.TempDir(), "spool"),
+	}
+	if err := runPrepare(func(key string) string { return environment[key] }); err != nil {
+		t.Fatal(err)
+	}
+	raw := []byte(`{"session_id":"claude-session","cwd":"/src/punaro","hook_event_name":"PermissionRequest","tool_input":{"command":"private"}}`)
+	if err := runHookAt(bytes.NewReader(raw), func(key string) string { return environment[key] }, func() error { return nil }, time.Now()); err != nil {
+		t.Fatal(err)
+	}
+	if err := runDelivery(func(key string) string { return environment[key] }); err != nil {
+		t.Fatal(err)
+	}
+	if len(store.Snapshot(time.Now()).Agents) != 1 {
+		t.Fatalf("collector agents = %d, want 1", len(store.Snapshot(time.Now()).Agents))
+	}
+	request, err := http.NewRequestWithContext(t.Context(), http.MethodGet, collector.URL+"/v1/render/800x480.png", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	request.Header.Set("Authorization", "Bearer test-token-123456")
+	response, err := http.DefaultClient.Do(request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = response.Body.Close() }()
+	if response.StatusCode != http.StatusOK || response.Header.Get("Content-Type") != "image/png" {
+		t.Fatalf("render response = %d %q", response.StatusCode, response.Header.Get("Content-Type"))
+	}
+	config, err := png.DecodeConfig(response.Body)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if config.Width != 800 || config.Height != 480 {
+		t.Fatalf("render dimensions = %dx%d, want 800x480", config.Width, config.Height)
 	}
 }
