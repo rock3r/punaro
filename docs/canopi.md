@@ -250,6 +250,7 @@ that launches Claude Code:
 go build -trimpath -o /absolute/bin/canopi-claude-hook ./cmd/canopi-claude-hook
 export CANOPI_ENDPOINT=https://canopi.example.internal:8443
 export CANOPI_TOKEN_FILE=/absolute/private/canopi.token
+export CANOPI_TLS_CA_FILE=/absolute/private/collector-ca.pem
 export CANOPI_SPOOL_DIR=/absolute/private/canopi-claude-spool
 export CANOPI_MACHINE_ID=studio-m2
 export CANOPI_MACHINE_LABEL=studio-m2
@@ -257,6 +258,12 @@ export CANOPI_TASK_TITLE='Punaro / current task'
 export CANOPI_REPOSITORY='rock3r/punaro'
 /absolute/bin/canopi-claude-hook prepare
 ```
+
+`CANOPI_TLS_CA_FILE` is optional. Set it to an absolute PEM root bundle when
+the collector uses a private CA, including on macOS and Windows where a
+per-process bundle is more reliable than changing a system trust store. It
+adds that root without disabling hostname or certificate verification; it must
+contain a certificate, never a private key.
 
 Copy the `hooks` object from
 `canopi/providers/claude-code-hooks.example.json` into project-local
@@ -355,6 +362,7 @@ service that starts the coding agent:
 go build -trimpath -o /absolute/bin/canopi-provider-hook ./cmd/canopi-provider-hook
 export CANOPI_ENDPOINT=https://canopi.example.internal:8443
 export CANOPI_TOKEN_FILE=/absolute/private/canopi.token
+export CANOPI_TLS_CA_FILE=/absolute/private/collector-ca.pem
 export CANOPI_MACHINE_ID=studio-m2
 export CANOPI_MACHINE_LABEL=studio-m2
 export CANOPI_TASK_TITLE='Punaro / current task'
@@ -414,11 +422,22 @@ native extension lifecycle exposes `session_start`, `agent_start`,
 automatic retry, compaction, or queued continuation left. Copy
 `canopi/providers/pi/canopi.ts` to Pi's trusted global extension directory
 (`~/.pi/agent/extensions/canopi.ts`) or load that file explicitly with
-`pi --extension /absolute/path/to/canopi.ts`. Also set:
+`pi --extension /absolute/path/to/canopi.ts`. A global extension normally does
+not inherit an interactive shell profile, so it reads the non-secret Canopi
+configuration file at `~/.config/canopi/env` by default (or the absolute path
+in `CANOPI_CONFIG_FILE`). Use simple `KEY=value` lines, for example:
 
 ```sh
-export CANOPI_PROVIDER_HOOK=/absolute/bin/canopi-provider-hook
+CANOPI_ENDPOINT=https://canopi.example.internal:8443
+CANOPI_TOKEN_FILE=/absolute/private/canopi.token
+CANOPI_TLS_CA_FILE=/absolute/private/collector-ca.pem
+CANOPI_MACHINE_ID=studio-m2
+CANOPI_MACHINE_LABEL=studio-m2
+CANOPI_PROVIDER_HOOK=/absolute/bin/canopi-provider-hook
 ```
+
+The extension accepts only the documented `CANOPI_*` keys from that file;
+explicit environment values win and no shell expressions are evaluated.
 
 The extension sends only an already-normalized Pi event to
 `canopi-provider-hook pi emit` through a detached local child. Pi awaits

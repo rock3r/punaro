@@ -3,6 +3,9 @@
 // is the normalized lifecycle event below.
 import { randomUUID } from "node:crypto";
 import { spawn } from "node:child_process";
+import { readFileSync } from "node:fs";
+import { homedir } from "node:os";
+import { join } from "node:path";
 
 type CanopiState = "working" | "waiting_for_user" | "done";
 
@@ -21,7 +24,47 @@ type CanopiEvent = {
   metadata: { hook: string };
 };
 
+const configurationKeys = new Set([
+  "CANOPI_ENDPOINT",
+  "CANOPI_TOKEN_FILE",
+  "CANOPI_MACHINE_ID",
+  "CANOPI_MACHINE_LABEL",
+  "CANOPI_TASK_TITLE",
+  "CANOPI_REPOSITORY",
+  "CANOPI_SPOOL_DIR",
+  "CANOPI_PROVIDER_HOOK",
+  "CANOPI_TLS_CA_FILE",
+]);
+let configurationLoaded = false;
+
+// A global Pi extension does not inherit a shell profile. Read only the small,
+// non-secret adapter configuration file that the operator installed locally.
+// Existing explicit environment values always win, and this deliberately does
+// not interpret shell substitutions, commands, or arbitrary variables.
+function loadConfiguration(): void {
+  if (configurationLoaded) return;
+  configurationLoaded = true;
+  const path = process.env.CANOPI_CONFIG_FILE || join(process.env.HOME || homedir(), ".config", "canopi", "env");
+  try {
+    for (const line of readFileSync(path, "utf8").split(/\r?\n/)) {
+      const match = line.match(/^\s*(CANOPI_[A-Z_]+)=(.*)$/);
+      if (!match || !configurationKeys.has(match[1]) || process.env[match[1]]) continue;
+      let value = match[2].trim();
+      if (
+        value.length >= 2 &&
+        ((value.startsWith("'") && value.endsWith("'")) || (value.startsWith('"') && value.endsWith('"')))
+      ) {
+        value = value.slice(1, -1);
+      }
+      if (value) process.env[match[1]] = value;
+    }
+  } catch {
+    // Canopi is optional; an unreadable local configuration must not affect Pi.
+  }
+}
+
 function configured(): boolean {
+  loadConfiguration();
   return Boolean(
     process.env.CANOPI_ENDPOINT &&
       process.env.CANOPI_TOKEN_FILE &&

@@ -257,16 +257,28 @@ func TestPiExtensionEmitsSessionStartToCollector(t *testing.T) {
 	if err := os.WriteFile(tokenPath, []byte("test-token-123456\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	environment := append(os.Environ(),
+	spoolPath := filepath.Join(t.TempDir(), "spool")
+	runnerEnvironment := append(os.Environ(),
 		"CANOPI_ENDPOINT="+collector.URL,
 		"CANOPI_TOKEN_FILE="+tokenPath,
 		"CANOPI_MACHINE_ID=pi-contract-test",
-		"CANOPI_SPOOL_DIR="+filepath.Join(t.TempDir(), "spool"),
+		"CANOPI_SPOOL_DIR="+spoolPath,
 		"CANOPI_PROVIDER_HOOK="+outputPath,
 		"PI_CODING_AGENT_DIR="+t.TempDir(),
 	)
+	configPath := filepath.Join(t.TempDir(), "canopi.env")
+	config := strings.Join([]string{
+		"CANOPI_ENDPOINT=" + collector.URL,
+		"CANOPI_TOKEN_FILE=" + tokenPath,
+		"CANOPI_MACHINE_ID=pi-contract-test",
+		"CANOPI_SPOOL_DIR=" + spoolPath,
+		"CANOPI_PROVIDER_HOOK=" + outputPath,
+	}, "\n") + "\n"
+	if err := os.WriteFile(configPath, []byte(config), 0o600); err != nil {
+		t.Fatal(err)
+	}
 	prepare := exec.CommandContext(t.Context(), outputPath, "pi", "prepare") // #nosec G204 -- fixed provider runner built above.
-	prepare.Env = environment
+	prepare.Env = runnerEnvironment
 	if output, err := prepare.CombinedOutput(); err != nil {
 		t.Fatalf("prepare Pi spool: %v: %s", err, output)
 	}
@@ -275,7 +287,7 @@ func TestPiExtensionEmitsSessionStartToCollector(t *testing.T) {
 	defer cancelPi()
 	pi := exec.CommandContext(piContext, piPath, "--offline", "--no-session", "--mode", "rpc", "--extension", extensionPath) // #nosec G204 -- fixed installed Pi path and repository extension path in a host contract test.
 	pi.Dir = root
-	pi.Env = environment
+	pi.Env = append(os.Environ(), "CANOPI_CONFIG_FILE="+configPath, "PI_CODING_AGENT_DIR="+t.TempDir())
 	var stdout, stderr bytes.Buffer
 	pi.Stdout = &stdout
 	pi.Stderr = &stderr

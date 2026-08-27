@@ -7,7 +7,6 @@ import (
 	"context"
 	"errors"
 	"io"
-	"net/http"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -207,7 +206,10 @@ func runDelivery(selected provider, getenv func(string) string) error {
 	if err != nil {
 		return err
 	}
-	client := &http.Client{Timeout: 750 * time.Millisecond}
+	client, err := canopiadapter.NewDeliveryClient(getenv("CANOPI_TLS_CA_FILE"))
+	if err != nil {
+		return err
+	}
 	return spool.Drain(context.Background(), func(ctx context.Context, event protocol.Event) error {
 		return canopiadapter.Deliver(ctx, client, getenv("CANOPI_ENDPOINT"), token, event)
 	})
@@ -222,7 +224,10 @@ func runSupervisor(selected provider, getenv func(string) string) error {
 	if err != nil {
 		return err
 	}
-	client := &http.Client{Timeout: 750 * time.Millisecond}
+	client, err := canopiadapter.NewDeliveryClient(getenv("CANOPI_TLS_CA_FILE"))
+	if err != nil {
+		return err
+	}
 	return spool.Serve(context.Background(), func(ctx context.Context, event protocol.Event) error {
 		return canopiadapter.Deliver(ctx, client, getenv("CANOPI_ENDPOINT"), token, event)
 	})
