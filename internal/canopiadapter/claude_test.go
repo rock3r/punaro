@@ -199,3 +199,45 @@ func TestMapClaudeSubagentIncludesPrivacySafeAgentType(t *testing.T) {
 		t.Fatalf("subagent metadata/parent = %#v/%q", event.Metadata, event.ParentAgentInstanceID)
 	}
 }
+
+func TestMapCodexHookUsesItsCurrentClaudeCompatibleHookEnvelope(t *testing.T) {
+	raw := []byte(`{"session_id":"thread-1","cwd":"/src/punaro","hook_event_name":"PermissionRequest","tool_input":{"command":"private command"},"transcript_path":"/private/thread.jsonl"}`)
+	event, emit, err := MapCodexHook(raw, AdapterConfig{MachineID: "studio-m2", TaskTitle: "Punaro / tests"}, time.Now())
+	if err != nil || !emit {
+		t.Fatalf("MapCodexHook() = %+v, %t, %v", event, emit, err)
+	}
+	if event.Source != protocol.SourceCodex || event.State != protocol.StateWaitingForUser || event.WaitingReason != protocol.WaitingReasonPermission {
+		t.Fatalf("event = %+v", event)
+	}
+	encoded, _ := json.Marshal(event)
+	for _, private := range []string{"private command", "thread.jsonl", "tool_input"} {
+		if strings.Contains(string(encoded), private) {
+			t.Fatalf("normalized Codex event leaked %q: %s", private, encoded)
+		}
+	}
+}
+
+func TestMapGrokHookUsesCamelCaseEnvelopeWithoutPrivateContent(t *testing.T) {
+	raw := []byte(`{"sessionId":"session-1","cwd":"/src/punaro","hookEventName":"Notification","notificationType":"idle_prompt","lastAssistantMessage":"private answer"}`)
+	event, emit, err := MapGrokHook(raw, AdapterConfig{MachineID: "studio-m2", TaskTitle: "Punaro / tests"}, time.Now())
+	if err != nil || !emit {
+		t.Fatalf("MapGrokHook() = %+v, %t, %v", event, emit, err)
+	}
+	if event.Source != protocol.SourceGrokBuild || event.State != protocol.StateWaitingForUser || event.WaitingReason != protocol.WaitingReasonOther {
+		t.Fatalf("event = %+v", event)
+	}
+	encoded, _ := json.Marshal(event)
+	if strings.Contains(string(encoded), "private answer") {
+		t.Fatalf("normalized Grok event leaked provider text: %s", encoded)
+	}
+}
+
+func TestMapPiLifecycleUsesOnlyExtensionSuppliedIdentity(t *testing.T) {
+	event, err := MapPiLifecycle("pi-session-1", "agent_settled", protocol.StateWaitingForUser, protocol.WaitingReasonOther, AdapterConfig{MachineID: "studio-m2", TaskTitle: "Punaro / tests"}, time.Now())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if event.Source != protocol.SourcePi || event.SessionID != "pi-session-1" || event.AgentInstanceID != "pi-session-1" || event.State != protocol.StateWaitingForUser || event.Metadata["hook"] != "agent_settled" {
+		t.Fatalf("event = %+v", event)
+	}
+}

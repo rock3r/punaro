@@ -5,6 +5,7 @@ PUNARO_TRUSTED_ATTACHMENT_OUTPUT ?= ./bin/punaro-trusted-attachment
 PUNARO_MEMORY_OUTPUT ?= ./bin/punaro-memory
 CANOPI_OUTPUT ?= ./bin/canopi
 CANOPI_CLAUDE_HOOK_OUTPUT ?= ./bin/canopi-claude-hook
+CANOPI_PROVIDER_HOOK_OUTPUT ?= ./bin/canopi-provider-hook
 CANOPI_SIM_OUTPUT ?= ./bin/canopi-sim
 
 operator-binary:
@@ -22,9 +23,11 @@ memory-client:
 canopi-binaries:
 	mkdir -p "$$(dirname "$(CANOPI_OUTPUT)")"
 	mkdir -p "$$(dirname "$(CANOPI_CLAUDE_HOOK_OUTPUT)")"
+	mkdir -p "$$(dirname "$(CANOPI_PROVIDER_HOOK_OUTPUT)")"
 	mkdir -p "$$(dirname "$(CANOPI_SIM_OUTPUT)")"
 	go build -trimpath -o "$(CANOPI_OUTPUT)" ./cmd/canopi
 	go build -trimpath -o "$(CANOPI_CLAUDE_HOOK_OUTPUT)" ./cmd/canopi-claude-hook
+	go build -trimpath -o "$(CANOPI_PROVIDER_HOOK_OUTPUT)" ./cmd/canopi-provider-hook
 	go build -trimpath -o "$(CANOPI_SIM_OUTPUT)" ./cmd/canopi-sim
 
 release-artifacts:

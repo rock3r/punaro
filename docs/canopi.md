@@ -35,7 +35,8 @@ provider command hook -> bounded recoverable local spool -> detached retry worke
 
 - `canopi/protocol` is the versioned transport-neutral contract.
 - `cmd/canopi` is the collector, durable current-state store and renderer host.
-- `cmd/canopi-claude-hook` is the first real provider adapter.
+- `cmd/canopi-claude-hook` and `cmd/canopi-provider-hook` are durable local
+  provider adapters. The latter supports Codex, Grok Build, and Pi.
 - `cmd/canopi-sim` emits 19 realistic agents across three machines and moves
   one agent between working and permission-waiting with current activity times
   on successive ticks. Each process run scopes its event IDs independently.
@@ -73,8 +74,8 @@ optional repository, stable IDs, state, timestamps, and primitive allowlisted
 metadata leave the machine. Metadata may be omitted, while explicit JSON `null`
 is rejected to match the schema's object contract.
 
-The hook-facing Claude process performs no network I/O. It normalizes raw input
-only in memory and writes only the privacy-safe event to the local spool. The
+Provider-facing processes perform no network I/O. They normalize raw input only
+in memory and write only the privacy-safe event to the local spool. The
 complete event inode is hard-linked into its final queue name before any
 uncancellable file or directory sync begins. If Claude terminates a hook while
 sync is stalled, or the detached supervisor cannot be launched, that published
@@ -339,25 +340,99 @@ supervisor is the durable wake path: it keeps polling an empty spool, retries
 collector outages, and is restarted by the service manager if the worker
 crashes, so the final event of a quiet session does not depend on a later hook.
 
-## Pi evaluation
+## Codex, Grok Build, and Pi adapters
 
-Pi 0.84.2 type definitions were inspected directly rather than copied from the
-handoff. They expose `session_shutdown`, `agent_start`,
-`agent_end`, `agent_settled`, `turn_start`, `turn_end`, `tool_call`,
-`tool_result`, and tool-execution events.
+All four provider adapters use the same transport-neutral normalized event and
+the same owner-only local spool. They never pass prompts, transcripts, tool
+arguments, tool results, or assistant text to the collector. The provider
+process returns before any network delivery; the continuously supervised worker
+handles retries independently.
 
-`hsingjui/pi-hooks` was reviewed at commit
-`8250a856d4f892f0a8a640ac2f1241d1a000701b` (package version 0.0.1). It is a
-good reuse path for this MVP's `SessionStart`, `UserPromptSubmit`, tool, `Stop`,
-and `SessionEnd` command hooks, and its `Stop` payload includes
-`last_assistant_message`. It does not map Pi permission UI or notification
-events, supports command hooks only, and implements stop control best-effort.
-Therefore the next Pi slice should pin that reviewed commit for working/done
-reuse, then add a very small native Pi extension only if accurate
-waiting-for-user signals are required. Do not fork a full bespoke hook bridge.
+Build the shared runner and set the same non-secret environment in the shell or
+service that starts the coding agent:
 
-The protocol already reserves `pi`, `codex`, and `grok_build` sources, so those
-adapters need no collector changes.
+```sh
+go build -trimpath -o /absolute/bin/canopi-provider-hook ./cmd/canopi-provider-hook
+export CANOPI_ENDPOINT=https://canopi.example.internal:8443
+export CANOPI_TOKEN_FILE=/absolute/private/canopi.token
+export CANOPI_MACHINE_ID=studio-m2
+export CANOPI_MACHINE_LABEL=studio-m2
+export CANOPI_TASK_TITLE='Punaro / current task'
+export CANOPI_REPOSITORY='rock3r/punaro'
+```
+
+`CANOPI_SPOOL_DIR` is optional; if absent, each provider receives a distinct
+spool beside the token file. Run `prepare` once and keep the matching
+`supervise` command under the host service manager before enabling hooks:
+
+```sh
+/absolute/bin/canopi-provider-hook codex prepare
+/absolute/bin/canopi-provider-hook codex supervise
+```
+
+Use `grok` or `pi` in place of `codex` for their independent spool workers.
+The examples contain no secrets and use placeholder binary paths.
+
+### Codex / ChatGPT
+
+The Codex mapping was exercised against the installed Codex CLI 0.142.4 and
+its generated app-server schema. Copy
+`canopi/providers/codex-hooks.example.json` to
+`<repo>/.codex/hooks.json`, replace the absolute runner path, and inspect/trust
+the new hook definitions using Codex's `/hooks` UI before they run. This keeps
+the integration local to a repository rather than turning it on for every
+Codex project.
+
+That installed version parses `async` but explicitly skips async command hooks
+as unsupported. The committed example therefore uses a one-second synchronous
+relay command. It does only `fork/exec` and hands stdin to a detached child;
+the child performs parsing and queueing. Consequently unsupported `async`
+cannot silently disable reporting, and collector outages never hold up Codex.
+The current schema supports the eight configured events: session and prompt
+start, pre/post tool use, permission requests, subagent start/stop, and stop.
+
+### Grok Build
+
+The Grok Build adapter was exercised against the installed 1.0.5 inspector.
+Put `canopi/providers/grok-build-hooks.example.json` in an always-trusted
+global location such as `~/.grok/hooks/canopi.json`, replace the runner path,
+then confirm `grok inspect --json` reports eight hooks. A project-local
+`.grok/hooks/` copy also works only after explicitly trusting that project.
+
+Grok Build 1.0.5 currently loads the example's session, prompt, tool,
+notification, subagent, and stop events; it does not load a `PermissionRequest`
+entry. `Notification` with its supported `idle_prompt` / permission
+notification types supplies the waiting state. The mapper reads only its
+camel-case lifecycle identity fields (`sessionId`, `cwd`, event and optional
+agent type), never message content.
+
+### Pi
+
+Pi 0.84.3's installed TypeScript definitions were inspected directly. Its
+native extension lifecycle exposes `session_start`, `agent_start`,
+`agent_settled`, and `session_shutdown`; `agent_settled` means Pi has no
+automatic retry, compaction, or queued continuation left. Copy
+`canopi/providers/pi/canopi.ts` to Pi's trusted global extension directory
+(`~/.pi/agent/extensions/canopi.ts`) or load that file explicitly with
+`pi --extension /absolute/path/to/canopi.ts`. Also set:
+
+```sh
+export CANOPI_PROVIDER_HOOK=/absolute/bin/canopi-provider-hook
+```
+
+The extension sends only an already-normalized Pi event to
+`canopi-provider-hook pi emit` through a detached local child. Pi awaits
+extension callbacks, so child errors are consumed and monitoring cannot block
+or slow the agent. The end-to-end test starts the installed Pi offline with
+this extension and verifies its `session_start` event reaches the collector and
+renders at 800x480 without making a model call.
+
+`hsingjui/pi-hooks` was evaluated at commit
+`8250a856d4f892f0a8a640ac2f1241d1a000701b` (version 0.0.1). It is useful for
+general command hooks, but its working/done focus and `Stop` payload include
+`last_assistant_message`; it does not provide Pi's current settled lifecycle
+as a privacy-minimal normalized event. Canopi therefore uses the much smaller
+native extension above rather than forking that package.
 
 ## Panel firmware and exact hardware verification
 
