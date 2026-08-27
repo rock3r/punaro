@@ -48,10 +48,34 @@ SHARED_METADATA = {
 }
 PUNARO_ICON = "./assets/punaro.png"
 PUNARO_ICON_SHA256 = "5cf8313cbe88e41887db89b0ecd7a668c622416ea83369fc0ec7da4f72b5a353"
+PLUGIN_LF_ATTRIBUTES = {
+    "/plugin.json text eol=lf",
+    "/mcp.json text eol=lf",
+    "/.mcp.json text eol=lf",
+    "/.codex-plugin/*.json text eol=lf",
+    "/.claude-plugin/*.json text eol=lf",
+    "/scripts/punaro-plugin-mcp text eol=lf",
+    "/scripts/punaro-plugin-mcp.cmd text eol=lf",
+    "/skills/** text eol=lf",
+}
 
 
 class ValidationError(RuntimeError):
     pass
+
+
+def validate_git_eol_contract() -> None:
+    attributes_path = ROOT / ".gitattributes"
+    if not attributes_path.is_file() or attributes_path.is_symlink():
+        raise ValidationError("missing regular .gitattributes")
+    lines = {
+        line.strip()
+        for line in attributes_path.read_text(encoding="utf-8").splitlines()
+        if line.strip() and not line.lstrip().startswith("#")
+    }
+    missing = PLUGIN_LF_ATTRIBUTES - lines
+    if missing:
+        raise ValidationError(f"plugin LF attributes are incomplete: {sorted(missing)}")
 
 
 def reject_duplicate_keys(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
@@ -253,6 +277,7 @@ def validate_codex_adapter(portable: dict[str, Any]) -> None:
 
 
 def main() -> None:
+    validate_git_eol_contract()
     portable = validate_portable_manifest()
     validate_skills()
     portable_mcp = validate_mcp()
