@@ -282,6 +282,24 @@ func TestPreparePersistsExplicitTrustedLANPolicy(t *testing.T) {
 	}
 }
 
+func TestPreparePersistsLoopbackHTTPWithoutTrustedLANPolicy(t *testing.T) {
+	stateDir := filepath.Join(t.TempDir(), "state")
+	args := []string{"prepare", "--origin", "http://127.0.0.1:18080/", "--state-dir", stateDir}
+	for attempt := 1; attempt <= 2; attempt++ {
+		var stdout, stderr bytes.Buffer
+		if code := run(args, &stdout, &stderr); code != 0 || stderr.Len() != 0 {
+			t.Fatalf("attempt=%d code=%d stdout=%q stderr=%q", attempt, code, stdout.String(), stderr.String())
+		}
+	}
+	state, err := loadIdentity(filepath.Join(stateDir, identityFileName))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if state.Version != clientidentity.Version || state.Origin != "http://127.0.0.1:18080" || state.AllowLANHTTP || state.TrustedLANCIDR != "" {
+		t.Fatalf("identity=%#v", state)
+	}
+}
+
 func TestUnverifiedBadRequestRetainsRecoveryJournal(t *testing.T) {
 	server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.WriteHeader(http.StatusBadRequest)

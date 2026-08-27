@@ -3,6 +3,8 @@ package clientidentity
 import (
 	"strings"
 	"testing"
+
+	"github.com/rock3r/punaro/internal/clienttransport"
 )
 
 func TestParseAcceptsVersionOneFreshAndMigratingStates(t *testing.T) {
@@ -23,6 +25,22 @@ func TestParseAcceptsVersionOneFreshAndMigratingStates(t *testing.T) {
 	legacyRelayID, err := Parse([]byte(`{"version":1,"origin":"https://punaro.example","client_binding":"11111111-1111-4111-8111-111111111111","legacy_machine_id":"machine:west"}`))
 	if err != nil || legacyRelayID.LegacyMachineID != "machine:west" {
 		t.Fatalf("relay-compatible legacy state=%+v err=%v", legacyRelayID, err)
+	}
+}
+
+func TestParseAcceptsVersionOneLoopbackHTTPWithoutLANPolicy(t *testing.T) {
+	state, err := Parse([]byte(`{"version":1,"origin":"http://127.0.0.1:18080","client_binding":"11111111-1111-4111-8111-111111111111"}`))
+	if err != nil {
+		t.Fatalf("parse loopback state: %v", err)
+	}
+	if state.Origin != "http://127.0.0.1:18080" || state.TransportPolicy() != (clienttransport.Policy{}) {
+		t.Fatalf("state=%#v policy=%#v", state, state.TransportPolicy())
+	}
+	if canonical, ok := CanonicalOriginWithPolicy("http://127.0.0.1:18080/", clienttransport.Policy{}); !ok || canonical != state.Origin {
+		t.Fatalf("canonical loopback origin=%q ok=%t", canonical, ok)
+	}
+	if _, ok := CanonicalOriginWithPolicy("http://192.168.1.4:18080", clienttransport.Policy{}); ok {
+		t.Fatal("private LAN HTTP was accepted without explicit policy")
 	}
 }
 

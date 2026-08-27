@@ -148,7 +148,7 @@ func runProtectMaterial(args []string, stdout, stderr io.Writer) int {
 func runPrepare(args []string, stdout, stderr io.Writer) int {
 	flags := flag.NewFlagSet("prepare", flag.ContinueOnError)
 	flags.SetOutput(io.Discard)
-	origin := flags.String("origin", "", "fixed Punaro HTTPS origin")
+	origin := flags.String("origin", "", "fixed Punaro origin")
 	stateDir := flags.String("state-dir", "", "absolute private enrollment state directory")
 	allowLANHTTP := flags.Bool("allow-lan-http", false, "explicitly allow plaintext credentials on the pinned trusted LAN")
 	trustedLANCIDR := flags.String("trusted-lan-cidr", "", "private or link-local CIDR containing the literal HTTP origin")

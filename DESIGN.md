@@ -1589,6 +1589,9 @@ The supported onboarding client is `punaro-enroll`. `prepare` creates a
 private current-user state directory and records only the canonical origin,
 an explicit containing CIDR for trusted-LAN plaintext when selected, and a
 fresh opaque binding in the versioned non-secret sidecar. It
+accepts literal loopback HTTP under the same zero-policy version-one identity
+shape as HTTPS; non-loopback HTTP still requires the version-two explicit LAN
+acknowledgement and containing CIDR. It
 prints that public binding for the server owner to use in the exact
 least-privilege `trusted-agent` grant preview. `redeem` reads the server's
 short-lived enrollment JSON only from a protected local file, requires its

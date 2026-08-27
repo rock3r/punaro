@@ -485,10 +485,12 @@ PUNARO_CLIENT_IDENTITY_FILE=/absolute/private/client-identity.json
 PUNARO_CLIENT_BINDING=the-enrollment-client-binding
 ```
 
-The sidecar contains only version `1`, the fixed canonical HTTPS origin, the
-opaque client binding, and (during a legacy transition) the exact legacy
-machine ID. It never contains an enrollment code, bearer credential, private
-key, Access token, project grant, or mailbox address. The adapter refuses a
+The sidecar contains only version `1`, the fixed canonical HTTPS or literal
+loopback HTTP origin, the opaque client binding, and (during a legacy
+transition) the exact legacy machine ID. Non-loopback trusted-LAN HTTP uses
+version `2` with its explicit acknowledgement and containing CIDR. It never
+contains an enrollment code, bearer credential, private key, Access token,
+project grant, or mailbox address. The adapter refuses a
 missing pair, unsafe sidecar, unknown version, or origin/binding/machine
 mismatch before it opens a transport client. Existing legacy profiles without
 both entries continue their existing path; adding the sidecar alone neither
@@ -518,6 +520,19 @@ punaro-enroll prepare \
   --origin https://punaro.example \
   --state-dir "$HOME/.config/punaro/device-enrollment"
 ```
+
+For a same-host listener, literal loopback HTTP uses the same zero-policy
+version-one state and needs no trusted-LAN flags:
+
+```sh
+punaro-enroll prepare \
+  --origin http://127.0.0.1:8080 \
+  --state-dir "$HOME/.config/punaro/device-enrollment"
+```
+
+This exception is limited to literal loopback addresses. DNS names and private
+or link-local addresses still fail unless they use HTTPS or the explicit
+trusted-LAN policy described below.
 
 For a registered legacy adapter or gateway, bind preparation to its exact
 existing machine ID:
@@ -620,9 +635,9 @@ or diagnostics. Continue to keep the token in the owner-only adapter profile
 for the installed relay adapter; do not reuse it on another device.
 
 `punaro-enroll` checks the exact binding before any network request, contacts
-only the canonical HTTPS origin selected during `prepare`, and writes a private
-recovery journal before redemption. If a network interruption occurs, rerun
-the same `redeem` command; if the transfer file is gone, use `punaro-enroll
+only the canonical validated origin selected during `prepare`, and writes a
+private recovery journal before redemption. If a network interruption occurs,
+rerun the same `redeem` command; if the transfer file is gone, use `punaro-enroll
 recover` with the state and credential paths, and include the same
 `--access-file` when the origin is Access-protected. The retry has the same
 idempotency key, so it cannot mint a second device credential. A legacy journal
