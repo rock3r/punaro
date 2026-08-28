@@ -3,6 +3,8 @@ package clientidentity
 import (
 	"strings"
 	"testing"
+
+	"github.com/rock3r/punaro/internal/clienttransport"
 )
 
 func TestParseAcceptsVersionOneFreshAndMigratingStates(t *testing.T) {
@@ -26,6 +28,58 @@ func TestParseAcceptsVersionOneFreshAndMigratingStates(t *testing.T) {
 	}
 }
 
+func TestParseAcceptsVersionOneLoopbackHTTPWithoutLANPolicy(t *testing.T) {
+	state, err := Parse([]byte(`{"version":1,"origin":"http://127.0.0.1:18080","client_binding":"11111111-1111-4111-8111-111111111111"}`))
+	if err != nil {
+		t.Fatalf("parse loopback state: %v", err)
+	}
+	if state.Origin != "http://127.0.0.1:18080" || state.TransportPolicy() != (clienttransport.Policy{}) {
+		t.Fatalf("state=%#v policy=%#v", state, state.TransportPolicy())
+	}
+	if canonical, ok := CanonicalOriginWithPolicy("http://127.0.0.1:18080/", clienttransport.Policy{}); !ok || canonical != state.Origin {
+		t.Fatalf("canonical loopback origin=%q ok=%t", canonical, ok)
+	}
+	if _, ok := CanonicalOriginWithPolicy("http://192.168.1.4:18080", clienttransport.Policy{}); ok {
+		t.Fatal("private LAN HTTP was accepted without explicit policy")
+	}
+	if err := state.Match("http://127.0.0.1:18080/", state.ClientBinding, ""); err != nil {
+		t.Fatalf("match canonical loopback origin: %v", err)
+	}
+}
+
+func TestParsePreservesExplicitLoopbackHTTPDefaultPort(t *testing.T) {
+	state, err := Parse([]byte(`{"version":1,"origin":"http://127.0.0.1:80","client_binding":"11111111-1111-4111-8111-111111111111"}`))
+	if err != nil {
+		t.Fatalf("parse loopback default-port state: %v", err)
+	}
+	if state.Origin != "http://127.0.0.1:80" {
+		t.Fatalf("origin=%q, want explicit default port", state.Origin)
+	}
+}
+
+func TestCanonicalLoopbackOriginEdges(t *testing.T) {
+	for name, test := range map[string]struct {
+		raw  string
+		want string
+		ok   bool
+	}{
+		"default port":        {raw: "http://127.0.0.1:80", want: "http://127.0.0.1:80", ok: true},
+		"canonical IPv6":      {raw: "http://[0:0:0:0:0:0:0:1]:18080/", want: "http://[::1]:18080", ok: true},
+		"IPv6 default port":   {raw: "http://[0:0:0:0:0:0:0:1]:80", want: "http://[::1]:80", ok: true},
+		"zoned IPv6":          {raw: "http://[::1%25lo0]:18080", want: "http://[::1%25lo0]:18080", ok: true},
+		"trailing colon":      {raw: "http://127.0.0.1:", ok: false},
+		"IPv6 trailing colon": {raw: "http://[::1]:", ok: false},
+		"leading-zero port":   {raw: "http://127.0.0.1:018080", ok: false},
+	} {
+		t.Run(name, func(t *testing.T) {
+			got, ok := CanonicalOriginWithPolicy(test.raw, clienttransport.Policy{})
+			if ok != test.ok || got != test.want {
+				t.Fatalf("canonical=%q ok=%t, want=%q ok=%t", got, ok, test.want, test.ok)
+			}
+		})
+	}
+}
+
 func TestParseAcceptsOnlyExplicitVersionTwoLANState(t *testing.T) {
 	state, err := Parse([]byte(`{"version":2,"origin":"http://192.168.1.4:8080","client_binding":"11111111-1111-4111-8111-111111111111","allow_lan_http":true,"trusted_lan_cidr":"192.168.1.0/24"}`))
 	if err != nil {
@@ -42,6 +96,7 @@ func TestParseAcceptsOnlyExplicitVersionTwoLANState(t *testing.T) {
 		"missing cidr":           `{"version":2,"origin":"http://192.168.1.4:8080","client_binding":"11111111-1111-4111-8111-111111111111","allow_lan_http":true}`,
 		"dns plaintext":          `{"version":2,"origin":"http://punaro.lan:8080","client_binding":"11111111-1111-4111-8111-111111111111","allow_lan_http":true,"trusted_lan_cidr":"192.168.1.0/24"}`,
 		"https downgrade fields": `{"version":2,"origin":"https://punaro.example","client_binding":"11111111-1111-4111-8111-111111111111","allow_lan_http":true,"trusted_lan_cidr":"192.168.1.0/24"}`,
+		"loopback LAN policy":    `{"version":2,"origin":"http://127.0.0.1:8080","client_binding":"11111111-1111-4111-8111-111111111111","allow_lan_http":true,"trusted_lan_cidr":"127.0.0.0/8"}`,
 	} {
 		t.Run(name, func(t *testing.T) {
 			if _, err := Parse([]byte(raw)); err == nil {

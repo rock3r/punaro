@@ -14,6 +14,7 @@ func TestPolicyValidatesExplicitTrustedLANHTTP(t *testing.T) {
 	}{
 		{name: "https", origin: "https://punaro.example", ok: true},
 		{name: "loopback development", origin: "http://127.0.0.1:8080", ok: true},
+		{name: "loopback rejects LAN policy", origin: "http://127.0.0.1:8080", policy: Policy{AllowLANHTTP: true, TrustedLANCIDR: "127.0.0.0/8"}, ok: false},
 		{name: "explicit private ipv4", origin: "http://192.168.1.4:8080", policy: Policy{AllowLANHTTP: true, TrustedLANCIDR: "192.168.1.0/24"}, ok: true},
 		{name: "explicit private ipv6", origin: "http://[fd12:3456::4]:8080", policy: Policy{AllowLANHTTP: true, TrustedLANCIDR: "fd12:3456::/64"}, ok: true},
 		{name: "explicit zoned link-local ipv6", origin: "http://[fe80::4%25en0]:8080", policy: Policy{AllowLANHTTP: true, TrustedLANCIDR: "fe80::/64"}, ok: true},
@@ -25,6 +26,9 @@ func TestPolicyValidatesExplicitTrustedLANHTTP(t *testing.T) {
 		{name: "public cidr", origin: "http://203.0.113.4:8080", policy: Policy{AllowLANHTTP: true, TrustedLANCIDR: "203.0.113.0/24"}, ok: false},
 		{name: "credentials", origin: "http://user@192.168.1.4:8080", policy: Policy{AllowLANHTTP: true, TrustedLANCIDR: "192.168.1.0/24"}, ok: false},
 		{name: "path", origin: "http://192.168.1.4:8080/v1", policy: Policy{AllowLANHTTP: true, TrustedLANCIDR: "192.168.1.0/24"}, ok: false},
+		{name: "HTTPS trailing colon", origin: "https://punaro.example:", ok: false},
+		{name: "loopback trailing colon", origin: "http://127.0.0.1:", ok: false},
+		{name: "LAN trailing colon", origin: "http://192.168.1.4:", policy: Policy{AllowLANHTTP: true, TrustedLANCIDR: "192.168.1.0/24"}, ok: false},
 		{name: "stale lan policy on https", origin: "https://punaro.example", policy: Policy{AllowLANHTTP: true, TrustedLANCIDR: "192.168.1.0/24"}, ok: false},
 	}
 	for _, test := range tests {
