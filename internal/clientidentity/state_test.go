@@ -47,18 +47,29 @@ func TestParseAcceptsVersionOneLoopbackHTTPWithoutLANPolicy(t *testing.T) {
 	}
 }
 
+func TestParsePreservesExplicitLoopbackHTTPDefaultPort(t *testing.T) {
+	state, err := Parse([]byte(`{"version":1,"origin":"http://127.0.0.1:80","client_binding":"11111111-1111-4111-8111-111111111111"}`))
+	if err != nil {
+		t.Fatalf("parse loopback default-port state: %v", err)
+	}
+	if state.Origin != "http://127.0.0.1:80" {
+		t.Fatalf("origin=%q, want explicit default port", state.Origin)
+	}
+}
+
 func TestCanonicalLoopbackOriginEdges(t *testing.T) {
 	for name, test := range map[string]struct {
 		raw  string
 		want string
 		ok   bool
 	}{
-		"default port":      {raw: "http://127.0.0.1:80", want: "http://127.0.0.1:80", ok: true},
-		"canonical IPv6":    {raw: "http://[0:0:0:0:0:0:0:1]:18080/", want: "http://[::1]:18080", ok: true},
-		"IPv6 default port": {raw: "http://[0:0:0:0:0:0:0:1]:80", want: "http://[::1]:80", ok: true},
-		"zoned IPv6":        {raw: "http://[::1%25lo0]:18080", want: "http://[::1%25lo0]:18080", ok: true},
-		"trailing colon":    {raw: "http://127.0.0.1:", ok: false},
-		"leading-zero port": {raw: "http://127.0.0.1:018080", ok: false},
+		"default port":        {raw: "http://127.0.0.1:80", want: "http://127.0.0.1:80", ok: true},
+		"canonical IPv6":      {raw: "http://[0:0:0:0:0:0:0:1]:18080/", want: "http://[::1]:18080", ok: true},
+		"IPv6 default port":   {raw: "http://[0:0:0:0:0:0:0:1]:80", want: "http://[::1]:80", ok: true},
+		"zoned IPv6":          {raw: "http://[::1%25lo0]:18080", want: "http://[::1%25lo0]:18080", ok: true},
+		"trailing colon":      {raw: "http://127.0.0.1:", ok: false},
+		"IPv6 trailing colon": {raw: "http://[::1]:", ok: false},
+		"leading-zero port":   {raw: "http://127.0.0.1:018080", ok: false},
 	} {
 		t.Run(name, func(t *testing.T) {
 			got, ok := CanonicalOriginWithPolicy(test.raw, clienttransport.Policy{})

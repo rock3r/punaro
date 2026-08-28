@@ -533,7 +533,8 @@ punaro-enroll prepare \
 This exception is limited to literal loopback addresses. DNS names and private
 or link-local addresses still fail unless they use HTTPS or the explicit
 trusted-LAN policy described below. An explicit port is part of the stored
-identity, including `:80`, so use the same port spelling in the adapter profile.
+identity for loopback HTTP, including `:80`, so use the same port spelling in
+the adapter profile. HTTPS remains canonicalized: an explicit `:443` is omitted.
 
 For a registered legacy adapter or gateway, bind preparation to its exact
 existing machine ID:
