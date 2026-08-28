@@ -53,8 +53,9 @@ func TestCanonicalLoopbackOriginEdges(t *testing.T) {
 		want string
 		ok   bool
 	}{
-		"default port":      {raw: "http://127.0.0.1:80", want: "http://127.0.0.1", ok: true},
+		"default port":      {raw: "http://127.0.0.1:80", want: "http://127.0.0.1:80", ok: true},
 		"canonical IPv6":    {raw: "http://[0:0:0:0:0:0:0:1]:18080/", want: "http://[::1]:18080", ok: true},
+		"IPv6 default port": {raw: "http://[0:0:0:0:0:0:0:1]:80", want: "http://[::1]:80", ok: true},
 		"zoned IPv6":        {raw: "http://[::1%25lo0]:18080", want: "http://[::1%25lo0]:18080", ok: true},
 		"trailing colon":    {raw: "http://127.0.0.1:", ok: false},
 		"leading-zero port": {raw: "http://127.0.0.1:018080", ok: false},
@@ -84,6 +85,7 @@ func TestParseAcceptsOnlyExplicitVersionTwoLANState(t *testing.T) {
 		"missing cidr":           `{"version":2,"origin":"http://192.168.1.4:8080","client_binding":"11111111-1111-4111-8111-111111111111","allow_lan_http":true}`,
 		"dns plaintext":          `{"version":2,"origin":"http://punaro.lan:8080","client_binding":"11111111-1111-4111-8111-111111111111","allow_lan_http":true,"trusted_lan_cidr":"192.168.1.0/24"}`,
 		"https downgrade fields": `{"version":2,"origin":"https://punaro.example","client_binding":"11111111-1111-4111-8111-111111111111","allow_lan_http":true,"trusted_lan_cidr":"192.168.1.0/24"}`,
+		"loopback LAN policy":    `{"version":2,"origin":"http://127.0.0.1:8080","client_binding":"11111111-1111-4111-8111-111111111111","allow_lan_http":true,"trusted_lan_cidr":"127.0.0.0/8"}`,
 	} {
 		t.Run(name, func(t *testing.T) {
 			if _, err := Parse([]byte(raw)); err == nil {

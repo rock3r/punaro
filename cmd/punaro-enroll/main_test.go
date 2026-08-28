@@ -87,7 +87,9 @@ func TestPrepareThenRedeemOverLoopbackHTTP(t *testing.T) {
 	var prepared publicEnrollment
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost || r.URL.Path != "/v1/enrollments/redeem" {
-			t.Fatalf("request=%s %s", r.Method, r.URL.Path)
+			t.Errorf("request=%s %s", r.Method, r.URL.Path)
+			w.WriteHeader(http.StatusBadRequest)
+			return
 		}
 		w.Header().Set("Cache-Control", "no-store")
 		w.WriteHeader(http.StatusCreated)
