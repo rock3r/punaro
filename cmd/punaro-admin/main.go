@@ -137,22 +137,31 @@ func runClientAdd(args []string, stdout, stderr io.Writer) int {
 	var err error
 	template := "trusted-agent"
 	if *serviceOnly {
-		if len(projects) != 0 || *allProjects || *legacyPrincipal != "" {
+		if len(projects) != 0 || *allProjects {
 			return adminError(stderr, errors.New("service enrollment scope is ambiguous"))
 		}
 		template = "service"
-		grants, previewHash, err = punaropostgres.PreviewServiceEnrollment()
+		if *legacyPrincipal != "" {
+			grants, previewHash, err = punaropostgres.PreviewServiceEnrollmentForLegacy(*legacyPrincipal)
+		} else {
+			grants, previewHash, err = punaropostgres.PreviewServiceEnrollment()
+		}
 	} else {
-		grants, previewHash, err = punaropostgres.PreviewTrustedAgentEnrollment(projects, *allProjects)
+		if *legacyPrincipal != "" {
+			grants, previewHash, err = punaropostgres.PreviewTrustedAgentEnrollmentForLegacy(projects, *allProjects, *legacyPrincipal)
+		} else {
+			grants, previewHash, err = punaropostgres.PreviewTrustedAgentEnrollment(projects, *allProjects)
+		}
 	}
 	if err != nil {
 		return adminError(stderr, err)
 	}
 	preview := struct {
-		Template    string                     `json:"template"`
-		PreviewHash string                     `json:"preview_hash"`
-		Grants      []punaropostgres.GrantSpec `json:"grants"`
-	}{Template: template, PreviewHash: previewHash, Grants: grants}
+		Template          string                     `json:"template"`
+		LegacyPrincipalID string                     `json:"legacy_principal_id,omitempty"`
+		PreviewHash       string                     `json:"preview_hash"`
+		Grants            []punaropostgres.GrantSpec `json:"grants"`
+	}{Template: template, LegacyPrincipalID: *legacyPrincipal, PreviewHash: previewHash, Grants: grants}
 	if code := writeJSON(stdout, stderr, preview); code != 0 {
 		return code
 	}

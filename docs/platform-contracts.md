@@ -633,6 +633,13 @@ conversation send/receive; memory search/read/propose/write; and attachment
 upload/download. It excludes attachment delete, every administer/purge
 capability, merge/membership administration, backup, and restore.
 
+The `service` template contains no grants. It cannot be combined with project
+scope, but the owner may bind it to one exact pending legacy principal. That
+combination changes only the credential form after proof of the registered
+Ed25519 key; it does not grant project, conversation, memory, attachment, or
+installation authority. Server doctor migration uses this path so its bearer
+continues to resolve the same relay identity after cutover.
+
 ## Server invariants
 
 - At-least-once mail delivery, immutable message IDs, operation-bound

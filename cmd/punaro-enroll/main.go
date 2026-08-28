@@ -64,14 +64,15 @@ type enrollmentEnvelope struct {
 }
 
 type enrollmentPreview struct {
-	Template    string            `json:"template"`
-	PreviewHash string            `json:"preview_hash"`
-	Grants      []json.RawMessage `json:"grants"`
+	Template          string            `json:"template"`
+	LegacyPrincipalID string            `json:"legacy_principal_id,omitempty"`
+	PreviewHash       string            `json:"preview_hash"`
+	Grants            []json.RawMessage `json:"grants"`
 }
 
 type enrollmentGrantPreview struct {
 	Scope      string `json:"scope"`
-	ProjectID  string `json:"project_id"`
+	ProjectID  string `json:"project_id,omitempty"`
 	Capability string `json:"capability"`
 }
 
@@ -396,7 +397,7 @@ func loadMaterial(path string) (enrollmentMaterial, error) {
 		return enrollmentMaterial{}, errors.New("invalid enrollment material")
 	}
 	var preview enrollmentPreview
-	if err := decodeExact(records[0], &preview, "template", "preview_hash", "grants"); err != nil || !validEnrollmentPreview(preview) {
+	if err := decodeFields(records[0], &preview, []string{"template", "preview_hash", "grants"}, []string{"legacy_principal_id"}); err != nil || !validEnrollmentPreview(preview) {
 		return enrollmentMaterial{}, errors.New("invalid enrollment material")
 	}
 	envelope, err := decodeEnrollmentEnvelope(records[1])
@@ -445,17 +446,46 @@ func validPreviewHash(value string) bool {
 }
 
 func validEnrollmentPreview(preview enrollmentPreview) bool {
-	if !validPreviewHash(preview.PreviewHash) {
+	if !validPreviewHash(preview.PreviewHash) || (preview.LegacyPrincipalID != "" && !validUUID(preview.LegacyPrincipalID)) {
 		return false
 	}
+	validGrants := false
 	switch preview.Template {
 	case "trusted-agent":
-		return validGrantPreview(preview.Grants, false)
+		validGrants = validGrantPreview(preview.Grants, false)
 	case "service":
-		return len(preview.Grants) == 0
+		validGrants = len(preview.Grants) == 0
 	default:
 		return false
 	}
+	return validGrants && previewHashMatches(preview)
+}
+
+func previewHashMatches(preview enrollmentPreview) bool {
+	grants := make([]enrollmentGrantPreview, len(preview.Grants))
+	for index, raw := range preview.Grants {
+		if err := decodeFields(raw, &grants[index], []string{"scope", "capability"}, []string{"project_id"}); err != nil {
+			return false
+		}
+	}
+	var value any = grants
+	if preview.LegacyPrincipalID != "" {
+		value = struct {
+			Grants            []enrollmentGrantPreview `json:"grants"`
+			LegacyPrincipalID string                   `json:"legacy_principal_id"`
+		}{Grants: grants, LegacyPrincipalID: preview.LegacyPrincipalID}
+	}
+	body, err := json.Marshal(value)
+	if err != nil {
+		return false
+	}
+	digest := sha256.Sum256(body)
+	return matchesHexDigest(preview.PreviewHash, digest[:])
+}
+
+func matchesHexDigest(encoded string, expected []byte) bool {
+	decoded, err := hex.DecodeString(encoded)
+	return err == nil && len(decoded) == len(expected) && bytes.Equal(decoded, expected)
 }
 
 func validGrantPreview(rawGrants []json.RawMessage, allowEmpty bool) bool {

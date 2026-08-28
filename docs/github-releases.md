@@ -161,6 +161,13 @@ Only the offline-signature publisher can make those stable assets visible.
    `minimum_bootstrap_release=v0.1.0-alpha.8` and
    `supported_from=v0.1.0-alpha.9`; alpha.9 clients can exercise the built-in
    signed update before the fleet enrollment cutover.
+
+   Alpha.11 adds proof-bound, zero-grant migration for the existing server
+   doctor identity without changing the signed-slot or fixed-bootstrap
+   protocol. Dispatch `v0.1.0-alpha.11` with
+   `minimum_bootstrap_release=v0.1.0-alpha.8` and
+   `supported_from=v0.1.0-alpha.10`; alpha.10 clients can exercise the built-in
+   signed update before the server doctor credential cutover.
 3. Wait for the draft release to appear. The live `catalog` prerelease is not
    touched by the unsigned workflow.
 4. Generate the offline key once, on an air-gapped or owner-only machine, and

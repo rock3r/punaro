@@ -293,7 +293,9 @@ grant set and creates a revocable device principal that can authenticate only
 routes requiring no capability grant, such as server doctor probes. Template,
 scope, and grants are bound into the owner-confirmed preview hash and pending
 enrollment; `service` cannot be combined with project scope, all-project scope,
-or legacy exchange.
+or any capability grant. It may carry one exact owner-selected legacy principal
+only for a proof-bound exchange, allowing an existing server doctor to replace
+its Ed25519 key with a zero-grant device credential without widening authority.
 
 An endpoint belongs to exactly one currently connected machine lease. A machine
 can only advertise endpoints in its configured namespace (for example,

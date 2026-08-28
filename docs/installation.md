@@ -565,8 +565,13 @@ For a non-agent service probe such as server doctor, the owner uses
 `--service` instead of `--project` or `--all-projects`. Its exact preview has an
 empty `grants` array and grants no project, conversation, memory, attachment,
 or installation capability. `--service` is mutually exclusive with project
-scope and legacy exchange; the resulting device credential authenticates only
-routes that require no capability grant.
+scope, but an existing registered legacy machine (such as the key-backed server
+doctor) may also supply its exact `--legacy-principal-id` for the same
+proof-bound exchange described above. The result remains zero-grant and the
+resulting device credential authenticates
+only routes that require no capability grant. This is the supported migration
+for a key-backed server doctor; do not issue a fresh unrelated service client
+and retire the old doctor first.
 
 Windows file transfer tools commonly leave the destination with an inherited
 ACL. Before redemption, tighten that exact transferred file without displaying

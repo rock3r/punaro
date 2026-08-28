@@ -317,6 +317,23 @@ punaro-admin client invite -owner-dsn-file /absolute/private/owner.dsn \
   -project PROJECT_UUID
 ```
 
+For a registered server doctor, preserve zero authority while replacing the
+legacy key by confirming the empty service preview and binding the exact
+pending legacy principal:
+
+```sh
+punaro-admin client invite -owner-dsn-file /absolute/private/owner.dsn \
+  -actor-principal-id OWNER_UUID -name "server doctor" \
+  -machine-id server-doctor -client-binding CLIENT_UUID \
+  -service -legacy-principal-id LEGACY_UUID
+```
+
+Do not combine `-service` with project scope. The printed preview includes the
+exact `legacy_principal_id` and binds it into `preview_hash`; the confirmed run
+still requires `-yes`, and the client redeems through the legacy exchange with
+the existing doctor private key. Only one live pending enrollment may bind that
+legacy identity.
+
 The confirmed run returns one enrollment ID and code. M-5 mounts bounded
 redemption and device-session authentication under the transport policy below;
 ownership and issuance remain host-local. Redemption binds the code to the
