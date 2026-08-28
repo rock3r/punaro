@@ -141,7 +141,7 @@ func protectSpoolFile(path string, file *os.File) error {
 	if err != nil || dacl == nil {
 		return errors.New("cannot construct a private queued-event ACL")
 	}
-	if err := windows.SetNamedSecurityInfo(path, windows.SE_FILE_OBJECT, windows.DACL_SECURITY_INFORMATION|windows.PROTECTED_DACL_SECURITY_INFORMATION, nil, nil, dacl, nil); err != nil {
+	if err := windows.SetNamedSecurityInfo(path, windows.SE_FILE_OBJECT, windows.OWNER_SECURITY_INFORMATION|windows.DACL_SECURITY_INFORMATION|windows.PROTECTED_DACL_SECURITY_INFORMATION, sid, nil, dacl, nil); err != nil {
 		return err
 	}
 	info, err := file.Stat()

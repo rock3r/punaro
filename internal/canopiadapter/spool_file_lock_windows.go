@@ -144,7 +144,7 @@ func openWindowsSpoolLockFile(path string, disposition uint32) (*os.File, error)
 		if sid == nil {
 			return nil, errors.New("cannot identify the current user for a Canopi spool lock")
 		}
-		descriptor, descriptorErr := windows.SecurityDescriptorFromString("D:P(A;;FA;;;" + sid.String() + ")")
+		descriptor, descriptorErr := windows.SecurityDescriptorFromString("O:" + sid.String() + "D:P(A;;FA;;;" + sid.String() + ")")
 		if descriptorErr != nil {
 			return nil, descriptorErr
 		}
