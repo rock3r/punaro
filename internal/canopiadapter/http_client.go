@@ -26,15 +26,15 @@ func NewDeliveryClient(caFile string) (*http.Client, error) {
 		return &http.Client{Timeout: 3 * time.Second, Transport: transport}, nil
 	}
 	if !filepath.IsAbs(caFile) {
-		return nil, errors.New("Canopi TLS CA file must be an absolute path")
+		return nil, errors.New("canopi TLS CA file must be an absolute path")
 	}
-	pemBytes, err := os.ReadFile(caFile)
+	pemBytes, err := os.ReadFile(caFile) // #nosec G304 -- an absolute operator-selected PEM bundle is validated before use.
 	if err != nil {
 		return nil, fmt.Errorf("read Canopi TLS CA file: %w", err)
 	}
 	pool := x509.NewCertPool()
 	if !pool.AppendCertsFromPEM(pemBytes) {
-		return nil, errors.New("Canopi TLS CA file contains no PEM certificates")
+		return nil, errors.New("canopi TLS CA file contains no PEM certificates")
 	}
 	transport.TLSClientConfig = &tls.Config{
 		MinVersion: tls.VersionTLS12,

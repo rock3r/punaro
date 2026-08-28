@@ -26,11 +26,15 @@ func TestNewDeliveryClientTrustsConfiguredPEMRoot(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	response, err := client.Get(server.URL)
+	request, err := http.NewRequestWithContext(t.Context(), http.MethodGet, server.URL, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	response, err := client.Do(request)
 	if err != nil {
 		t.Fatalf("request with configured CA: %v", err)
 	}
-	defer response.Body.Close()
+	defer func() { _ = response.Body.Close() }()
 	if response.StatusCode != http.StatusNoContent {
 		t.Fatalf("status = %d, want %d", response.StatusCode, http.StatusNoContent)
 	}
