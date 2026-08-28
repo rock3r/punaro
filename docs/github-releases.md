@@ -154,6 +154,13 @@ Only the offline-signature publisher can make those stable assets visible.
    `minimum_bootstrap_release=v0.1.0-alpha.8` and
    `supported_from=v0.1.0-alpha.8`; alpha.8 clients can use the built-in signed
    update, while the alpha.9 checkout supplies the corrected Windows installer.
+
+   Alpha.10 adds literal-loopback HTTP enrollment persistence and includes the
+   Windows checkout fix from alpha.9 without changing the signed-slot or fixed-
+   bootstrap protocol. Dispatch `v0.1.0-alpha.10` with
+   `minimum_bootstrap_release=v0.1.0-alpha.8` and
+   `supported_from=v0.1.0-alpha.9`; alpha.9 clients can exercise the built-in
+   signed update before the fleet enrollment cutover.
 3. Wait for the draft release to appear. The live `catalog` prerelease is not
    touched by the unsigned workflow.
 4. Generate the offline key once, on an air-gapped or owner-only machine, and
