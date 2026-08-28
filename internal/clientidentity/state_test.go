@@ -42,6 +42,30 @@ func TestParseAcceptsVersionOneLoopbackHTTPWithoutLANPolicy(t *testing.T) {
 	if _, ok := CanonicalOriginWithPolicy("http://192.168.1.4:18080", clienttransport.Policy{}); ok {
 		t.Fatal("private LAN HTTP was accepted without explicit policy")
 	}
+	if err := state.Match("http://127.0.0.1:18080/", state.ClientBinding, ""); err != nil {
+		t.Fatalf("match canonical loopback origin: %v", err)
+	}
+}
+
+func TestCanonicalLoopbackOriginEdges(t *testing.T) {
+	for name, test := range map[string]struct {
+		raw  string
+		want string
+		ok   bool
+	}{
+		"default port":      {raw: "http://127.0.0.1:80", want: "http://127.0.0.1", ok: true},
+		"canonical IPv6":    {raw: "http://[0:0:0:0:0:0:0:1]:18080/", want: "http://[::1]:18080", ok: true},
+		"zoned IPv6":        {raw: "http://[::1%25lo0]:18080", want: "http://[::1%25lo0]:18080", ok: true},
+		"trailing colon":    {raw: "http://127.0.0.1:", ok: false},
+		"leading-zero port": {raw: "http://127.0.0.1:018080", ok: false},
+	} {
+		t.Run(name, func(t *testing.T) {
+			got, ok := CanonicalOriginWithPolicy(test.raw, clienttransport.Policy{})
+			if ok != test.ok || got != test.want {
+				t.Fatalf("canonical=%q ok=%t, want=%q ok=%t", got, ok, test.want, test.ok)
+			}
+		})
+	}
 }
 
 func TestParseAcceptsOnlyExplicitVersionTwoLANState(t *testing.T) {

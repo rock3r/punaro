@@ -81,6 +81,38 @@ func TestPrepareThenRedeemKeepsSecretsOutOfOutputAndRecoversIdempotently(t *test
 	}
 }
 
+func TestPrepareThenRedeemOverLoopbackHTTP(t *testing.T) {
+	stateDir := filepath.Join(t.TempDir(), "state")
+	credential := "22222222-2222-4222-8222-222222222222." + strings.Repeat("A", 43)
+	var prepared publicEnrollment
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost || r.URL.Path != "/v1/enrollments/redeem" {
+			t.Fatalf("request=%s %s", r.Method, r.URL.Path)
+		}
+		w.Header().Set("Cache-Control", "no-store")
+		w.WriteHeader(http.StatusCreated)
+		_, _ = io.WriteString(w, `{"principal_id":"11111111-1111-4111-8111-111111111111","lookup_id":"22222222-2222-4222-8222-222222222222","credential":"`+credential+`","generation":1}`)
+	}))
+	defer server.Close()
+
+	var prepareOut, prepareErr bytes.Buffer
+	if code := run([]string{"prepare", "--origin", server.URL, "--state-dir", stateDir}, &prepareOut, &prepareErr); code != 0 || prepareErr.Len() != 0 {
+		t.Fatalf("prepare code=%d stdout=%q stderr=%q", code, prepareOut.String(), prepareErr.String())
+	}
+	if err := json.Unmarshal(prepareOut.Bytes(), &prepared); err != nil {
+		t.Fatalf("parse prepare output: %v", err)
+	}
+	material := writeTestMaterial(t, `{"enrollment_id":"33333333-3333-4333-8333-333333333333","client_binding":"`+prepared.ClientBinding+`","code":"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"}`)
+	credentialFile := filepath.Join(stateDir, "device.credential")
+	var redeemOut, redeemErr bytes.Buffer
+	if code := run([]string{"redeem", "--state-dir", stateDir, "--enrollment-file", material, "--credential-file", credentialFile}, &redeemOut, &redeemErr); code != 0 || redeemErr.Len() != 0 {
+		t.Fatalf("redeem code=%d stdout=%q stderr=%q", code, redeemOut.String(), redeemErr.String())
+	}
+	if raw, err := os.ReadFile(credentialFile); err != nil || string(raw) != credential+"\n" { // #nosec G304 -- test reads its own protected credential fixture.
+		t.Fatalf("credential persistence err=%v", err)
+	}
+}
+
 func TestLegacyPrepareAndRedeemUsesProofBoundExchangeRoute(t *testing.T) {
 	stateDir := filepath.Join(t.TempDir(), "legacy-state")
 	public, private, err := ed25519.GenerateKey(rand.Reader)
@@ -297,6 +329,9 @@ func TestPreparePersistsLoopbackHTTPWithoutTrustedLANPolicy(t *testing.T) {
 	}
 	if state.Version != clientidentity.Version || state.Origin != "http://127.0.0.1:18080" || state.AllowLANHTTP || state.TrustedLANCIDR != "" {
 		t.Fatalf("identity=%#v", state)
+	}
+	if code := run([]string{"prepare", "--origin", "http://127.0.0.1:18080", "--state-dir", filepath.Join(t.TempDir(), "policy"), "--allow-lan-http", "--trusted-lan-cidr", "127.0.0.0/8"}, io.Discard, io.Discard); code != 2 {
+		t.Fatalf("loopback with trusted-LAN policy code=%d", code)
 	}
 }
 

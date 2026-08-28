@@ -14,6 +14,7 @@ func TestPolicyValidatesExplicitTrustedLANHTTP(t *testing.T) {
 	}{
 		{name: "https", origin: "https://punaro.example", ok: true},
 		{name: "loopback development", origin: "http://127.0.0.1:8080", ok: true},
+		{name: "loopback rejects LAN policy", origin: "http://127.0.0.1:8080", policy: Policy{AllowLANHTTP: true, TrustedLANCIDR: "127.0.0.0/8"}, ok: false},
 		{name: "explicit private ipv4", origin: "http://192.168.1.4:8080", policy: Policy{AllowLANHTTP: true, TrustedLANCIDR: "192.168.1.0/24"}, ok: true},
 		{name: "explicit private ipv6", origin: "http://[fd12:3456::4]:8080", policy: Policy{AllowLANHTTP: true, TrustedLANCIDR: "fd12:3456::/64"}, ok: true},
 		{name: "explicit zoned link-local ipv6", origin: "http://[fe80::4%25en0]:8080", policy: Policy{AllowLANHTTP: true, TrustedLANCIDR: "fe80::/64"}, ok: true},

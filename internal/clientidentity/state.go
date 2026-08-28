@@ -222,14 +222,14 @@ func canonicalOriginForPolicy(raw string, policy clienttransport.Policy) (string
 			return canonical, true
 		}
 		parsed, err := clienttransport.ValidateOrigin(raw, policy)
-		if err != nil || parsed.Scheme != "http" {
+		if err != nil || parsed.Scheme != "http" || strings.HasSuffix(parsed.Host, ":") {
 			return "", false
 		}
 		hostname, ok := canonicalHostname(parsed.Hostname())
 		if !ok {
 			return "", false
 		}
-		if port := parsed.Port(); port != "" {
+		if port := parsed.Port(); port != "" && port != "80" {
 			parsed.Host = net.JoinHostPort(hostname, port)
 		} else {
 			parsed.Host = canonicalHost(hostname)
