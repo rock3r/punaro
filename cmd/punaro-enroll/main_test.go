@@ -680,6 +680,77 @@ func TestEnrollmentMaterialAcceptsExactServiceAdminOutput(t *testing.T) {
 	}
 }
 
+func TestEnrollmentMaterialAcceptsExactLegacyServiceAdminOutput(t *testing.T) {
+	legacyPrincipalID := "55555555-5555-4555-8555-555555555555"
+	grants, previewHash, err := punaropostgres.PreviewServiceEnrollmentForLegacy(legacyPrincipalID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	preview := struct {
+		Template          string                     `json:"template"`
+		LegacyPrincipalID string                     `json:"legacy_principal_id"`
+		PreviewHash       string                     `json:"preview_hash"`
+		Grants            []punaropostgres.GrantSpec `json:"grants"`
+	}{Template: "service", LegacyPrincipalID: legacyPrincipalID, PreviewHash: previewHash, Grants: grants}
+	pending := punaropostgres.PendingEnrollment{ID: "33333333-3333-4333-8333-333333333333", ClientBinding: "44444444-4444-4444-8444-444444444444", Code: strings.Repeat("A", 43), ExpiresAt: time.Date(2030, 1, 2, 3, 4, 5, 0, time.UTC), PreviewHash: previewHash, Grants: grants}
+	previewRaw, err := json.MarshalIndent(preview, "", "  ")
+	if err != nil {
+		t.Fatal(err)
+	}
+	pendingRaw, err := json.MarshalIndent(pending, "", "  ")
+	if err != nil {
+		t.Fatal(err)
+	}
+	material, err := loadMaterial(writeTestMaterial(t, string(append(append(previewRaw, '\n'), append(pendingRaw, '\n')...))))
+	if err != nil || material.EnrollmentID != pending.ID {
+		t.Fatalf("legacy service admin output material=%#v err=%v", material, err)
+	}
+	preview.LegacyPrincipalID = "not-a-principal"
+	previewRaw, err = json.MarshalIndent(preview, "", "  ")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := loadMaterial(writeTestMaterial(t, string(append(append(previewRaw, '\n'), append(pendingRaw, '\n')...)))); err == nil {
+		t.Fatal("legacy service admin output accepted an invalid legacy principal")
+	}
+	preview.LegacyPrincipalID = "66666666-6666-4666-8666-666666666666"
+	previewRaw, err = json.MarshalIndent(preview, "", "  ")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := loadMaterial(writeTestMaterial(t, string(append(append(previewRaw, '\n'), append(pendingRaw, '\n')...)))); err == nil {
+		t.Fatal("legacy service admin output accepted a legacy principal not bound by preview_hash")
+	}
+}
+
+func TestEnrollmentMaterialAcceptsExactLegacyTrustedAgentAdminOutput(t *testing.T) {
+	legacyPrincipalID := "55555555-5555-4555-8555-555555555555"
+	projectID := "77777777-7777-4777-8777-777777777777"
+	grants, previewHash, err := punaropostgres.PreviewTrustedAgentEnrollmentForLegacy([]string{projectID}, false, legacyPrincipalID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	preview := struct {
+		Template          string                     `json:"template"`
+		LegacyPrincipalID string                     `json:"legacy_principal_id"`
+		PreviewHash       string                     `json:"preview_hash"`
+		Grants            []punaropostgres.GrantSpec `json:"grants"`
+	}{Template: "trusted-agent", LegacyPrincipalID: legacyPrincipalID, PreviewHash: previewHash, Grants: grants}
+	pending := punaropostgres.PendingEnrollment{ID: "33333333-3333-4333-8333-333333333333", ClientBinding: "44444444-4444-4444-8444-444444444444", Code: strings.Repeat("A", 43), ExpiresAt: time.Date(2030, 1, 2, 3, 4, 5, 0, time.UTC), PreviewHash: previewHash, Grants: grants}
+	previewRaw, err := json.MarshalIndent(preview, "", "  ")
+	if err != nil {
+		t.Fatal(err)
+	}
+	pendingRaw, err := json.MarshalIndent(pending, "", "  ")
+	if err != nil {
+		t.Fatal(err)
+	}
+	material, err := loadMaterial(writeTestMaterial(t, string(append(append(previewRaw, '\n'), append(pendingRaw, '\n')...))))
+	if err != nil || material.EnrollmentID != pending.ID {
+		t.Fatalf("legacy trusted-agent admin output material=%#v err=%v", material, err)
+	}
+}
+
 func TestProtectMaterialTightensTransferredFileWithoutReadingIt(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "enrollment-material.json")
 	want := []byte("private enrollment material")
