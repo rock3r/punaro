@@ -21,8 +21,9 @@ with its own mailbox implementation and with the central Punaro relay. The
 accepted target later adds an independently optional OAuth-scoped remote MCP
 adapter over Punaro's own API.
 
-> Status: alpha implementation under an accepted PostgreSQL/trusted-relay/Big
-> Brain migration plan. Enrolled adapters can exchange durable
+> Status: signed prerelease `v0.1.0-alpha.11` is deployed across the personal
+> four-machine fleet under the accepted PostgreSQL/trusted-relay/Big Brain
+> migration plan. Enrolled adapters can exchange durable
 > text through the loopback relay, with signed requests, payload-free wake
 > hints, local Waypost handoff (with rolling legacy `agent-mailbox`
 > compatibility), and a separately enrolled Telegram
