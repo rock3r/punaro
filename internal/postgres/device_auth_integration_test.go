@@ -9,6 +9,7 @@ import (
 	"database/sql"
 	"encoding/base64"
 	"errors"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -434,7 +435,11 @@ VALUES ($1, gen_random_uuid(), $2, 'bounded prune target',
 		t.Fatal("legacy authentication disabled with a pending intended machine")
 	}
 	legacyRequest := EnrollmentRequest{ClientBinding: uuid.NewString(), MachineID: "legacy-replacement", Label: "legacy replacement", AllProjects: true, LegacyPrincipalID: legacy.PrincipalID, TTL: 10 * time.Minute}
-	legacyPending, err := admin.CreateEnrollment(ctx, owner.ID, legacyRequest, concurrentHash)
+	_, legacyPreviewHash, err := PreviewTrustedAgentEnrollmentForLegacy(nil, true, legacy.PrincipalID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	legacyPending, err := admin.CreateEnrollment(ctx, owner.ID, legacyRequest, legacyPreviewHash)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -503,6 +508,51 @@ WHERE id = $1`, legacyPending.ID, uuid.NewString(), owner.ID, credential.LookupI
 	inventory, err := admin.ListLegacyMachines(ctx, owner.ID)
 	if err != nil || len(inventory) != 1 || inventory[0].State != LegacyMigrated {
 		t.Fatalf("legacy inventory=%#v err=%v", inventory, err)
+	}
+	serviceLegacyPublic, serviceLegacyPrivate, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	serviceLegacy, err := admin.RegisterLegacyMachine(ctx, owner.ID, "legacy server doctor", serviceLegacyPublic)
+	if err != nil {
+		t.Fatal(err)
+	}
+	serviceLegacyRequest := EnrollmentRequest{ClientBinding: uuid.NewString(), MachineID: "legacy-server-doctor", Label: "legacy server doctor", ServiceOnly: true, LegacyPrincipalID: serviceLegacy.PrincipalID, TTL: 10 * time.Minute}
+	serviceLegacyGrants, serviceLegacyHash, err := PreviewServiceEnrollmentForLegacy(serviceLegacy.PrincipalID)
+	if err != nil || len(serviceLegacyGrants) != 0 {
+		t.Fatalf("legacy service preview=%#v hash=%q err=%v", serviceLegacyGrants, serviceLegacyHash, err)
+	}
+	serviceLegacyPending, err := admin.CreateEnrollment(ctx, owner.ID, serviceLegacyRequest, serviceLegacyHash)
+	if err != nil || len(serviceLegacyPending.Grants) != 0 {
+		t.Fatalf("legacy service pending=%#v err=%v", serviceLegacyPending, err)
+	}
+	duplicateServiceLegacyRequest := serviceLegacyRequest
+	duplicateServiceLegacyRequest.ClientBinding = uuid.NewString()
+	duplicateServiceLegacyRequest.MachineID = "legacy-server-doctor-duplicate"
+	if _, err := admin.CreateEnrollment(ctx, owner.ID, duplicateServiceLegacyRequest, serviceLegacyHash); err == nil || !strings.Contains(err.Error(), "legacy machine already has a pending enrollment") {
+		t.Fatalf("duplicate legacy service enrollment err=%v", err)
+	}
+	serviceLegacyRedeem := RedeemEnrollment{EnrollmentID: serviceLegacyPending.ID, ClientBinding: serviceLegacyRequest.ClientBinding, Code: serviceLegacyPending.Code, IdempotencyKey: uuid.NewString()}
+	serviceLegacyCode, err := base64.RawURLEncoding.Strict().DecodeString(serviceLegacyRedeem.Code)
+	if err != nil {
+		t.Fatal(err)
+	}
+	serviceLegacyCodeDigest := sha256.Sum256(serviceLegacyCode)
+	serviceLegacyProof := LegacyExchangeProof{PublicKey: serviceLegacyPublic, Signature: ed25519.Sign(serviceLegacyPrivate, legacyexchange.Transcript(serviceLegacyRedeem.EnrollmentID, serviceLegacyRedeem.ClientBinding, serviceLegacyRedeem.IdempotencyKey, serviceLegacyCodeDigest))}
+	serviceLegacyCredential, err := app.RedeemLegacyEnrollment(ctx, serviceLegacyProof, serviceLegacyRedeem)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var serviceLegacyGrantCount int
+	if err := ownerDB.QueryRowContext(ctx, `SELECT count(*) FROM auth.capability_grants WHERE principal_id = $1`, serviceLegacyCredential.PrincipalID).Scan(&serviceLegacyGrantCount); err != nil || serviceLegacyGrantCount != 0 {
+		t.Fatalf("legacy service grant count=%d err=%v", serviceLegacyGrantCount, err)
+	}
+	serviceLegacyAuthenticated, err := app.AuthenticateDevice(ctx, serviceLegacyCredential.Encoded)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resolved, err := app.ResolveMigratedLegacyPublicKey(ctx, serviceLegacyAuthenticated); err != nil || !bytes.Equal(resolved, serviceLegacyPublic) {
+		t.Fatalf("legacy service relay authority=%x err=%v", resolved, err)
 	}
 	racePublic, _, err := ed25519.GenerateKey(rand.Reader)
 	if err != nil {

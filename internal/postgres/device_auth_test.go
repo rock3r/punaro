@@ -69,6 +69,27 @@ func TestServiceEnrollmentGrantPreviewIsEmptyAndStable(t *testing.T) {
 	if err := request.Validate(); err != nil {
 		t.Fatalf("service-only request rejected: %v", err)
 	}
+	request.LegacyPrincipalID = testPrincipalA
+	if err := request.Validate(); err != nil {
+		t.Fatalf("legacy-linked service-only request rejected: %v", err)
+	}
+	legacyGrants, legacyHash, err := PreviewServiceEnrollmentForLegacy(testPrincipalA)
+	if err != nil || len(legacyGrants) != 0 || legacyHash == firstHash {
+		t.Fatalf("legacy preview=%#v hash=%q err=%v", legacyGrants, legacyHash, err)
+	}
+	otherLegacyGrants, otherLegacyHash, err := PreviewServiceEnrollmentForLegacy(testPrincipalB)
+	if err != nil || len(otherLegacyGrants) != 0 || otherLegacyHash == legacyHash {
+		t.Fatalf("other legacy preview=%#v hash=%q err=%v", otherLegacyGrants, otherLegacyHash, err)
+	}
+	request.ProjectIDs = []string{testProjectA}
+	if err := request.Validate(); err == nil {
+		t.Fatal("service-only request with project scope accepted")
+	}
+	request.ProjectIDs = nil
+	request.AllProjects = true
+	if err := request.Validate(); err == nil {
+		t.Fatal("service-only request with all-projects scope accepted")
+	}
 }
 
 func TestDeviceCredentialEncodingHasOpaqueLookupAnd256BitSecret(t *testing.T) {

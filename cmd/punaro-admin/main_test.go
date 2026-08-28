@@ -60,6 +60,32 @@ func TestClientInvitePrintsServiceOnlyPreviewBeforeOpeningAdministration(t *test
 	}
 }
 
+func TestClientInvitePrintsLegacyLinkedServicePreviewBeforeOpeningAdministration(t *testing.T) {
+	original := openAdminDatabase
+	t.Cleanup(func() { openAdminDatabase = original })
+	openAdminDatabase = func(_ context.Context, _ postgres.Config) (adminDatabase, error) {
+		t.Fatal("administration opened before confirmation")
+		return nil, nil
+	}
+	var stdout, stderr bytes.Buffer
+	code := run([]string{"client", "invite", "--actor-principal-id", "11111111-1111-4111-8111-111111111111", "--name", "server doctor", "--machine-id", "server-doctor", "--client-binding", "22222222-2222-4222-8222-222222222222", "--service", "--legacy-principal-id", "33333333-3333-4333-8333-333333333333"}, &stdout, &stderr)
+	if code != 3 || !strings.Contains(stdout.String(), `"template": "service"`) || !strings.Contains(stdout.String(), `"legacy_principal_id": "33333333-3333-4333-8333-333333333333"`) || !strings.Contains(stdout.String(), `"grants": []`) || !strings.Contains(stdout.String(), `"preview_hash"`) || !strings.Contains(stderr.String(), "rerun with --yes") {
+		t.Fatalf("code=%d stdout=%q stderr=%q", code, stdout.String(), stderr.String())
+	}
+}
+
+func TestClientInviteRejectsServiceProjectScope(t *testing.T) {
+	for _, args := range [][]string{
+		{"client", "invite", "--actor-principal-id", "11111111-1111-4111-8111-111111111111", "--name", "server doctor", "--machine-id", "server-doctor", "--client-binding", "22222222-2222-4222-8222-222222222222", "--service", "--project", "33333333-3333-4333-8333-333333333333"},
+		{"client", "invite", "--actor-principal-id", "11111111-1111-4111-8111-111111111111", "--name", "server doctor", "--machine-id", "server-doctor", "--client-binding", "22222222-2222-4222-8222-222222222222", "--service", "--all-projects"},
+	} {
+		var stdout, stderr bytes.Buffer
+		if code := run(args, &stdout, &stderr); code == 0 || stdout.Len() != 0 || !strings.Contains(stderr.String(), "host-local administration failed") {
+			t.Fatalf("args=%v code=%d stdout=%q stderr=%q", args, code, stdout.String(), stderr.String())
+		}
+	}
+}
+
 func TestClientInviteAliasAndLifecycleCommands(t *testing.T) {
 	original := openAdminDatabase
 	t.Cleanup(func() { openAdminDatabase = original })

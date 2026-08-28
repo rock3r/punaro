@@ -83,18 +83,44 @@ func PreviewTrustedAgentEnrollment(projectIDs []string, allProjects bool) ([]Gra
 	if err != nil {
 		return nil, "", err
 	}
-	return previewEnrollment(grants)
+	return previewEnrollment(grants, "")
+}
+
+// PreviewTrustedAgentEnrollmentForLegacy binds one exact legacy principal to
+// the owner-confirmed grant preview.
+func PreviewTrustedAgentEnrollmentForLegacy(projectIDs []string, allProjects bool, legacyPrincipalID string) ([]GrantSpec, string, error) {
+	grants, err := TrustedAgentGrantPreview(projectIDs, allProjects)
+	if err != nil {
+		return nil, "", err
+	}
+	return previewEnrollment(grants, legacyPrincipalID)
 }
 
 // PreviewServiceEnrollment returns an explicitly empty capability expansion
 // for service identities that authenticate health checks but need no API
 // authority of their own.
 func PreviewServiceEnrollment() ([]GrantSpec, string, error) {
-	return previewEnrollment([]GrantSpec{})
+	return previewEnrollment([]GrantSpec{}, "")
 }
 
-func previewEnrollment(grants []GrantSpec) ([]GrantSpec, string, error) {
-	body, err := json.Marshal(grants)
+// PreviewServiceEnrollmentForLegacy binds one exact legacy principal to the
+// explicitly empty service grant preview.
+func PreviewServiceEnrollmentForLegacy(legacyPrincipalID string) ([]GrantSpec, string, error) {
+	return previewEnrollment([]GrantSpec{}, legacyPrincipalID)
+}
+
+func previewEnrollment(grants []GrantSpec, legacyPrincipalID string) ([]GrantSpec, string, error) {
+	if legacyPrincipalID != "" && !validOpaqueID(legacyPrincipalID) {
+		return nil, "", errors.New("invalid legacy principal")
+	}
+	var value any = grants
+	if legacyPrincipalID != "" {
+		value = struct {
+			Grants            []GrantSpec `json:"grants"`
+			LegacyPrincipalID string      `json:"legacy_principal_id"`
+		}{Grants: grants, LegacyPrincipalID: legacyPrincipalID}
+	}
+	body, err := json.Marshal(value)
 	if err != nil {
 		return nil, "", errors.New("enrollment preview cannot be encoded")
 	}
@@ -122,7 +148,7 @@ func (r EnrollmentRequest) Validate() error {
 		return errors.New("invalid enrollment request")
 	}
 	if r.ServiceOnly {
-		if len(r.ProjectIDs) != 0 || r.AllProjects || r.LegacyPrincipalID != "" {
+		if len(r.ProjectIDs) != 0 || r.AllProjects {
 			return errors.New("invalid enrollment request")
 		}
 		return nil

@@ -82,7 +82,10 @@ punaro doctor \
 
 The profile contains exactly one relay credential reference. Before mail
 cutover, use the enrolled diagnostic machine's private key as above and migrate
-that same identity through the proof-bound legacy enrollment workflow. Keep the
+that same identity through the proof-bound legacy enrollment workflow. The
+owner invitation uses `--service --legacy-principal-id LEGACY_UUID`: its
+confirmed preview must contain an empty `grants` array, and redemption must use
+the existing doctor private key. Keep the
 key-backed profile active until the server has published cutover and restarted
 with the PostgreSQL credential-transition runtime. Then create a new protected
 profile path (the writer never overwrites an existing file) using the staged

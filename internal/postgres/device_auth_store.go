@@ -311,9 +311,17 @@ func (a *Administration) CreateEnrollment(ctx context.Context, actorPrincipalID 
 	var previewHash string
 	var err error
 	if request.ServiceOnly {
-		grants, previewHash, err = PreviewServiceEnrollment()
+		if request.LegacyPrincipalID != "" {
+			grants, previewHash, err = PreviewServiceEnrollmentForLegacy(request.LegacyPrincipalID)
+		} else {
+			grants, previewHash, err = PreviewServiceEnrollment()
+		}
 	} else {
-		grants, previewHash, err = PreviewTrustedAgentEnrollment(request.ProjectIDs, request.AllProjects)
+		if request.LegacyPrincipalID != "" {
+			grants, previewHash, err = PreviewTrustedAgentEnrollmentForLegacy(request.ProjectIDs, request.AllProjects, request.LegacyPrincipalID)
+		} else {
+			grants, previewHash, err = PreviewTrustedAgentEnrollment(request.ProjectIDs, request.AllProjects)
+		}
 	}
 	if err != nil || subtle.ConstantTimeCompare([]byte(previewHash), []byte(confirmedPreviewHash)) != 1 {
 		return PendingEnrollment{}, errors.New("enrollment preview was not confirmed")
@@ -374,6 +382,10 @@ OR EXISTS (SELECT 1 FROM auth.pending_enrollments WHERE machine_id = $1 AND rede
 	if request.LegacyPrincipalID != "" {
 		if err := lockLegacyMutations(ctx, tx); err != nil {
 			return PendingEnrollment{}, err
+		}
+		var legacyEnrollmentExists bool
+		if err := tx.QueryRowContext(ctx, `SELECT EXISTS (SELECT 1 FROM auth.pending_enrollments WHERE legacy_principal_id = $1 AND redeemed_at IS NULL AND invalidated_at IS NULL AND expires_at > statement_timestamp())`, request.LegacyPrincipalID).Scan(&legacyEnrollmentExists); err != nil || legacyEnrollmentExists {
+			return PendingEnrollment{}, errors.New("legacy machine already has a pending enrollment")
 		}
 		var pendingLegacy bool
 		if err := tx.QueryRowContext(ctx, `SELECT EXISTS (SELECT 1 FROM auth.legacy_machines WHERE principal_id = $1 AND state = 'pending')`, request.LegacyPrincipalID).Scan(&pendingLegacy); err != nil || !pendingLegacy {
