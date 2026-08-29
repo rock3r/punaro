@@ -4,8 +4,10 @@ import (
 	"context"
 	"database/sql"
 	"errors"
+	"strings"
 
 	"github.com/rock3r/punaro/internal/fleetconfig"
+	"github.com/rock3r/punaro/internal/relay"
 )
 
 // FleetDesired is the singleton published fleet-config revision.
@@ -123,4 +125,71 @@ RETURNING generation`, release.Digest, previewHash).Scan(&currentGeneration); er
 		SkillCount:   release.SkillCount,
 		TotalBytes:   release.TotalBytes,
 	}, nil
+}
+
+// FleetDesired returns content-free desired metadata for an enrolled application connection.
+func (d *Database) FleetDesired(ctx context.Context) (relay.FleetDesiredMetadata, error) {
+	if d == nil {
+		return relay.FleetDesiredMetadata{}, errors.New("fleet-config store is unavailable")
+	}
+	var desired relay.FleetDesiredMetadata
+	err := d.db.QueryRowContext(ctx, `
+SELECT desired.generation, desired.release_digest, release.source_commit, release.skill_count, release.total_bytes
+FROM fleet.desired AS desired
+JOIN fleet.releases AS release ON release.digest = desired.release_digest
+WHERE desired.id`).Scan(&desired.Generation, &desired.Digest, &desired.SourceCommit, &desired.SkillCount, &desired.TotalBytes)
+	if errors.Is(err, sql.ErrNoRows) {
+		return relay.FleetDesiredMetadata{}, nil
+	}
+	if err != nil {
+		return relay.FleetDesiredMetadata{}, errors.New("fleet-config desired revision is unavailable")
+	}
+	return desired, nil
+}
+
+// FleetRelease returns exact stored archive bytes for one digest.
+func (d *Database) FleetRelease(ctx context.Context, digest string) ([]byte, error) {
+	if d == nil || digest == "" {
+		return nil, errors.New("fleet-config release is unavailable")
+	}
+	var archive []byte
+	err := d.db.QueryRowContext(ctx, `SELECT archive FROM fleet.releases WHERE digest = $1`, digest).Scan(&archive)
+	if err != nil {
+		return nil, errors.New("fleet-config release is unavailable")
+	}
+	return archive, nil
+}
+
+// PutFleetStatus records one enrolled client's bounded status row.
+func (d *Database) PutFleetStatus(ctx context.Context, machineID string, report relay.FleetStatusReport) error {
+	if d == nil || machineID == "" {
+		return errors.New("fleet-config access is not authorized")
+	}
+	_, err := d.db.ExecContext(ctx, `SELECT fleet.put_client_status($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)`,
+		machineID, report.Generation, nullIfEmpty(report.AppliedDigest), report.State, nullIfEmpty(report.Activation),
+		nullIfEmpty(report.TrailerState), nullIfEmpty(report.AliasState), nullIfEmpty(report.ProjectMatchState),
+		report.ReportGeneration, report.IdempotencyKey, report.RequestHash)
+	if err != nil {
+		return errors.New(postgresFleetStatusError(err))
+	}
+	return nil
+}
+
+func nullIfEmpty(value string) any {
+	if value == "" {
+		return nil
+	}
+	return value
+}
+
+func postgresFleetStatusError(err error) string {
+	message := err.Error()
+	switch {
+	case strings.Contains(message, "stale"):
+		return "fleet-config status generation is stale"
+	case strings.Contains(message, "idempotency"):
+		return "fleet-config status idempotency conflict"
+	default:
+		return "fleet-config access is not authorized"
+	}
 }

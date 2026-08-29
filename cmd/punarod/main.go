@@ -805,7 +805,11 @@ func buildRelayHandler(cfg config.Config, postgresBackends ...relay.Backend) (ht
 		}
 		return nil, nil, err
 	}
-	handler := relay.NewHandler(backend, authenticator, relay.HandlerOptions{Metrics: metrics})
+	handlerOptions := relay.HandlerOptions{Metrics: metrics}
+	if fleet, ok := backend.(relay.FleetConfigStore); ok {
+		handlerOptions.FleetConfig = fleet
+	}
+	handler := relay.NewHandler(backend, authenticator, handlerOptions)
 	if cfg.AccessIssuer != "" {
 		verifier, err := newAccessVerifier(cfg)
 		if err != nil {

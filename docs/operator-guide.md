@@ -184,8 +184,9 @@ mail rate-limit buckets, migration 47 adds idempotent direct-role
 conversations, migration 48 adds explicit pending-delivery capacity
 counters, migration 49 adds content-free terminal delivery metadata,
 migrations 50 through 57 add conversation display names, Telegram topic-claim
-cutover tables, and their idempotency and machine-key fences, and migration 58
-adds the fleet-global configuration release and desired-revision store.
+cutover tables, and their idempotency and machine-key fences, migration 58
+adds the fleet-global configuration release and desired-revision store, and
+migration 59 adds enrolled-client status writes.
 After migration 48, `punaro relay reconcile-capacity
 --directory DIR --yes` rebuilds those counters from pending deliveries if
 startup readiness reports inconsistency. Ordinary SQLite `Open` and PostgreSQL

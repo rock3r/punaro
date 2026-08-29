@@ -38,6 +38,19 @@ func (n *Notifier) Register(machineID string) *NotificationClient {
 func (n *Notifier) Publish(machineID, topicID string, sequence int64) {
 	n.mu.Lock()
 	defer n.mu.Unlock()
+	n.publishLocked(machineID, topicID, sequence)
+}
+
+// PublishAll delivers a content-free wake hint to every current subscriber.
+func (n *Notifier) PublishAll(topicID string, sequence int64) {
+	n.mu.Lock()
+	defer n.mu.Unlock()
+	for machineID := range n.clients {
+		n.publishLocked(machineID, topicID, sequence)
+	}
+}
+
+func (n *Notifier) publishLocked(machineID, topicID string, sequence int64) {
 	for client := range n.clients[machineID] {
 		select {
 		case client.events <- WakeEvent{Type: "wake", TopicID: topicID, Sequence: sequence}:
