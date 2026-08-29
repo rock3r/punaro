@@ -1514,7 +1514,7 @@ func TestInspectMigrationSourceV7HashesIncludeDisplayNameAndInboundMetadata(t *t
 	inbound, duplicate, err := store.AppendTelegramInbound(TelegramInboundInput{
 		ConversationID: conversation.ID, SenderMachineID: "machine-telegram", FromEndpoint: TelegramGatewayEndpoint,
 		FromParticipant: TelegramUserParticipant, Body: "v7 inbound", InReplyToMessageID: "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee",
-		InReplyToEndpoint: "agent/a", TelegramThreadID: 795446, IdempotencyKey: "telegram-update:v7", Now: now,
+		InReplyToEndpoint: "agent/a", TelegramThreadID: 700001, IdempotencyKey: "telegram-update:v7", Now: now,
 	})
 	if err != nil || duplicate || inbound.FromParticipant != TelegramUserParticipant {
 		_ = store.Close()
@@ -1585,9 +1585,9 @@ func TestInspectMigrationSourceExportsTelegramClaimsAndInboundMetadata(t *testin
 	inbound, duplicate, err := store.AppendTelegramInbound(TelegramInboundInput{
 		ConversationID: conversation.ID, SenderMachineID: "machine-telegram", FromEndpoint: TelegramGatewayEndpoint,
 		FromParticipant: TelegramUserParticipant, Body: "ship it", InReplyToMessageID: "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee",
-		InReplyToEndpoint: "agent/a", TelegramThreadID: 795446, IdempotencyKey: "telegram-update:7", Now: now,
+		InReplyToEndpoint: "agent/a", TelegramThreadID: 700001, IdempotencyKey: "telegram-update:7", Now: now,
 	})
-	if err != nil || duplicate || inbound.FromParticipant != TelegramUserParticipant || inbound.TelegramThreadID != 795446 {
+	if err != nil || duplicate || inbound.FromParticipant != TelegramUserParticipant || inbound.TelegramThreadID != 700001 {
 		t.Fatalf("inbound=%#v duplicate=%t err=%v", inbound, duplicate, err)
 	}
 	inspected, err := InspectMigrationSource(ctx, path)
@@ -1642,7 +1642,7 @@ func TestInspectMigrationSourceExportsTelegramClaimsAndInboundMetadata(t *testin
 	if err := json.Unmarshal(messages.Rows[0].Payload, &message); err != nil {
 		t.Fatal(err)
 	}
-	if message["from_participant"] != TelegramUserParticipant || message["in_reply_to_message_id"] != "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee" || message["in_reply_to_endpoint"] != "agent/a" || message["telegram_thread_id"] != float64(795446) {
+	if message["from_participant"] != TelegramUserParticipant || message["in_reply_to_message_id"] != "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee" || message["in_reply_to_endpoint"] != "agent/a" || message["telegram_thread_id"] != float64(700001) {
 		t.Fatalf("message metadata=%#v", message)
 	}
 }

@@ -2333,7 +2333,7 @@ func TestStoreTelegramInboundExcludesMetadataFromHash(t *testing.T) {
 	retry, duplicate, err := store.AppendTelegramInbound(TelegramInboundInput{
 		ConversationID: conversation.ID, SenderMachineID: "machine-telegram", FromEndpoint: TelegramGatewayEndpoint,
 		FromParticipant: TelegramUserParticipant, Body: "ship it", InReplyToMessageID: first.ID,
-		InReplyToEndpoint: "agent/a", TelegramThreadID: 795446, IdempotencyKey: "telegram-update:42", Now: now.Add(time.Second),
+		InReplyToEndpoint: "agent/a", TelegramThreadID: 700001, IdempotencyKey: "telegram-update:42", Now: now.Add(time.Second),
 	})
 	if err != nil || !duplicate || retry.ID != first.ID || retry.InReplyToPunaroMessageID != "" || retry.TelegramThreadID != 0 {
 		t.Fatalf("metadata retry=%#v duplicate=%t err=%v", retry, duplicate, err)
@@ -2341,9 +2341,9 @@ func TestStoreTelegramInboundExcludesMetadataFromHash(t *testing.T) {
 	second, duplicate, err := store.AppendTelegramInbound(TelegramInboundInput{
 		ConversationID: conversation.ID, SenderMachineID: "machine-telegram", FromEndpoint: TelegramGatewayEndpoint,
 		FromParticipant: TelegramUserParticipant, Body: "follow up", InReplyToMessageID: first.ID,
-		InReplyToEndpoint: "agent/a", TelegramThreadID: 795446, IdempotencyKey: "telegram-update:43", Now: now.Add(2 * time.Second),
+		InReplyToEndpoint: "agent/a", TelegramThreadID: 700001, IdempotencyKey: "telegram-update:43", Now: now.Add(2 * time.Second),
 	})
-	if err != nil || duplicate || second.InReplyToPunaroMessageID != first.ID || second.InReplyToEndpoint != "agent/a" || second.TelegramThreadID != 795446 {
+	if err != nil || duplicate || second.InReplyToPunaroMessageID != first.ID || second.InReplyToEndpoint != "agent/a" || second.TelegramThreadID != 700001 {
 		t.Fatalf("second inbound=%#v duplicate=%t err=%v", second, duplicate, err)
 	}
 	if err := store.AdvertiseEndpoints("machine-a", []string{"agent/a"}, now.Add(3*time.Second), time.Hour); err != nil {
@@ -2359,7 +2359,7 @@ func TestStoreTelegramInboundExcludesMetadataFromHash(t *testing.T) {
 			leased = delivery.Message
 		}
 	}
-	if leased.ID != second.ID || leased.FromEndpoint != TelegramGatewayEndpoint || leased.FromParticipant != TelegramUserParticipant || leased.InReplyToPunaroMessageID != first.ID || leased.InReplyToEndpoint != "agent/a" || leased.TelegramThreadID != 795446 {
+	if leased.ID != second.ID || leased.FromEndpoint != TelegramGatewayEndpoint || leased.FromParticipant != TelegramUserParticipant || leased.InReplyToPunaroMessageID != first.ID || leased.InReplyToEndpoint != "agent/a" || leased.TelegramThreadID != 700001 {
 		t.Fatalf("leased inbound=%#v deliveries=%#v", leased, page.Deliveries)
 	}
 }

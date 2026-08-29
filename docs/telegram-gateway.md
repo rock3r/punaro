@@ -244,19 +244,22 @@ Fence-legal order (operator chooses which topic **keeps**
 3. **Adopt both live conversations** without creating topics:
 
    ```sh
-   punaro-telegram adopt --conversation dae86ecc-05ff-4431-967a-584e2cd82916
-   punaro-telegram adopt --conversation e5c269b6-7e4c-450d-82bb-c25209096c10
+   punaro-telegram adopt --conversation <KEEPER_CONVERSATION_ID>
+   punaro-telegram adopt --conversation <NON_KEEPER_CONVERSATION_ID>
    ```
 
-   These are thread `795446` and thread `795625`. Adopt requires a display
-   name and an existing `topic_routes` row. It reserves as `telegram/primary`
-   with `adopt-<conversation-id>`, records the local execution at
-   `route_persisted`, and completes. A reserve that already returns
-   `status=complete` is success. It never calls `createForumTopic`.
+   Resolve the corresponding `<KEEPER_THREAD_ID>` and
+   `<NON_KEEPER_THREAD_ID>` from the operator-protected live gateway state;
+   never record those values in source. Adopt requires a display name and an
+   existing `topic_routes` row. It reserves as `telegram/primary` with
+   `adopt-<conversation-id>`, records the local execution at `route_persisted`,
+   and completes. A reserve that already returns `status=complete` is success.
+   It never calls `createForumTopic`.
 
-4. Confirm `sendRichMessage` still hits threads `795446` and `795625`. Renew
-   `role/telegram-codex` onto `agent/punaro-studio/validation` and send
-   `--to user-telegram` from that session into the **keeper** topic only.
+4. Confirm `sendRichMessage` still hits `<KEEPER_THREAD_ID>` and
+   `<NON_KEEPER_THREAD_ID>`. Renew `role/telegram-codex` onto
+   `agent/punaro-studio/validation` and send `--to user-telegram` from that
+   session into the **keeper** topic only.
 
 If adopt is skipped, those two threads keep working as today (route +
 broadcast to a conversation that already includes `telegram/primary`). They

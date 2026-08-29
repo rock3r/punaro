@@ -95,7 +95,7 @@ func TestSyncOnceCopiesTelegramInboundMetadataAndRewritesFromEndpoint(t *testing
 			FromParticipant:          relay.TelegramUserParticipant,
 			InReplyToPunaroMessageID: "message-0",
 			InReplyToEndpoint:        "agent/sender",
-			TelegramThreadID:         795446,
+			TelegramThreadID:         700001,
 			Body:                     "ship it",
 			CreatedAt:                createdAt,
 		},
@@ -116,7 +116,7 @@ func TestSyncOnceCopiesTelegramInboundMetadataAndRewritesFromEndpoint(t *testing
 	if got.FromEndpoint != relay.TelegramUserParticipant || got.FromParticipant != relay.TelegramUserParticipant {
 		t.Fatalf("from = %#v", got)
 	}
-	if got.InReplyToPunaroMessageID != "message-0" || got.InReplyToEndpoint != "agent/sender" || got.TelegramThreadID != 795446 {
+	if got.InReplyToPunaroMessageID != "message-0" || got.InReplyToEndpoint != "agent/sender" || got.TelegramThreadID != 700001 {
 		t.Fatalf("reply metadata = %#v", got)
 	}
 	if got.Body != "ship it" || !got.CreatedAt.Equal(createdAt) {

@@ -317,7 +317,7 @@ func TestGatewayCallbackReservesExecutionThenConsumesToken(t *testing.T) {
 	t.Cleanup(func() { _ = state.Close() })
 	notify := &recordingNotify{}
 	var logs []string
-	topics := &recordingTopicCreator{threadID: 795446}
+	topics := &recordingTopicCreator{threadID: 700001}
 	claims := &recordingClaimRelay{claim: relay.TelegramClaim{ConversationID: "conversation-1", Status: "pending", DisplayName: "Ops"}}
 	executor := &ClaimExecutor{State: state, Relay: claims, Topics: topics, AllowedUserID: 55, Log: func(format string, args ...any) { logs = append(logs, fmt.Sprintf(format, args...)) }}
 	gateway := Gateway{
@@ -352,7 +352,7 @@ func TestGatewayCallbackReservesExecutionThenConsumesToken(t *testing.T) {
 		t.Fatalf("createForumTopic=%#v chats=%#v", topics.names, topics.chatIDs)
 	}
 	execution, found, err := state.ClaimExecution("conversation-1")
-	if err != nil || !found || execution.Phase != ClaimPhaseComplete || execution.ThreadID != 795446 {
+	if err != nil || !found || execution.Phase != ClaimPhaseComplete || execution.ThreadID != 700001 {
 		t.Fatalf("execution=%#v found=%v err=%v", execution, found, err)
 	}
 	if !hasLogClass(logs, "telegram_claim_reserved") || !hasLogClass(logs, "telegram_claim_completed") {
