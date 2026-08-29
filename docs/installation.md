@@ -220,6 +220,39 @@ overwrites a differing local skill.
 Run `./scripts/install-agent-guidance.sh --directory /path/to/project` later
 if you decline it during client setup.
 
+Install the concise default coordination policy globally after installing the
+plugin. The explicit replacement flag rewrites only the complete marked Punaro
+block and preserves every surrounding instruction. Both installers keep an
+`AGENTS.md.punaro-backup.*` recovery copy beside each file before rewriting it;
+the POSIX copy is owner-only, and the Windows copy inherits the directory ACL.
+The live file is rewritten in place so existing links remain intact:
+
+```sh
+mkdir -p "$HOME/.codex" "$HOME/.agents" "$HOME/.claude"
+./scripts/install-agent-guidance.sh --directory "$HOME/.codex" --guidance-only --replace-managed
+./scripts/install-agent-guidance.sh --directory "$HOME/.agents" --guidance-only --replace-managed
+ln -s ../.agents/AGENTS.md "$HOME/.claude/CLAUDE.md"
+```
+
+On Windows, use the equivalent PowerShell installer for both global roots:
+
+```powershell
+New-Item -ItemType Directory -Force -Path "$HOME\.codex", "$HOME\.agents", "$HOME\.claude" | Out-Null
+.\scripts\install-agent-guidance.ps1 -Directory "$HOME\.codex" -GuidanceOnly -ReplaceManaged
+.\scripts\install-agent-guidance.ps1 -Directory "$HOME\.agents" -GuidanceOnly -ReplaceManaged
+New-Item -ItemType HardLink -Path "$HOME\.claude\CLAUDE.md" -Target "$HOME\.agents\AGENTS.md" | Out-Null
+```
+
+`~/.codex/AGENTS.md` is Codex's global instruction file. `~/.agents/AGENTS.md`
+is the shared source used by the supported Claude link layout and other agent
+launchers. New agent sessions load the updated global guidance; already-running
+sessions keep the instructions they loaded at startup.
+The link commands intentionally fail if `CLAUDE.md` already exists; inspect and
+preserve that file rather than overwriting unrelated user guidance.
+The global guidance expects the Punaro plugin to supply the detailed mailbox,
+reply, and attachment mechanics; `--guidance-only` intentionally does not copy
+skills into either global configuration root.
+
 Agents with plugin support can instead load the repository's
 [Punaro agent plugin](agent-plugin.md). It provides the same three skills plus
 the local Waypost MCP declaration without modifying a project's
