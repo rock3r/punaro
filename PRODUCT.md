@@ -166,7 +166,8 @@ Runway, roughly in order:
 - **Mail:** finish the fleet-wide Waypost migration after the rolling legacy mailbox
   compatibility window; keep attachment production authority closed until its separate
   release gates and live drills pass; continue hardening provider-edge observability
-  without adding content to diagnostics.
+  without adding content to diagnostics; and tighten Telegram outbound sends to require
+  a completed claim after the post-adopt soak.
 - **Big Brain:** end-to-end testing, integration into the agent skills, and proving it
   in real day-to-day use; configuring a production embedding provider so the built
   semantic slices light up; then the remaining remote MCP transport slices (the OAuth
