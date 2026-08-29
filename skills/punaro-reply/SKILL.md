@@ -19,9 +19,9 @@ Do not use `telegram_thread_id` as a send argument.
 
 ## Check readiness
 
-Before the first Punaro operation in a task, or after a local, relay,
-notification, service, or authorization failure, run the adapter's read-only
-doctor through the packaged launcher. Resolve the plugin root as the directory
+After status reports a warning or failure, or after a local mailbox, relay,
+notification, service, or authorization operation fails, run the adapter's
+read-only doctor through the packaged launcher before retrying. Resolve the plugin root as the directory
 two levels above this `SKILL.md` and pass its absolute path:
 
 ```text

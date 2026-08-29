@@ -73,6 +73,10 @@ require_phrase "$project/.agents/skills/punaro-mailbox/SKILL.md" 'unqualified sh
 require_phrase "$project/.agents/skills/punaro-mailbox/SKILL.md" 'qualified handle'
 require_phrase "$project/.agents/skills/punaro-mailbox/SKILL.md" 'After status reports a warning or failure'
 forbid_phrase "$project/.agents/skills/punaro-mailbox/SKILL.md" 'Before the first Punaro operation in a task'
+require_phrase "$project/.agents/skills/punaro-reply/SKILL.md" 'After status reports a warning or failure'
+forbid_phrase "$project/.agents/skills/punaro-reply/SKILL.md" 'Before the first Punaro operation in a task'
+require_phrase "$project/.agents/skills/punaro-attachment/SKILL.md" 'After status reports a warning or failure'
+forbid_phrase "$project/.agents/skills/punaro-attachment/SKILL.md" 'Before the first trusted-attachment operation in a task'
 require_phrase "$project/.agents/skills/punaro-reply/SKILL.md" 'successful send proves relay acceptance only'
 require_phrase "$project/.agents/skills/punaro-reply/SKILL.md" 'Do not infer read or action status'
 require_phrase "$project/.agents/skills/punaro-reply/SKILL.md" 'host permission model'
@@ -99,11 +103,87 @@ Use the local `agent-mailbox` MCP for Punaro-delivered mail.
 # Keep after
 EOF
 sh "$repo_dir/scripts/install-agent-guidance.sh" --directory "$managed_project" --guidance-only --replace-managed
+cp "$managed_project/AGENTS.md" "$managed_project/AGENTS.after-first-replace"
+sh "$repo_dir/scripts/install-agent-guidance.sh" --directory "$managed_project" --guidance-only --replace-managed
+cmp -s "$managed_project/AGENTS.after-first-replace" "$managed_project/AGENTS.md" || { printf '%s\n' 'managed guidance replacement was not idempotent' >&2; exit 1; }
 require_phrase "$managed_project/AGENTS.md" '# Keep before'
 require_phrase "$managed_project/AGENTS.md" '# Keep after'
 require_phrase "$managed_project/AGENTS.md" 'At the start of every session'
 forbid_phrase "$managed_project/AGENTS.md" 'Use the local `agent-mailbox` MCP'
 [ ! -e "$managed_project/.agents" ] || { printf '%s\n' 'guidance-only install copied project skills' >&2; exit 1; }
+
+signature_project="$fixture_dir/signature-project"
+mkdir -p "$signature_project"
+cat >"$signature_project/AGENTS.md" <<'EOF'
+# Keep before
+<!-- punaro-agent-guidance:start -->
+At the start of every session, use Punaro.
+An explicit request authorizes that exact send.
+A send is accepted or queued, not read or acted upon.
+STALE CONTENT THAT MUST BE REPLACED
+<!-- punaro-agent-guidance:end -->
+# Keep after
+EOF
+sh "$repo_dir/scripts/install-agent-guidance.sh" --directory "$signature_project" --guidance-only --replace-managed
+require_phrase "$signature_project/AGENTS.md" '# Keep before'
+require_phrase "$signature_project/AGENTS.md" '# Keep after'
+require_phrase "$signature_project/AGENTS.md" 'one non-blocking `waypost_recv`'
+forbid_phrase "$signature_project/AGENTS.md" 'STALE CONTENT THAT MUST BE REPLACED'
+
+misordered_project="$fixture_dir/misordered-project"
+mkdir -p "$misordered_project"
+cat >"$misordered_project/AGENTS.md" <<'EOF'
+# Keep before
+<!-- punaro-agent-guidance:end -->
+# User instructions between reversed markers
+<!-- punaro-agent-guidance:start -->
+# Keep after
+EOF
+cp "$misordered_project/AGENTS.md" "$misordered_project/AGENTS.before"
+set +e
+sh "$repo_dir/scripts/install-agent-guidance.sh" --directory "$misordered_project" --guidance-only --replace-managed >"$fixture_dir/misordered.out" 2>&1
+status=$?
+set -e
+[ "$status" -eq 2 ] || { printf '%s\n' 'misordered guidance markers were accepted' >&2; exit 1; }
+cmp -s "$misordered_project/AGENTS.before" "$misordered_project/AGENTS.md" || { printf '%s\n' 'misordered guidance markers changed the target' >&2; exit 1; }
+grep -Fq 'invalid existing Punaro guidance markers:' "$fixture_dir/misordered.out"
+
+duplicate_project="$fixture_dir/duplicate-project"
+mkdir -p "$duplicate_project"
+cat >"$duplicate_project/AGENTS.md" <<'EOF'
+<!-- punaro-agent-guidance:start -->
+First block
+<!-- punaro-agent-guidance:end -->
+# User guidance between blocks
+<!-- punaro-agent-guidance:start -->
+Second block
+<!-- punaro-agent-guidance:end -->
+EOF
+cp "$duplicate_project/AGENTS.md" "$duplicate_project/AGENTS.before"
+set +e
+sh "$repo_dir/scripts/install-agent-guidance.sh" --directory "$duplicate_project" --guidance-only --replace-managed >"$fixture_dir/duplicate.out" 2>&1
+status=$?
+set -e
+[ "$status" -eq 2 ] || { printf '%s\n' 'duplicate guidance blocks were accepted' >&2; exit 1; }
+cmp -s "$duplicate_project/AGENTS.before" "$duplicate_project/AGENTS.md" || { printf '%s\n' 'duplicate guidance blocks changed the target' >&2; exit 1; }
+grep -Fq 'invalid existing Punaro guidance markers:' "$fixture_dir/duplicate.out"
+
+crlf_project="$fixture_dir/crlf-project"
+mkdir -p "$crlf_project"
+printf '# Keep before\r\n<!-- punaro-agent-guidance:start -->\r\nOld block\r\n<!-- punaro-agent-guidance:end -->\r\n# Keep after\r\n' >"$crlf_project/AGENTS.md"
+sh "$repo_dir/scripts/install-agent-guidance.sh" --directory "$crlf_project" --guidance-only --replace-managed
+require_phrase "$crlf_project/AGENTS.md" '# Keep before'
+require_phrase "$crlf_project/AGENTS.md" '# Keep after'
+require_phrase "$crlf_project/AGENTS.md" 'one non-blocking `waypost_recv`'
+forbid_phrase "$crlf_project/AGENTS.md" 'Old block'
+awk 'index($0, "<!-- punaro-agent-guidance:start -->") && substr($0, length($0), 1) != "\r" { exit 1 }' "$crlf_project/AGENTS.md" || { printf '%s\n' 'CRLF replacement changed the managed block line endings' >&2; exit 1; }
+
+fresh_replace_project="$fixture_dir/fresh-replace-project"
+mkdir -p "$fresh_replace_project"
+printf '%s\n' '# Existing global guidance' >"$fresh_replace_project/AGENTS.md"
+sh "$repo_dir/scripts/install-agent-guidance.sh" --directory "$fresh_replace_project" --guidance-only --replace-managed
+require_phrase "$fresh_replace_project/AGENTS.md" '# Existing global guidance'
+require_phrase "$fresh_replace_project/AGENTS.md" 'At the start of every session'
 
 linked_project="$fixture_dir/linked-project"
 outside="$fixture_dir/outside"
@@ -265,6 +345,9 @@ require_phrase "$repo_dir/docs/installation.md" 'Repeat bounded waits'
 require_phrase "$repo_dir/docs/installation.md" 'does not itself create a model turn'
 require_phrase "$repo_dir/docs/installation.md" '--guidance-only --replace-managed'
 require_phrase "$repo_dir/docs/installation.md" '-GuidanceOnly -ReplaceManaged'
+require_phrase "$repo_dir/docs/installation.md" 'global guidance expects the Punaro plugin'
+require_phrase "$repo_dir/docs/agent-plugin.md" 'After status reports a warning or failure'
+forbid_phrase "$repo_dir/docs/agent-plugin.md" 'before first use when readiness is uncertain'
 require_phrase "$repo_dir/docs/installation.md" 'New agent sessions load the updated global guidance'
 
 for path in \

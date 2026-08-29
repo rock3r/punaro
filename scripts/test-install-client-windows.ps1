@@ -167,7 +167,53 @@ try {
     if (-not $managedGuidance.Contains('# Keep before') -or -not $managedGuidance.Contains('# Keep after') -or -not $managedGuidance.Contains('At the start of every session') -or $managedGuidance.Contains('Use the local `agent-mailbox` MCP.')) {
         throw 'Windows managed guidance replacement did not preserve surrounding instructions'
     }
+    $managedBytes = [System.IO.File]::ReadAllBytes($managedPath)
+    if ($managedBytes.Length -lt 3 -or $managedBytes[0] -ne 0xef -or $managedBytes[1] -ne 0xbb -or $managedBytes[2] -ne 0xbf) { throw 'Windows managed guidance replacement stripped the UTF-8 BOM' }
+    & (Join-Path $repoDir 'scripts\install-agent-guidance.ps1') -Directory $managedProject -GuidanceOnly -ReplaceManaged
+    if ([System.IO.File]::ReadAllText($managedPath) -ne $managedGuidance) { throw 'Windows managed guidance replacement was not idempotent' }
     if (Test-Path -LiteralPath (Join-Path $managedProject '.agents')) { throw 'Windows guidance-only install copied project skills' }
+    $signatureProject = Join-Path $fixture 'signature-guidance'
+    [System.IO.Directory]::CreateDirectory($signatureProject) | Out-Null
+    $signaturePath = Join-Path $signatureProject 'AGENTS.md'
+    [System.IO.File]::WriteAllText($signaturePath, "# Keep before`r`n<!-- punaro-agent-guidance:start -->`r`nAt the start of every session, use Punaro.`r`nAn explicit request authorizes that exact send.`r`nA send is accepted or queued, not read or acted upon.`r`nSTALE CONTENT THAT MUST BE REPLACED`r`n<!-- punaro-agent-guidance:end -->`r`n# Keep after`r`n", [System.Text.Encoding]::UTF8)
+    & (Join-Path $repoDir 'scripts\install-agent-guidance.ps1') -Directory $signatureProject -GuidanceOnly -ReplaceManaged
+    $signatureGuidance = [System.IO.File]::ReadAllText($signaturePath)
+    if (-not $signatureGuidance.Contains('# Keep before') -or -not $signatureGuidance.Contains('# Keep after') -or -not $signatureGuidance.Contains('one non-blocking `waypost_recv`') -or $signatureGuidance.Contains('STALE CONTENT THAT MUST BE REPLACED')) {
+        throw 'Windows explicit managed replacement was bypassed by signature phrases'
+    }
+    $misorderedProject = Join-Path $fixture 'misordered-guidance'
+    [System.IO.Directory]::CreateDirectory($misorderedProject) | Out-Null
+    $misorderedPath = Join-Path $misorderedProject 'AGENTS.md'
+    $misorderedGuidance = "# Keep before`r`n<!-- punaro-agent-guidance:end -->`r`n# User instructions between reversed markers`r`n<!-- punaro-agent-guidance:start -->`r`n# Keep after`r`n"
+    [System.IO.File]::WriteAllText($misorderedPath, $misorderedGuidance, [System.Text.Encoding]::UTF8)
+    $misorderedBlocked = $false
+    try {
+        & (Join-Path $repoDir 'scripts\install-agent-guidance.ps1') -Directory $misorderedProject -GuidanceOnly -ReplaceManaged
+    } catch {
+        if ($_.Exception.Message.Contains('invalid existing Punaro guidance markers:')) { $misorderedBlocked = $true } else { throw }
+    }
+    if (-not $misorderedBlocked) { throw 'Windows guidance installer accepted misordered markers' }
+    if ([System.IO.File]::ReadAllText($misorderedPath) -ne $misorderedGuidance) { throw 'Windows guidance installer changed a file with misordered markers' }
+    $duplicateProject = Join-Path $fixture 'duplicate-guidance'
+    [System.IO.Directory]::CreateDirectory($duplicateProject) | Out-Null
+    $duplicatePath = Join-Path $duplicateProject 'AGENTS.md'
+    $duplicateGuidance = "<!-- punaro-agent-guidance:start -->`r`nFirst block`r`n<!-- punaro-agent-guidance:end -->`r`n# User guidance between blocks`r`n<!-- punaro-agent-guidance:start -->`r`nSecond block`r`n<!-- punaro-agent-guidance:end -->`r`n"
+    [System.IO.File]::WriteAllText($duplicatePath, $duplicateGuidance, [System.Text.Encoding]::UTF8)
+    $duplicateBlocked = $false
+    try {
+        & (Join-Path $repoDir 'scripts\install-agent-guidance.ps1') -Directory $duplicateProject -GuidanceOnly -ReplaceManaged
+    } catch {
+        if ($_.Exception.Message.Contains('invalid existing Punaro guidance markers:')) { $duplicateBlocked = $true } else { throw }
+    }
+    if (-not $duplicateBlocked) { throw 'Windows guidance installer accepted duplicate blocks' }
+    if ([System.IO.File]::ReadAllText($duplicatePath) -ne $duplicateGuidance) { throw 'Windows guidance installer changed a file with duplicate blocks' }
+    $freshReplaceProject = Join-Path $fixture 'fresh-replace-guidance'
+    [System.IO.Directory]::CreateDirectory($freshReplaceProject) | Out-Null
+    $freshReplacePath = Join-Path $freshReplaceProject 'AGENTS.md'
+    [System.IO.File]::WriteAllText($freshReplacePath, '# Existing global guidance', [System.Text.Encoding]::UTF8)
+    & (Join-Path $repoDir 'scripts\install-agent-guidance.ps1') -Directory $freshReplaceProject -GuidanceOnly -ReplaceManaged
+    $freshReplaceGuidance = [System.IO.File]::ReadAllText($freshReplacePath)
+    if (-not $freshReplaceGuidance.Contains('# Existing global guidance') -or -not $freshReplaceGuidance.Contains('At the start of every session')) { throw 'Windows fresh explicit replacement did not append guidance' }
     & (Join-Path $repoDir 'scripts\punaro-plugin-mcp.cmd')
     if ($LASTEXITCODE -ne 0) { throw 'Windows plugin launcher could not start the installer-owned adapter' }
     $fixedAdapter = Join-Path $root 'bin\punaro-adapter.exe'

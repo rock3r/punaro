@@ -240,6 +240,9 @@ On Windows, use the equivalent PowerShell installer for both global roots:
 is the shared source used by the supported Claude link layout and other agent
 launchers. New agent sessions load the updated global guidance; already-running
 sessions keep the instructions they loaded at startup.
+The global guidance expects the Punaro plugin to supply the detailed mailbox,
+reply, and attachment mechanics; `--guidance-only` intentionally does not copy
+skills into either global configuration root.
 
 Agents with plugin support can instead load the repository's
 [Punaro agent plugin](agent-plugin.md). It provides the same three skills plus
