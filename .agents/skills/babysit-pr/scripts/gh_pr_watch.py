@@ -40,8 +40,9 @@ REVIEW_BOT_LOGIN_KEYWORDS = {
 # Login / check-name keyword fragments for CodeRabbit. CodeRabbit is treated as
 # a *presence-conditional* gate, not an assumed-present one: it only gates a PR
 # when it shows signs of life (a CodeRabbit CI check, a reaction, or an authored
-# comment). When dormant, the watcher behaves as a bugbot+codex-only gate, so
-# the gate degrades gracefully if CodeRabbit is later removed from the repo.
+# comment). When dormant, the watcher behaves as a Codex-only gate (plus any
+# presence-conditional Bugbot check), so the gate degrades gracefully if
+# CodeRabbit is later removed from the repo.
 CODERABBIT_LOGIN_KEYWORDS = {
     "coderabbit",
 }
@@ -49,10 +50,10 @@ CODERABBIT_CHECK_KEYWORDS = {
     "coderabbit",
 }
 # Workflow name keyword fragments used to identify Cursor Bugbot CI runs.
-# The merge gate is hard-blocked unless the latest Bugbot run for the current
-# head SHA is `completed` with conclusion `success`. Cursor currently reports
-# a clean manual Bugbot review as a neutral/skipped check, though, so the
-# accompanying SHA-matched clean review is also accepted (see below).
+# Bugbot is retired as an assumed-present gate: absence does not block merge.
+# If a Bugbot check still appears on a PR, it is presence-conditional (required
+# only while present). A clean manual Bugbot review reported as neutral/skipped
+# is still reconciled via the SHA-matched clean review path below.
 BUGBOT_WORKFLOW_KEYWORDS = {
     "cursor",
     "bugbot",
@@ -575,7 +576,7 @@ def summarize_bugbot_gate_from_checks(checks):
 
     if not bugbot_checks:
         return {
-            "required": True,
+            "required": False,
             "present": False,
             "status": "missing",
             "conclusion": "",
@@ -648,7 +649,7 @@ def summarize_bugbot_gate_from_runs(runs, head_sha):
 
     if not bugbot_runs:
         return {
-            "required": True,
+            "required": False,
             "present": False,
             "status": "missing",
             "conclusion": "",
@@ -779,8 +780,9 @@ def summarize_coderabbit_gate(checks, reactions):
     when it shows signs of life: a CodeRabbit CI check, or a reaction from the
     CodeRabbit bot. (Authored review comments are surfaced and block merge
     independently via the normal review-item path.) When CodeRabbit is dormant
-    the gate is inert and the watcher behaves as a bugbot+codex-only gate, so
-    the watcher stays correct if CodeRabbit is later removed.
+    the gate is inert and the watcher behaves as a Codex-only gate (plus any
+    presence-conditional Bugbot check), so the watcher stays correct if
+    CodeRabbit is later removed.
 
     `reviewing` is True only while CodeRabbit appears to still be working: its
     CI check is pending, or it has an active 👀 (eyes) reaction on the PR. A
@@ -1154,6 +1156,24 @@ def is_actionable_review_bot_login(login):
     return any(keyword in lower_login for keyword in REVIEW_BOT_LOGIN_KEYWORDS)
 
 
+def is_inert_bugbot_notice(item):
+    """Return True for retired Bugbot enablement/upsell notices that must not block merge."""
+    if not isinstance(item, dict):
+        return False
+    if str(item.get("kind") or "") != "issue_comment":
+        return False
+    if str(item.get("author") or "").lower() != CURSOR_BUGBOT_LOGIN:
+        return False
+    body = str(item.get("body") or "")
+    lower = body.lower()
+    return (
+        "BUGBOT_FREE_TIER_DISABLED_UPSELL" in body
+        or "bugbot is not enabled for your account" in lower
+        or "bugbot couldn't run" in lower
+        or "github account mismatch" in lower
+    )
+
+
 def is_trusted_human_review_author(item, authenticated_login):
     _ = authenticated_login
     author = str(item.get("author") or "")
@@ -1293,6 +1313,11 @@ def fetch_new_review_items(pr, state, fresh_state, authenticated_login=None):
         if is_clean_bugbot_review_item(item, head_sha):
             seen_review.add(item_id)
             seen_review_updated_at[item_id] = item_updated_at
+            continue
+        if is_inert_bugbot_notice(item):
+            if kind == "issue_comment":
+                seen_issue.add(item_id)
+                seen_issue_updated_at[item_id] = item_updated_at
             continue
         if kind == "review" and str(item.get("review_state") or "") == "APPROVED":
             seen_review.add(item_id)

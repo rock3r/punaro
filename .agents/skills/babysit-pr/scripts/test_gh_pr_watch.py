@@ -202,6 +202,65 @@ class RetryEligibilityTests(unittest.TestCase):
         self.assertIn("diagnose_branch_behind", actions)
         self.assertNotIn("diagnose_merge_conflict", actions)
 
+    def test_summarize_bugbot_gate_missing_is_not_required(self):
+        """Bugbot is retired: absence must not hard-block the merge gate."""
+        gate = watch.summarize_bugbot_gate_from_checks([])
+        self.assertFalse(gate["present"])
+        self.assertFalse(gate["required"])
+        self.assertEqual(gate["status"], "missing")
+
+        gate_runs = watch.summarize_bugbot_gate_from_runs([], "abc123")
+        self.assertFalse(gate_runs["present"])
+        self.assertFalse(gate_runs["required"])
+
+    def test_summarize_bugbot_gate_present_remains_required(self):
+        """If Bugbot still posts a check, keep a presence-conditional gate."""
+        gate = watch.summarize_bugbot_gate(
+            [
+                {
+                    "name": "Cursor Bugbot",
+                    "state": "SUCCESS",
+                    "bucket": "pass",
+                    "link": "https://example.invalid/bugbot-check",
+                }
+            ],
+            [],
+            "abc123",
+        )
+        self.assertTrue(gate["present"])
+        self.assertTrue(gate["required"])
+        self.assertTrue(gate["is_success"])
+
+    def test_recommend_actions_ready_when_bugbot_missing_not_required(self):
+        actions = watch.recommend_actions(
+            pr=self._base_pr(),
+            checks_summary={
+                "all_terminal": True,
+                "failed_count": 0,
+                "pending_count": 0,
+                "passed_count": 2,
+                "skipping_count": 0,
+            },
+            failed_runs=[],
+            new_review_items=[],
+            hung_checks=[],
+            retries_used=0,
+            max_retries=3,
+            checks_terminal_elapsed=120,
+            blocking_review_items=[],
+            bugbot_gate={
+                "required": False,
+                "present": False,
+                "status": "missing",
+                "conclusion": "",
+                "is_success": False,
+            },
+        )
+
+        self.assertIn("stop_ready_to_merge", actions)
+        self.assertNotIn("stop_bugbot_not_green", actions)
+        self.assertNotIn("wait_bugbot", actions)
+
     def test_recommend_actions_hard_blocks_bugbot_non_success(self):
         actions = watch.recommend_actions(
             pr=self._base_pr(),
@@ -255,6 +314,26 @@ class RetryEligibilityTests(unittest.TestCase):
 
         self.assertIn("wait_bugbot", actions)
         self.assertNotIn("stop_bugbot_not_green", actions)
+
+    def test_inert_bugbot_notice_is_not_actionable_review(self):
+        self.assertTrue(
+            watch.is_inert_bugbot_notice(
+                {
+                    "kind": "issue_comment",
+                    "author": "cursor[bot]",
+                    "body": "<!-- BUGBOT_FREE_TIER_DISABLED_UPSELL -->\nBugbot is not enabled for your account, so this pull request was not reviewed.",
+                }
+            )
+        )
+        self.assertFalse(
+            watch.is_inert_bugbot_notice(
+                {
+                    "kind": "review_comment",
+                    "author": "cursor[bot]",
+                    "body": "This looks like a real Bugbot finding on line 12.",
+                }
+            )
+        )
 
     def test_summarize_bugbot_gate_prefers_pr_checks_over_actions_runs(self):
         checks = [
@@ -925,7 +1004,7 @@ class RetryEligibilityTests(unittest.TestCase):
         self.assertEqual(len(hung), 1)
         self.assertEqual(hung[0]["name"], "CI")
 
-    def test_recommend_actions_waits_for_missing_bugbot_while_checks_pending(self):
+    def test_recommend_actions_ignores_missing_bugbot_while_checks_pending(self):
         actions = watch.recommend_actions(
             pr=self._base_pr(),
             checks_summary={
@@ -942,17 +1021,18 @@ class RetryEligibilityTests(unittest.TestCase):
             checks_terminal_elapsed=None,
             blocking_review_items=[],
             bugbot_gate={
-                "required": True,
+                "required": False,
+                "present": False,
                 "status": "missing",
                 "conclusion": "",
                 "is_success": False,
             },
         )
 
-        self.assertIn("wait_bugbot", actions)
+        self.assertNotIn("wait_bugbot", actions)
         self.assertNotIn("stop_bugbot_not_green", actions)
 
-    def test_recommend_actions_waits_for_missing_bugbot_during_grace(self):
+    def test_recommend_actions_ignores_missing_bugbot_during_grace(self):
         actions = watch.recommend_actions(
             pr=self._base_pr(),
             checks_summary={
@@ -960,6 +1040,7 @@ class RetryEligibilityTests(unittest.TestCase):
                 "failed_count": 0,
                 "pending_count": 0,
                 "passed_count": 2,
+                "skipping_count": 0,
             },
             failed_runs=[],
             new_review_items=[],
@@ -969,15 +1050,18 @@ class RetryEligibilityTests(unittest.TestCase):
             checks_terminal_elapsed=10,
             blocking_review_items=[],
             bugbot_gate={
-                "required": True,
+                "required": False,
+                "present": False,
                 "status": "missing",
                 "conclusion": "",
                 "is_success": False,
             },
         )
 
-        self.assertIn("wait_bugbot", actions)
+        self.assertNotIn("wait_bugbot", actions)
         self.assertNotIn("stop_bugbot_not_green", actions)
+        # Grace period still applies for review-bot comment race.
+        self.assertNotIn("stop_ready_to_merge", actions)
 
     def test_reset_state_for_new_head_sha_clears_pending_map(self):
         state = {
