@@ -29,6 +29,29 @@ platform service restarts it. Recovery-only keeps the supervisor parked
 until a later signed update or seed clears that marker, then the platform
 service restarts onto the repaired slot.
 
+## Fleet-global agent configuration
+
+Publish an exact Git commit (never a branch) after configuring the source
+repository on the installation:
+
+```sh
+punaro fleet-config configure --directory INSTALL_DIR --repository ABSOLUTE_GIT_DIR --yes
+punaro fleet-config publish COMMIT --directory INSTALL_DIR
+punaro fleet-config publish COMMIT --directory INSTALL_DIR --yes --confirm-preview-hash HASH
+punaro fleet-config status --directory INSTALL_DIR
+```
+
+The contract, layout, trailer markers, and project matching are in
+[fleet-global agent configuration](fleet-global-agent-config.md). The LAN
+qualification runbook is [fleet-config-lan-e2e.md](fleet-config-lan-e2e.md).
+Daemon settings remain in [configuration.md](configuration.md).
+
+On macOS 15+, ad-hoc-signed adapter binaries can complete a TCP handshake to
+a private LAN origin and still never put HTTP request bytes on the wire
+(Local Network filtering). Apple-signed `curl`/`python3` are unaffected.
+Until the adapter is signed for Local Network, Darwin hosts can reach the
+relay through loopback (SSH tunnel or a signed local forwarder).
+
 ## Run locally
 
 Use Go for the current local smoke test:

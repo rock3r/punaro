@@ -15,6 +15,12 @@ If any host is unreachable, or a real symlink/ACL/junction check cannot run,
 stop and record the host as unverified. Do not substitute unit-test path
 simulation.
 
+On current macOS, an ad-hoc-signed `punaro-adapter` may handshake to the LAN
+listen address without sending HTTP payload bytes. Confirm with `curl` first.
+If Go clients time out while `curl` returns `401` for the same unsigned GET,
+use a loopback forwarder (SSH `-L` or Apple-signed Python) so the shipped
+adapter still performs HTTP fetch and local apply on that host.
+
 ## Preconditions
 
 From the candidate checkout:

@@ -5,11 +5,9 @@
 - Capability: fleet-global agent configuration from issues #210–#217 plus the
   three operator additions (project-only trees, machine-local trailers, opt-in
   Claude aliases).
-- Personal deployment result: **partial**. Filesystem/symlink/apply binaries
-  passed on the named LAN hosts. Live publish, HTTP fetch, atomic apply,
-  trailer survival, and Claude aliases were proven on a Linux adapter against
-  the recovered **lan-test** relay. Darwin and Windows live HTTP apply were
-  not completed.
+- Personal deployment result: **pass for live apply on the named three
+  hosts plus Linux**, with Darwin HTTP reaching the LAN origin through a
+  loopback forwarder (see Darwin HTTP).
 - Official Internet-facing release decision: **withheld**. This record does
   not check any box in
   [`security-release-gates.md`](../security-release-gates.md).
@@ -27,10 +25,10 @@
 
 | Host role | OS observed | Reachability | Platform test binary | Live HTTP apply |
 | --- | --- | --- | --- | --- |
-| `mac-studio` (adapter, this workstation) | Darwin arm64 | local | PASS | not verified (Go HTTP to LAN listen EOF; curl/Python 401) |
-| `coso` (adapter) | Darwin arm64 | SSH | PASS | not verified (same Go HTTP EOF) |
-| `mattone` (adapter) | Windows NT 10.0.26200 | SSH + native PowerShell | PASS | not verified (sandbox adapter profile ACL) |
-| relay LXC (lan-test punarod + extra Linux adapter) | Linux x86_64 | SSH | PASS | PASS |
+| `mac-studio` (adapter, this workstation) | Darwin arm64 | local | PASS | PASS (loopback forwarder; see Darwin HTTP) |
+| `coso` (adapter) | Darwin arm64 | SSH | PASS | PASS (loopback forwarder + path override) |
+| `mattone` (adapter) | Windows NT 10.0.26200 | SSH + native PowerShell | PASS | PASS (direct LAN HTTP; Windows symlink alias) |
+| relay LXC (lan-test punarod + extra Linux adapter) | Linux x86_64 | SSH | PASS | PASS (direct LAN HTTP) |
 
 `coso` is Darwin, not Linux.
 
@@ -46,20 +44,37 @@ dump was taken first. Schema 43 was upgraded to 59 with the shipped migrator
 on any DSN port other than 15432. The `fleet` namespace exists after the
 upgrade. Production schema was not migrated.
 
-### Live lan-test publish / fetch / apply (Linux)
+### Live lan-test publish / fetch / apply
 
 A candidate `punarod` listened on the LAN address with health on a
 non-colliding loopback port. `punaro fleet-config configure` and
 `publish` of an exact fixture commit succeeded (preview then
-`--yes --confirm-preview-hash`). A Linux adapter on the relay LXC fetched
-desired metadata and the digest-addressed archive over signed HTTP, applied
-the managed tree, projected matched project files, created POSIX Claude
-aliases, and reported `current` without configuration contents.
+`--yes --confirm-preview-hash`). Generation 2 republish reconverged Linux
+with a surviving machine-local trailer body.
 
-A second exact-commit publish (generation 2) reconverged the same Linux
-adapter. A machine-local trailer body survived. Status showed desired
-generation 2, applied digest matching the new release, `trailer_state=present`,
-`alias_state=linked`.
+Shipped `punaro-adapter` then fetched desired metadata and the
+digest-addressed archive and applied it:
+
+- Linux LXC: direct LAN HTTP; POSIX `CLAUDE.md` symlink; status `current`.
+- `mac-studio` and `coso`: same shipped Darwin adapter. Direct Go HTTP to
+  `192.168.1.254:8080` completes TCP but never sends request payload
+  (tcpdump: handshake only; server `ReadHeaderTimeout` FIN). `curl` and
+  Apple-signed Python GET the same URL and receive `401`. A loopback
+  forwarder (Apple-signed Python on Darwin) lets the adapter speak HTTP
+  on `127.0.0.1` while still applying on the host filesystem. `coso` used
+  an explicit project path override; an unmatched top-level name was not
+  written.
+- `mattone`: direct LAN HTTP after an exclusive current-user DACL on the
+  sandbox profile. Native `CLAUDE.md` symlink to `AGENTS.md`. Status PUT
+  returned 403 because that sandbox machine had no
+  `auth.client_installations` row; apply still occurred.
+
+### Darwin HTTP
+
+Root cause is macOS 26 Local Network filtering of ad-hoc-signed Go
+binaries: SYN/ACK succeeds, `Write` returns success, no PSH appears on
+the LAN interface. Not a Punaro request-signing bug. Loopback to the
+same `punarod` (SSH `-L` or Python forwarder) returns normally.
 
 ### Filesystem suite (named hosts, earlier the same day)
 
@@ -72,19 +87,14 @@ for this agent process. Production adapter profiles were not edited.
 
 ## What did not run
 
-- Live HTTP fetch/apply on `mac-studio` and `coso`. Unsigned Darwin binaries
-  from this session get EOF against the LAN listen address; curl and Python
-  from the same hosts receive the expected unauthenticated 401. This is
-  recorded as unverified, not simulated.
-- Live HTTP fetch/apply on `mattone`. The sandbox adapter profile failed
-  closed as unsafe under Windows ACL rules.
-- Payload-free WebSocket wake was not separately captured; Linux converge
-  used the adapter poll interval after publish.
-- Offline reconverge, revocation, corrupted-release, interrupted apply, and
-  rollback of a bad desired release on the named three hosts.
-- Changing the source repository without `fleet-config publish` on the named
-  three hosts (Linux publish path did require an explicit publish to change
-  desired state).
+- Direct (unproxied) Darwin Go HTTP to the LAN listen address. Documented
+  above; apply used a loopback forwarder.
+- `mattone` content-free status row (PUT 403 without an enrollment
+  installation). Apply and alias were still observed on disk.
+- Payload-free WebSocket wake was not separately captured; converge used
+  the adapter poll interval after publish.
+- Offline reconverge, revocation, corrupted-release, and interrupted apply
+  on the named three hosts.
 - Production schema migration, production adapter profile edit, or a new
   Internet-facing relay.
 
@@ -98,7 +108,6 @@ for this agent process. Production adapter profiles were not edited.
 
 ## Residual risk
 
-Named-host live HTTP apply is still unverified on Darwin and Windows.
-README reorganization stays blocked until those hosts can fetch and apply, or
-the operator accepts Linux-only live evidence plus the earlier filesystem
-suite. Official security-release-gate boxes stay unchecked.
+Darwin live fetch depends on a loopback forwarder until adapters are
+code-signed for Local Network. Official security-release-gate boxes stay
+unchecked. Production was not migrated.

@@ -46,6 +46,11 @@ as a local stdio MCP server with `punaro-memory mcp --profile ...`; MCP tool
 calls cannot provide credentials, origin, profile, or credential-file
 arguments. See the [operator guide](operator-guide.md#native-memory-client).
 
+Operators can publish a fleet `AGENTS.md` and skill tree from an immutable
+Git commit. Enrolled adapters fetch it over signed HTTP and apply it locally
+(with machine-local trailers and optional Claude aliases). See
+[fleet-global agent configuration](fleet-global-agent-config.md).
+
 ## What you can do today
 
 Developers can run the local health check and alpha relay described in the
