@@ -231,6 +231,58 @@ class RetryEligibilityTests(unittest.TestCase):
         self.assertTrue(gate["required"])
         self.assertTrue(gate["is_success"])
 
+    def test_recommend_actions_not_ready_when_check_set_empty(self):
+        """Empty CI (pre-registration) must stay non-ready even if Bugbot is optional."""
+        actions = watch.recommend_actions(
+            pr=self._base_pr(),
+            checks_summary={
+                "all_terminal": True,
+                "failed_count": 0,
+                "pending_count": 0,
+                "passed_count": 0,
+                "skipping_count": 0,
+            },
+            failed_runs=[],
+            new_review_items=[],
+            hung_checks=[],
+            retries_used=0,
+            max_retries=3,
+            checks_terminal_elapsed=120,
+            blocking_review_items=[],
+            bugbot_gate={
+                "required": False,
+                "present": False,
+                "status": "missing",
+                "conclusion": "",
+                "is_success": False,
+            },
+        )
+
+        self.assertNotIn("stop_ready_to_merge", actions)
+        self.assertIn("idle", actions)
+
+    def test_is_pr_ready_to_merge_requires_passed_check(self):
+        ready = watch.is_pr_ready_to_merge(
+            pr=self._base_pr(),
+            checks_summary={
+                "all_terminal": True,
+                "failed_count": 0,
+                "pending_count": 0,
+                "passed_count": 0,
+                "skipping_count": 0,
+            },
+            new_review_items=[],
+            checks_terminal_elapsed=120,
+            blocking_review_items=[],
+            bugbot_gate={
+                "required": False,
+                "present": False,
+                "status": "missing",
+                "is_success": False,
+            },
+        )
+        self.assertFalse(ready)
+
     def test_recommend_actions_ready_when_bugbot_missing_not_required(self):
         actions = watch.recommend_actions(
             pr=self._base_pr(),
@@ -1130,6 +1182,7 @@ class RetryEligibilityTests(unittest.TestCase):
                 "all_terminal": True,
                 "failed_count": 0,
                 "pending_count": 0,
+                "passed_count": 2,
             },
             "bugbot_gate": {"required": False, "is_success": False},
             "blocking_review_items": [],
@@ -1137,6 +1190,22 @@ class RetryEligibilityTests(unittest.TestCase):
         }
 
         self.assertTrue(watch.is_ci_green(snapshot))
+
+    def test_is_ci_green_false_when_check_set_empty(self):
+        snapshot = {
+            "pr": {"review_decision": "APPROVED"},
+            "checks": {
+                "all_terminal": True,
+                "failed_count": 0,
+                "pending_count": 0,
+                "passed_count": 0,
+            },
+            "bugbot_gate": {"required": False, "is_success": False},
+            "blocking_review_items": [],
+            "checks_terminal_elapsed_seconds": 120,
+        }
+
+        self.assertFalse(watch.is_ci_green(snapshot))
 
     def test_run_watch_backs_off_on_unchanged_green_state(self):
         sleeps = []

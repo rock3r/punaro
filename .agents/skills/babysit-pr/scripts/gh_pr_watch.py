@@ -1411,6 +1411,11 @@ def is_pr_ready_to_merge(
         return False
     if not checks_summary["all_terminal"]:
         return False
+    # An empty check set is all_terminal with passed_count==0 (e.g. right after a
+    # push, before quality.yml jobs register). Bugbot is no longer assumed-present,
+    # so require at least one passing check before declaring readiness.
+    if int(checks_summary.get("passed_count") or 0) < 1:
+        return False
     if (
         checks_summary["failed_count"] > 0
         or checks_summary["pending_count"] > 0
@@ -1873,6 +1878,7 @@ def is_ci_green(snapshot):
     coderabbit_reviewing = bool(coderabbit_gate.get("reviewing"))
     return (
         bool(checks.get("all_terminal"))
+        and int(checks.get("passed_count") or 0) >= 1
         and int(checks.get("failed_count") or 0) == 0
         and int(checks.get("pending_count") or 0) == 0
         and not blocking_review_items
