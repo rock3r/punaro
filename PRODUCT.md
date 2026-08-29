@@ -1,7 +1,7 @@
 # Product: Punaro
 
 > What Punaro is and where it is going. Architectural authority lives in `DESIGN.md` and
-> `docs/big-brain-plan.md`; this document is the product-level view. Last updated 2026-08-23.
+> `docs/big-brain-plan.md`; this document is the product-level view. Last updated 2026-08-28.
 
 ## 1. What this is
 
@@ -46,7 +46,9 @@ Hard boundaries that define the product:
   broadcasting — preventing unattended agent-answers-agent loops. The relay bounds
   message rate and pending capacity, and retains terminal deliveries in an
   operator-inspectable dead-letter — always without parsing bodies. Opt-in role
-  discovery and direct addressing (#143) is the remaining open tracker.
+  discovery and direct addressing are shipped: machines register canonical roles,
+  bind them to live sessions, list only opted-in contacts, and fail ambiguous short
+  names closed unless the caller supplies a qualified handle.
 
 ### Attachments
 
@@ -58,12 +60,10 @@ still closed.
 
 ### The Telegram operator surface
 
-Each relay conversation surfaces as one forum topic in the operator's private chat, via a
-separately enrolled gateway (`punaro-telegram`) that long-polls the Bot API and never
-touches an agent-mailbox database. The claim-gated model below is the accepted direction,
-landing via PR #138; until that merges, `DESIGN.md` and `docs/telegram-gateway.md`
-describe the deployed route-based binding and remain the implementation authority. The
-contract:
+Each claimed relay conversation surfaces as one forum topic in the operator's private
+chat, via a separately enrolled gateway (`punaro-telegram`) that long-polls the Bot API
+and never touches an agent-mailbox database. The claim-gated model from PR #138 is now
+the shipped contract described by `DESIGN.md` and `docs/telegram-gateway.md`:
 
 - **A conversation IS its topic.** One topic ↔ one conversation, held in durable,
   content-free gateway state. No main-chat fallback, no picker, no routing by inference;
@@ -83,7 +83,9 @@ contract:
   (the Telegram `update_id` is the relay idempotency key, marked processed only after the
   append succeeds), so retries and crashes neither duplicate nor lose mail. Outbound to
   Telegram is deliberately at-least-once (no Bot API send idempotency key; ack only after
-  send).
+  send). Message-less updates advance durably, permanent inbound/outbound failures are
+  isolated without wedging other topics, and transient failures retain the exact retry
+  identity and remain visible to doctor.
 - **Agent content stays inert:** rendered as escaped HTML, entity detection off, 32 KiB
   bound with splitting. Agents never call the Bot API and never see tokens, chat IDs, or
   thread IDs. Operator replies-to arrive as inert envelope metadata. Credentials are
@@ -146,25 +148,26 @@ Mail carries the conversation; Big Brain carries the knowledge.
 
 ## 5. Where it stands and where it goes
 
-Alpha, unpublished, single live deployment. The mail pillar is furthest along: relay,
-adapter, durable roles, targeted routing, rate/capacity/dead-letter bounds, and the
-enrolled Telegram gateway are live; the claim/`user-telegram` model (PR #138) is landing
-now, and once it merges fresh topics will be created through the claim flow — no legacy
-routes are carried forward. Big Brain has the full canonical store, proposal machinery, lexical retrieval,
-and native client built, but runs dark pending its enablement slices.
+The signed `v0.1.0-alpha.11` prerelease is published and runs on the personal four-machine
+fleet: the Punaro LXC, Mac Studio, MacBook/Coso, and Mattone. The mail pillar includes the
+PostgreSQL relay, signed adapters, durable roles and discovery, targeted routing,
+rate/capacity/dead-letter bounds, claim-gated `user-telegram` topics, and the enrolled
+Telegram gateway. Big Brain has the full canonical store, proposal machinery, lexical
+retrieval, and native client built, but runs dark pending its enablement slices.
 
-The alpha release candidate now has a shared read-only doctor contract for the
-Linux server and Telegram gateway plus macOS/Linux/Windows clients. It verifies
-release/update provenance, service and relay readiness, mailbox/plugin/skill
-parity, recovery state, and fleet compatibility without reading content or
-granting repair authority. The four-machine signed-release drill remains the
-deployment evidence gate.
+The shared read-only doctor contract covers the Linux server and Telegram gateway,
+macOS/Linux/Windows adapters, bootstrap slots and recovery, plugins and skills, and
+offline fleet compatibility. The alpha.11 release record captures a green four-machine
+matrix plus signed update, rollback, interrupted-recovery, durable-role, and Telegram
+multi-topic drills without reading content or granting repair authority.
 
 Runway, roughly in order:
 
-- **Mail:** tighten outbound sends to require a completed claim (post-#138 follow-up);
-  decide whether the gateway gets the relay's park-and-continue semantic instead of
-  head-of-line blocking on a permanently failing delivery; role discovery (#143).
+- **Mail:** finish the fleet-wide Waypost migration after the rolling legacy mailbox
+  compatibility window; keep attachment production authority closed until its separate
+  release gates and live drills pass; continue hardening provider-edge observability
+  without adding content to diagnostics; and tighten Telegram outbound sends to require
+  a completed claim after the post-adopt soak.
 - **Big Brain:** end-to-end testing, integration into the agent skills, and proving it
   in real day-to-day use; configuring a production embedding provider so the built
   semantic slices light up; then the remaining remote MCP transport slices (the OAuth

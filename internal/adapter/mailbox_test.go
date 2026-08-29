@@ -124,7 +124,7 @@ func TestCLIMailboxSendsTelegramInboundMetadata(t *testing.T) {
 		FromParticipant:          relay.TelegramUserParticipant,
 		InReplyToEndpoint:        "agent/sender",
 		InReplyToPunaroMessageID: "message-0",
-		TelegramThreadID:         795446,
+		TelegramThreadID:         700001,
 		Body:                     "untrusted body",
 		CreatedAt:                createdAt,
 	}); err != nil {
@@ -137,7 +137,7 @@ func TestCLIMailboxSendsTelegramInboundMetadata(t *testing.T) {
 	if got.FromEndpoint != relay.TelegramUserParticipant || got.FromParticipant != relay.TelegramUserParticipant {
 		t.Fatalf("from = %#v", got)
 	}
-	if got.InReplyToEndpoint != "agent/sender" || got.InReplyToPunaroMessageID != "message-0" || got.TelegramThreadID != 795446 {
+	if got.InReplyToEndpoint != "agent/sender" || got.InReplyToPunaroMessageID != "message-0" || got.TelegramThreadID != 700001 {
 		t.Fatalf("reply metadata = %#v body=%s", got, stdin)
 	}
 }

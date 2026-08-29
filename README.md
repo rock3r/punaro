@@ -21,8 +21,9 @@ with its own mailbox implementation and with the central Punaro relay. The
 accepted target later adds an independently optional OAuth-scoped remote MCP
 adapter over Punaro's own API.
 
-> Status: alpha implementation under an accepted PostgreSQL/trusted-relay/Big
-> Brain migration plan. Enrolled adapters can exchange durable
+> Status: signed prerelease `v0.1.0-alpha.11` is deployed across the personal
+> four-machine fleet under the accepted PostgreSQL/trusted-relay/Big Brain
+> migration plan. Enrolled adapters can exchange durable
 > text through the loopback relay, with signed requests, payload-free wake
 > hints, local Waypost handoff (with rolling legacy `agent-mailbox`
 > compatibility), and a separately enrolled Telegram
@@ -102,7 +103,7 @@ read-only secret files. `punarod` is a non-default reference profile; the
 supported daemon lifecycle is the host-local `punaro` workflow.
 
 The separate PostgreSQL Compose file is integration-test infrastructure only;
-it does not change the SQLite relay or the alpha deployment:
+it does not change any running relay or deployed environment:
 
 ```sh
 make test-postgres
@@ -113,7 +114,7 @@ PostgreSQL substrate and dark control-plane contract tests inside the isolated
 network, and removes the database volume afterward. The tests cover migration
 compatibility, explicit project scopes, operation-bound idempotency, closed
 audit records, queue ceilings, and fenced job leases. It requires Docker
-Compose v2 and does not switch the active SQLite relay.
+Compose v2 and does not switch any running relay.
 
 ## Configuration and secrets
 

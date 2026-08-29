@@ -759,11 +759,11 @@ func TestOpenAddsClaimExecutionChatIDOnExistingDatabase(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = state.Close() })
-	if err := state.PersistClaimThread("conversation-1", 55, 795446); err != nil {
+	if err := state.PersistClaimThread("conversation-1", 55, 700001); err != nil {
 		t.Fatal(err)
 	}
 	execution, found, err := state.ClaimExecution("conversation-1")
-	if err != nil || !found || execution.Phase != ClaimPhaseTopicCreated || execution.ThreadID != 795446 || execution.ChatID != 55 {
+	if err != nil || !found || execution.Phase != ClaimPhaseTopicCreated || execution.ThreadID != 700001 || execution.ChatID != 55 {
 		t.Fatalf("upgraded execution=%#v found=%v err=%v", execution, found, err)
 	}
 }
@@ -778,14 +778,14 @@ func TestStatePersistsClaimThreadAndOutboundMap(t *testing.T) {
 	if _, err := state.InsertPendingExecution("conversation-1", "How is it going"); err != nil {
 		t.Fatal(err)
 	}
-	if err := state.PersistClaimThread("conversation-1", 55, 795446); err != nil {
+	if err := state.PersistClaimThread("conversation-1", 55, 700001); err != nil {
 		t.Fatal(err)
 	}
 	execution, found, err := state.ClaimExecution("conversation-1")
-	if err != nil || !found || execution.Phase != ClaimPhaseTopicCreated || execution.ThreadID != 795446 || execution.ChatID != 55 || !execution.SkipReserve || execution.DisplayName != "How is it going" {
+	if err != nil || !found || execution.Phase != ClaimPhaseTopicCreated || execution.ThreadID != 700001 || execution.ChatID != 55 || !execution.SkipReserve || execution.DisplayName != "How is it going" {
 		t.Fatalf("after thread persist %#v found=%v err=%v", execution, found, err)
 	}
-	if err := state.PersistClaimRoute(55, 795446, "conversation-1"); err != nil {
+	if err := state.PersistClaimRoute(55, 700001, "conversation-1"); err != nil {
 		t.Fatal(err)
 	}
 	if err := state.MarkClaimComplete("conversation-1"); err != nil {
@@ -1152,7 +1152,7 @@ func TestStatePersistClaimRouteReusesExistingConversationThread(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = state.Close() })
-	if err := state.SetRoute(55, 795446, "conversation-1"); err != nil {
+	if err := state.SetRoute(55, 700001, "conversation-1"); err != nil {
 		t.Fatal(err)
 	}
 	if _, _, err := state.ReserveClaimAndConsumeTokenMust(t, "conversation-1"); err != nil {
@@ -1165,10 +1165,10 @@ func TestStatePersistClaimRouteReusesExistingConversationThread(t *testing.T) {
 		t.Fatal(err)
 	}
 	execution, found, err := state.ClaimExecution("conversation-1")
-	if err != nil || !found || execution.Phase != ClaimPhaseRoutePersisted || execution.ThreadID != 795446 {
+	if err != nil || !found || execution.Phase != ClaimPhaseRoutePersisted || execution.ThreadID != 700001 {
 		t.Fatalf("reuse execution=%#v found=%v err=%v", execution, found, err)
 	}
-	conversation, found, err := state.Route(55, 795446)
+	conversation, found, err := state.Route(55, 700001)
 	if err != nil || !found || conversation != "conversation-1" {
 		t.Fatalf("kept route conversation=%q found=%v err=%v", conversation, found, err)
 	}
@@ -1184,18 +1184,18 @@ func TestAdoptExistingRoutePersistsAdoptingFence(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = state.Close() })
-	if err := state.SetRoute(55, 795446, "conversation-1"); err != nil {
+	if err := state.SetRoute(55, 700001, "conversation-1"); err != nil {
 		t.Fatal(err)
 	}
 	threadID, err := state.AdoptExistingRoute("conversation-1", 55)
-	if err != nil || threadID != 795446 {
+	if err != nil || threadID != 700001 {
 		t.Fatalf("adopt fence thread=%d err=%v", threadID, err)
 	}
 	execution, found, err := state.ClaimExecution("conversation-1")
-	if err != nil || !found || execution.Phase != ClaimPhaseAdopting || execution.ThreadID != 795446 || execution.ChatID != 55 || !execution.SkipReserve {
+	if err != nil || !found || execution.Phase != ClaimPhaseAdopting || execution.ThreadID != 700001 || execution.ChatID != 55 || !execution.SkipReserve {
 		t.Fatalf("adopting fence execution=%#v found=%v err=%v", execution, found, err)
 	}
-	if err := state.SetRoute(55, 795446, "conversation-other"); err == nil {
+	if err := state.SetRoute(55, 700001, "conversation-other"); err == nil {
 		t.Fatal("adopting fence allowed a remapped route")
 	}
 	if err := state.PersistClaimAdoptReserved("conversation-1"); err != nil {

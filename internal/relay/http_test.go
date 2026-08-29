@@ -587,9 +587,9 @@ func TestHTTPTelegramClaimAPIsAndUserTelegramSend(t *testing.T) {
 	if lease.Code != http.StatusOK || json.NewDecoder(lease.Body).Decode(&page) != nil || len(page.Deliveries) != 1 || page.Deliveries[0].RecipientEndpoint != TelegramGatewayEndpoint {
 		t.Fatalf("gateway lease=%d %#v %s", lease.Code, page, lease.Body.String())
 	}
-	inbound := serveSigned(t, handler, privateTG, "machine-telegram", http.MethodPost, "/v1/conversations/"+conversation.ID+"/telegram-inbound", `{"from_endpoint":"telegram/primary","from_participant":"user-telegram","body":"ship it","in_reply_to_punaro_message_id":"`+sent.ID+`","in_reply_to_endpoint":"agent/a/session","telegram_thread_id":795446}`, "inbound", "telegram-update:7")
+	inbound := serveSigned(t, handler, privateTG, "machine-telegram", http.MethodPost, "/v1/conversations/"+conversation.ID+"/telegram-inbound", `{"from_endpoint":"telegram/primary","from_participant":"user-telegram","body":"ship it","in_reply_to_punaro_message_id":"`+sent.ID+`","in_reply_to_endpoint":"agent/a/session","telegram_thread_id":700001}`, "inbound", "telegram-update:7")
 	var inboundMessage Message
-	if inbound.Code != http.StatusCreated || json.NewDecoder(inbound.Body).Decode(&inboundMessage) != nil || inboundMessage.FromParticipant != TelegramUserParticipant || inboundMessage.InReplyToPunaroMessageID != sent.ID || inboundMessage.InReplyToEndpoint != "agent/a/session" || inboundMessage.TelegramThreadID != 795446 {
+	if inbound.Code != http.StatusCreated || json.NewDecoder(inbound.Body).Decode(&inboundMessage) != nil || inboundMessage.FromParticipant != TelegramUserParticipant || inboundMessage.InReplyToPunaroMessageID != sent.ID || inboundMessage.InReplyToEndpoint != "agent/a/session" || inboundMessage.TelegramThreadID != 700001 {
 		t.Fatalf("inbound=%d %s", inbound.Code, inbound.Body.String())
 	}
 	inboundRetry := serveSigned(t, handler, privateTG, "machine-telegram", http.MethodPost, "/v1/conversations/"+conversation.ID+"/telegram-inbound", `{"from_endpoint":"telegram/primary","from_participant":"user-telegram","body":"ship it"}`, "inbound-retry", "telegram-update:7")
@@ -606,7 +606,7 @@ func TestHTTPTelegramClaimAPIsAndUserTelegramSend(t *testing.T) {
 		{"from_participant", `{"from_endpoint":"agent/a/session","body":"nope","from_participant":"user-telegram"}`},
 		{"in_reply_to_punaro_message_id", `{"from_endpoint":"agent/a/session","body":"nope","in_reply_to_punaro_message_id":"` + sent.ID + `"}`},
 		{"in_reply_to_endpoint", `{"from_endpoint":"agent/a/session","body":"nope","in_reply_to_endpoint":"agent/a/session"}`},
-		{"telegram_thread_id", `{"from_endpoint":"agent/a/session","body":"nope","telegram_thread_id":795446}`},
+		{"telegram_thread_id", `{"from_endpoint":"agent/a/session","body":"nope","telegram_thread_id":700001}`},
 	} {
 		if extra := serveSigned(t, handler, privateA, "machine-a", http.MethodPost, "/v1/conversations/"+conversation.ID+"/messages", field.body, "send-meta-"+field.name, "send-meta-"+field.name); extra.Code != http.StatusBadRequest {
 			t.Fatalf("agent %s send=%d %s", field.name, extra.Code, extra.Body.String())
@@ -618,7 +618,7 @@ func TestHTTPTelegramClaimAPIsAndUserTelegramSend(t *testing.T) {
 		t.Fatalf("inbound lease=%d %s", leased.Code, leased.Body.String())
 	}
 	got := inboundPage.Deliveries[0].Message
-	if got.ID != inboundMessage.ID || got.FromEndpoint != TelegramGatewayEndpoint || got.FromParticipant != TelegramUserParticipant || got.InReplyToPunaroMessageID != sent.ID || got.InReplyToEndpoint != "agent/a/session" || got.TelegramThreadID != 795446 {
+	if got.ID != inboundMessage.ID || got.FromEndpoint != TelegramGatewayEndpoint || got.FromParticipant != TelegramUserParticipant || got.InReplyToPunaroMessageID != sent.ID || got.InReplyToEndpoint != "agent/a/session" || got.TelegramThreadID != 700001 {
 		t.Fatalf("leased inbound=%#v", got)
 	}
 }

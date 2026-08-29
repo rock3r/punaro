@@ -306,7 +306,7 @@ func TestClientCreateForumTopicReturnsThreadIDWithoutGetForumTopic(t *testing.T)
 		if request.ChatID != 55 || request.Name != "How is it going" {
 			t.Fatalf("createForumTopic=%#v", request)
 		}
-		_, _ = w.Write([]byte(`{"ok":true,"result":{"message_thread_id":795446,"name":"How is it going"}}`))
+		_, _ = w.Write([]byte(`{"ok":true,"result":{"message_thread_id":700001,"name":"How is it going"}}`))
 	}))
 	defer server.Close()
 	client, err := NewClient(server.URL, "secret", server.Client())
@@ -314,7 +314,7 @@ func TestClientCreateForumTopicReturnsThreadIDWithoutGetForumTopic(t *testing.T)
 		t.Fatal(err)
 	}
 	threadID, err := client.CreateForumTopic(context.Background(), 55, "How is it going")
-	if err != nil || threadID != 795446 {
+	if err != nil || threadID != 700001 {
 		t.Fatalf("thread_id=%d err=%v", threadID, err)
 	}
 	if seen["/botsecret/getForumTopic"] != 0 || seen["/botsecret/createForumTopic"] != 1 {

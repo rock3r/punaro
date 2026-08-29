@@ -1091,9 +1091,11 @@ sender.
 Adopt of the two live routes is fence-legal only in this order: rename the
 keeper while the non-keeper is still unnamed; run `punaro-relay-adopt-prepare
 --drop-role role/telegram-codex --yes` on the non-keeper; then
-`punaro-telegram adopt` on `dae86ecc-05ff-4431-967a-584e2cd82916` (thread
-795446) and `e5c269b6-7e4c-450d-82bb-c25209096c10` (thread 795625). Adopt
-never calls `createForumTopic`.
+`punaro-telegram adopt` on `<KEEPER_CONVERSATION_ID>` (thread
+`<KEEPER_THREAD_ID>`) and `<NON_KEEPER_CONVERSATION_ID>` (thread
+`<NON_KEEPER_THREAD_ID>`). Resolve those operator-protected values from the
+live gateway state; never record them in source. Adopt never calls
+`createForumTopic`.
 
 ## Local adapter boundary
 
