@@ -177,6 +177,22 @@ try {
     if ([System.IO.File]::ReadAllText($managedPath) -ne $managedGuidance) { throw 'Windows managed guidance replacement was not idempotent' }
     if (@(Get-ChildItem -LiteralPath $managedProject -Filter 'AGENTS.md.punaro-backup.*' -File).Count -ne 1) { throw 'Windows idempotent managed replacement created another recovery copy' }
     if (Test-Path -LiteralPath (Join-Path $managedProject '.agents')) { throw 'Windows guidance-only install copied project skills' }
+    $legacyProject = Join-Path $fixture 'legacy-encoded-guidance'
+    [System.IO.Directory]::CreateDirectory($legacyProject) | Out-Null
+    $legacyPath = Join-Path $legacyProject 'AGENTS.md'
+    $legacyPrefix = [System.Text.Encoding]::ASCII.GetBytes('# Caf')
+    $legacySuffix = [System.Text.Encoding]::ASCII.GetBytes("`r`n<!-- punaro-agent-guidance:start -->`r`nUse the local ``agent-mailbox`` MCP.`r`n<!-- punaro-agent-guidance:end -->`r`n# Keep after`r`n")
+    [byte[]]$legacyBytes = @($legacyPrefix) + [byte]0xe9 + @($legacySuffix)
+    [System.IO.File]::WriteAllBytes($legacyPath, $legacyBytes)
+    $legacyBlocked = $false
+    try {
+        & (Join-Path $repoDir 'scripts\install-agent-guidance.ps1') -Directory $legacyProject -GuidanceOnly -ReplaceManaged
+    } catch {
+        if ($_.Exception.Message.Contains('existing guidance is not valid UTF-8')) { $legacyBlocked = $true } else { throw }
+    }
+    if (-not $legacyBlocked) { throw 'Windows guidance installer accepted a legacy-encoded managed file' }
+    if ([Convert]::ToBase64String([System.IO.File]::ReadAllBytes($legacyPath)) -ne [Convert]::ToBase64String($legacyBytes)) { throw 'Windows guidance installer changed a legacy-encoded file' }
+    if (@(Get-ChildItem -LiteralPath $legacyProject -Filter 'AGENTS.md.punaro-backup.*' -File).Count -ne 0) { throw 'Windows rejected legacy encoding after starting replacement' }
     $signatureProject = Join-Path $fixture 'signature-guidance'
     [System.IO.Directory]::CreateDirectory($signatureProject) | Out-Null
     $signaturePath = Join-Path $signatureProject 'AGENTS.md'

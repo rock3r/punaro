@@ -47,7 +47,13 @@ function Add-Guidance([string]$Path, [string]$Block, [bool]$ReplaceExisting) {
     if (Test-Path -LiteralPath $Path) {
         $existingBytes = [System.IO.File]::ReadAllBytes($Path)
         $hasUtf8Bom = $existingBytes.Length -ge 3 -and $existingBytes[0] -eq 0xef -and $existingBytes[1] -eq 0xbb -and $existingBytes[2] -eq 0xbf
-        $existing = [System.IO.File]::ReadAllText($Path)
+        $utf8Offset = if ($hasUtf8Bom) { 3 } else { 0 }
+        try {
+            $strictUtf8 = New-Object System.Text.UTF8Encoding($false, $true)
+            $existing = $strictUtf8.GetString($existingBytes, $utf8Offset, $existingBytes.Length - $utf8Offset)
+        } catch [System.Text.DecoderFallbackException] {
+            Stop-Guidance "existing guidance is not valid UTF-8; refusing to rewrite: $Path"
+        }
         $range = Get-MarkedGuidance -Text $existing -Path $Path
         if ($null -ne $range) {
             $marked = $range.Text

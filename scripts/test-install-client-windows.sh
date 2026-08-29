@@ -69,6 +69,10 @@ grep -Fq -- ".punaro-backup." "$guidance_installer" || {
 	printf '%s\n' 'Windows guidance replacement does not retain a recovery copy' >&2
 	exit 1
 }
+grep -Fq -- "existing guidance is not valid UTF-8" "$guidance_installer" || {
+	printf '%s\n' 'Windows guidance replacement does not fail closed on unsupported legacy encoding' >&2
+	exit 1
+}
 
 for retired_package in 'cmd\punaro-dpapi' 'cmd\punaro-directory' 'cmd\punaro-attachment' 'cmd\punaro-keychain'; do
 	if grep -F "Build-PunaroBinary" "$installer" | grep -Fq "$retired_package"; then
