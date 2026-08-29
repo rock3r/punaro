@@ -103,7 +103,7 @@ read-only secret files. `punarod` is a non-default reference profile; the
 supported daemon lifecycle is the host-local `punaro` workflow.
 
 The separate PostgreSQL Compose file is integration-test infrastructure only;
-it does not change the SQLite relay or the alpha deployment:
+it does not change any running relay or deployed environment:
 
 ```sh
 make test-postgres
@@ -114,7 +114,7 @@ PostgreSQL substrate and dark control-plane contract tests inside the isolated
 network, and removes the database volume afterward. The tests cover migration
 compatibility, explicit project scopes, operation-bound idempotency, closed
 audit records, queue ceilings, and fenced job leases. It requires Docker
-Compose v2 and does not switch the active SQLite relay.
+Compose v2 and does not switch any running relay.
 
 ## Configuration and secrets
 
