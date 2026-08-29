@@ -40,8 +40,9 @@ REVIEW_BOT_LOGIN_KEYWORDS = {
 # Login / check-name keyword fragments for CodeRabbit. CodeRabbit is treated as
 # a *presence-conditional* gate, not an assumed-present one: it only gates a PR
 # when it shows signs of life (a CodeRabbit CI check, a reaction, or an authored
-# comment). When dormant, the watcher behaves as a bugbot+codex-only gate, so
-# the gate degrades gracefully if CodeRabbit is later removed from the repo.
+# comment). When dormant, the watcher behaves as a Codex-only gate (plus any
+# presence-conditional Bugbot check), so the gate degrades gracefully if
+# CodeRabbit is later removed from the repo.
 CODERABBIT_LOGIN_KEYWORDS = {
     "coderabbit",
 }
@@ -49,10 +50,10 @@ CODERABBIT_CHECK_KEYWORDS = {
     "coderabbit",
 }
 # Workflow name keyword fragments used to identify Cursor Bugbot CI runs.
-# The merge gate is hard-blocked unless the latest Bugbot run for the current
-# head SHA is `completed` with conclusion `success`. Cursor currently reports
-# a clean manual Bugbot review as a neutral/skipped check, though, so the
-# accompanying SHA-matched clean review is also accepted (see below).
+# Bugbot is retired as an assumed-present gate: absence does not block merge.
+# If a Bugbot check still appears on a PR, it is presence-conditional (required
+# only while present). A clean manual Bugbot review reported as neutral/skipped
+# is still reconciled via the SHA-matched clean review path below.
 BUGBOT_WORKFLOW_KEYWORDS = {
     "cursor",
     "bugbot",
@@ -114,6 +115,18 @@ HUNG_CHECK_THRESHOLDS_SECONDS = {
 RETRY_ELIGIBLE_WORKFLOW_KEYWORDS = {
     "e2e",
 }
+
+# Expected jobs from .github/workflows/quality.yml. Readiness requires every
+# named quality job to be present and passed so a lone third-party check (e.g.
+# Bugbot) cannot satisfy merge after Bugbot stopped being assumed-present.
+QUALITY_WORKFLOW_NAME = "quality"
+QUALITY_JOB_NAMES = frozenset({
+    "Go tests and analysis",
+    "PostgreSQL integration",
+    "Complete product E2E",
+    "Configuration lint",
+    "Windows client build",
+})
 # Login keyword fragments for Codex bot, used for emoji reaction gate detection.
 # Codex signals it is reviewing a PR by adding a 👀 reaction; it either posts a
 # review with comments (issues found) or removes the reaction silently (clean).
@@ -435,11 +448,43 @@ def is_pending_check(check):
     return bucket == "pending" or state in PENDING_CHECK_STATES
 
 
+def is_quality_job_check(check):
+    """Return whether a check is one of the expected quality.yml jobs."""
+    if not isinstance(check, dict):
+        return False
+    name = str(check.get("name") or "")
+    if name not in QUALITY_JOB_NAMES:
+        return False
+    workflow = str(check.get("workflow") or "").lower()
+    # Prefer an explicit quality workflow label when present; still accept the
+    # known job name if workflow is blank (some payloads omit it).
+    return (not workflow) or workflow == QUALITY_WORKFLOW_NAME
+
+
+def quality_jobs_passed(checks):
+    """True only when every expected quality.yml job is present and passed."""
+    by_name = {}
+    for check in checks:
+        if not is_quality_job_check(check):
+            continue
+        name = str(check.get("name") or "")
+        by_name[name] = check
+    if set(by_name) != QUALITY_JOB_NAMES:
+        return False
+    for check in by_name.values():
+        bucket = str(check.get("bucket") or "").lower()
+        state = str(check.get("state") or "").upper()
+        if bucket != "pass" and state != "SUCCESS":
+            return False
+    return True
+
+
 def summarize_checks(checks):
     pending_count = 0
     failed_count = 0
     passed_count = 0
     skipping_count = 0
+    quality_passed_count = 0
     for check in checks:
         bucket = str(check.get("bucket") or "").lower()
         if is_pending_check(check):
@@ -448,6 +493,8 @@ def summarize_checks(checks):
             failed_count += 1
         elif bucket == "pass":
             passed_count += 1
+            if is_quality_job_check(check):
+                quality_passed_count += 1
         elif bucket in ("neutral", "skipping"):
             skipping_count += 1
     return {
@@ -455,6 +502,8 @@ def summarize_checks(checks):
         "failed_count": failed_count,
         "passed_count": passed_count,
         "skipping_count": skipping_count,
+        "quality_passed_count": quality_passed_count,
+        "quality_jobs_passed": quality_jobs_passed(checks),
         "all_terminal": pending_count == 0,
     }
 
@@ -575,7 +624,7 @@ def summarize_bugbot_gate_from_checks(checks):
 
     if not bugbot_checks:
         return {
-            "required": True,
+            "required": False,
             "present": False,
             "status": "missing",
             "conclusion": "",
@@ -648,7 +697,7 @@ def summarize_bugbot_gate_from_runs(runs, head_sha):
 
     if not bugbot_runs:
         return {
-            "required": True,
+            "required": False,
             "present": False,
             "status": "missing",
             "conclusion": "",
@@ -779,8 +828,9 @@ def summarize_coderabbit_gate(checks, reactions):
     when it shows signs of life: a CodeRabbit CI check, or a reaction from the
     CodeRabbit bot. (Authored review comments are surfaced and block merge
     independently via the normal review-item path.) When CodeRabbit is dormant
-    the gate is inert and the watcher behaves as a bugbot+codex-only gate, so
-    the watcher stays correct if CodeRabbit is later removed.
+    the gate is inert and the watcher behaves as a Codex-only gate (plus any
+    presence-conditional Bugbot check), so the watcher stays correct if
+    CodeRabbit is later removed.
 
     `reviewing` is True only while CodeRabbit appears to still be working: its
     CI check is pending, or it has an active 👀 (eyes) reaction on the PR. A
@@ -1154,6 +1204,24 @@ def is_actionable_review_bot_login(login):
     return any(keyword in lower_login for keyword in REVIEW_BOT_LOGIN_KEYWORDS)
 
 
+def is_inert_bugbot_notice(item):
+    """Return True for retired Bugbot enablement/upsell notices that must not block merge."""
+    if not isinstance(item, dict):
+        return False
+    if str(item.get("kind") or "") != "issue_comment":
+        return False
+    if str(item.get("author") or "").lower() != CURSOR_BUGBOT_LOGIN:
+        return False
+    body = str(item.get("body") or "")
+    lower = body.lower()
+    return (
+        "BUGBOT_FREE_TIER_DISABLED_UPSELL" in body
+        or "bugbot is not enabled for your account" in lower
+        or "bugbot couldn't run" in lower
+        or "github account mismatch" in lower
+    )
+
+
 def is_trusted_human_review_author(item, authenticated_login):
     _ = authenticated_login
     author = str(item.get("author") or "")
@@ -1294,6 +1362,11 @@ def fetch_new_review_items(pr, state, fresh_state, authenticated_login=None):
             seen_review.add(item_id)
             seen_review_updated_at[item_id] = item_updated_at
             continue
+        if is_inert_bugbot_notice(item):
+            if kind == "issue_comment":
+                seen_issue.add(item_id)
+                seen_issue_updated_at[item_id] = item_updated_at
+            continue
         if kind == "review" and str(item.get("review_state") or "") == "APPROVED":
             seen_review.add(item_id)
             seen_review_updated_at[item_id] = item_updated_at
@@ -1385,6 +1458,11 @@ def is_pr_ready_to_merge(
     if pr["closed"] or pr["merged"]:
         return False
     if not checks_summary["all_terminal"]:
+        return False
+    # Bugbot is no longer assumed-present, so an empty/pre-registration check set
+    # (or a lone third-party pass) must not declare readiness. Require every
+    # expected quality.yml job to be present and passed.
+    if not bool(checks_summary.get("quality_jobs_passed")):
         return False
     if (
         checks_summary["failed_count"] > 0
@@ -1848,6 +1926,7 @@ def is_ci_green(snapshot):
     coderabbit_reviewing = bool(coderabbit_gate.get("reviewing"))
     return (
         bool(checks.get("all_terminal"))
+        and bool(checks.get("quality_jobs_passed"))
         and int(checks.get("failed_count") or 0) == 0
         and int(checks.get("pending_count") or 0) == 0
         and not blocking_review_items

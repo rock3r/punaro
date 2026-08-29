@@ -74,13 +74,13 @@ python3 .agents/skills/babysit-pr/scripts/gh_pr_watch.py --pr 42 --once
 | `stop_ready_to_merge` | CI green, no blocking reviews, no conflicts — the only positive readiness verdict. Before acting on it, run the full Punaro gate locally on the PR head (a PR can go green without any babysitter push, and the gate must still pass before merge) |
 | `stop_exhausted_retries` | Flaky reruns hit the retry limit — user must investigate |
 | `stop_non_retryable_failure` | Terminal failure is not in retry-eligible workflows — diagnose/fix before continuing |
-| `stop_bugbot_not_green` | Cursor Bugbot is not clean — do not merge |
+| `stop_bugbot_not_green` | A *present* Bugbot check is not clean — do not merge (Bugbot is retired as an assumed-present gate; absence does not emit this) |
 | `stop_session_timeout` | `--max-session-minutes` elapsed (default 90 min) — stop and report |
 | `diagnose_hung_check` | A pending check exceeded its hung threshold — stop and report |
 | `diagnose_merge_conflict` | PR is merge-conflicted (`CONFLICTING` / `DIRTY`) — resolve before waiting on checks |
 | `diagnose_branch_behind` | PR branch is behind its base — rebase onto the PR's base ref (batch with any pending fixes) |
 | `diagnose_skipping_checks` | One or more checks completed with `neutral`/`skipping` — investigate why |
-| `wait_bugbot` | Bugbot still running — do not push or merge |
+| `wait_bugbot` | A *present* Bugbot check is still running — do not push or merge |
 | `wait_codex` | Codex is still reviewing (👀 reaction present) — do not push or merge |
 | `wait_coderabbit` | CodeRabbit is still reviewing — do not push or merge |
 
@@ -142,14 +142,20 @@ push is immediately followed by a second bot-fix push.
 
 **Never merge until every present review bot reports clean.**
 
-### Bugbot (CI check)
+### Bugbot (retired as assumed-present; presence-conditional)
+
+Cursor Bugbot is **not** required on every PR. A missing Bugbot check does not
+block merge, and Bugbot enablement/upsell / account-mismatch notices from
+`cursor[bot]` are inert (do not treat them as review feedback).
+
+If a Bugbot CI check *does* appear on a PR:
 
 - Still in progress → keep polling, do not push.
 - `NEUTRAL` → it found potential issues. Read the inline comments from `cursor[bot]`, fix
   every reported issue locally, run the full Punaro gate, then push once.
-- `SKIPPING` → treat as **not green**; Bugbot may have posted comments before skipping —
-  check `gh api repos/{owner}/{repo}/pulls/{pr}/comments` for `cursor[bot]` comments and
-  fix them; if none exist, re-request review or ask the user.
+- `SKIPPING` → treat as **not green** while the check is present; Bugbot may have posted
+  comments before skipping — check `gh api repos/{owner}/{repo}/pulls/{pr}/comments` for
+  `cursor[bot]` comments and fix them; if none exist, re-request review or ask the user.
 - `SUCCESS` (or a SHA-matched clean manual Bugbot review — the watcher accepts both) →
   gate is clear.
 
@@ -163,9 +169,9 @@ comments → satisfied. Reaction removed with comments → fix them under push d
 ### CodeRabbit (presence-conditional)
 
 CodeRabbit gates a PR only when it shows signs of life (a CodeRabbit check, reaction, or
-authored comment); when dormant the watcher degrades to a Bugbot+Codex-only gate. While
-`coderabbit_gate.reviewing` is `true` (`wait_coderabbit`), do not push or merge; treat its
-comments like any other bot comments.
+authored comment); when dormant the watcher degrades to a Codex-only gate (plus any
+presence-conditional Bugbot check). While `coderabbit_gate.reviewing` is `true`
+(`wait_coderabbit`), do not push or merge; treat its comments like any other bot comments.
 
 ## Decision rules
 
@@ -186,7 +192,7 @@ See `references/heuristics.md` for the full classification checklist:
 
 The watcher surfaces feedback from:
 
-- **cursor[bot]** — Cursor Bugbot (CI check-based code review)
+- **cursor[bot]** — Cursor Bugbot when present (CI check-based); enablement/upsell notices are inert
 - **chatgpt-codex-connector[bot]** — OpenAI Codex (emoji reaction-based code review)
 - **coderabbitai** — CodeRabbit (presence-conditional review)
 - Trusted humans: authors with `OWNER`, `MEMBER`, or `COLLABORATOR` association
@@ -233,7 +239,7 @@ Example snapshot payload shape:
   "pr": { "number": 42, "head_sha": "abc123", "mergeable": "MERGEABLE" },
   "checks": { "pending_count": 0, "failed_count": 1, "passed_count": 8, "skipping_count": 0, "all_terminal": true },
   "failed_runs": [{ "run_id": 123, "workflow_name": "CI", "conclusion": "failure", "retry_eligible": false }],
-  "bugbot_gate": { "status": "completed", "conclusion": "success", "is_success": true },
+  "bugbot_gate": { "required": false, "present": false, "status": "missing", "is_success": false },
   "codex_gate": { "reviewing": false, "status": "idle" },
   "coderabbit_gate": { "reviewing": false },
   "hung_checks": [],
