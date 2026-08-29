@@ -1039,6 +1039,118 @@ func (c *HTTPRelayClient) addAccessCookies(headers http.Header) {
 	}
 }
 
+const maxFleetReleaseBytes = 8 << 20
+
+// FleetDesired fetches content-free desired-revision metadata.
+func (c *HTTPRelayClient) FleetDesired(ctx context.Context) (relay.FleetDesiredMetadata, error) {
+	var payload struct {
+		Generation   int64  `json:"generation"`
+		Digest       string `json:"digest"`
+		SourceCommit string `json:"source_commit"`
+		SkillCount   int    `json:"skill_count"`
+		TotalBytes   int64  `json:"total_bytes"`
+	}
+	if _, err := c.doSignedEmpty(ctx, http.MethodGet, "/v1/fleet-config/desired", "application/json", 32<<10, &payload); err != nil {
+		return relay.FleetDesiredMetadata{}, err
+	}
+	return relay.FleetDesiredMetadata{
+		Generation:   payload.Generation,
+		Digest:       payload.Digest,
+		SourceCommit: payload.SourceCommit,
+		SkillCount:   payload.SkillCount,
+		TotalBytes:   payload.TotalBytes,
+	}, nil
+}
+
+// FleetRelease fetches exact archive bytes for one digest.
+func (c *HTTPRelayClient) FleetRelease(ctx context.Context, digest string) ([]byte, error) {
+	if !validFleetDigest(digest) {
+		return nil, errors.New("fleet-config digest is invalid")
+	}
+	path := "/v1/fleet-config/releases/" + digest
+	raw, err := c.doSignedEmpty(ctx, http.MethodGet, path, "application/octet-stream", maxFleetReleaseBytes, nil)
+	if err != nil {
+		return nil, err
+	}
+	if len(raw) == 0 {
+		return nil, errors.New("fleet-config release is unavailable")
+	}
+	return raw, nil
+}
+
+// PutFleetStatus writes one bounded client status row.
+func (c *HTTPRelayClient) PutFleetStatus(ctx context.Context, report relay.FleetStatusReport) error {
+	if report.IdempotencyKey == "" {
+		return errors.New("fleet-config status idempotency key is required")
+	}
+	payload := map[string]any{
+		"generation":          report.Generation,
+		"applied_digest":      report.AppliedDigest,
+		"state":               report.State,
+		"activation":          report.Activation,
+		"trailer_state":       report.TrailerState,
+		"alias_state":         report.AliasState,
+		"project_match_state": report.ProjectMatchState,
+		"report_generation":   report.ReportGeneration,
+	}
+	_, err := c.doJSONWithIdempotency(ctx, http.MethodPut, "/v1/fleet-config/status", payload, report.IdempotencyKey, nil)
+	return err
+}
+
+func validFleetDigest(digest string) bool {
+	if len(digest) != 64 {
+		return false
+	}
+	for _, c := range digest {
+		if (c < '0' || c > '9') && (c < 'a' || c > 'f') {
+			return false
+		}
+	}
+	return true
+}
+
+func (c *HTTPRelayClient) doSignedEmpty(ctx context.Context, method, path, accept string, maximum int, responseValue any) ([]byte, error) {
+	if c == nil || c.httpClient == nil || c.baseURL == nil || path == "" || maximum <= 0 {
+		return nil, errors.New("relay client is unavailable")
+	}
+	target := c.baseURL.ResolveReference(&url.URL{Path: path})
+	request, err := http.NewRequestWithContext(ctx, method, target.String(), nil)
+	if err != nil {
+		return nil, fmt.Errorf("build relay request: %w", err)
+	}
+	if accept != "" {
+		request.Header.Set("Accept", accept)
+	}
+	if _, err := c.authenticateRequest(request, method, path, nil); err != nil {
+		return nil, err
+	}
+	if c.accessToken.ClientID != "" {
+		request.Header.Set("CF-Access-Client-Id", c.accessToken.ClientID)
+		request.Header.Set("CF-Access-Client-Secret", c.accessToken.ClientSecret)
+	}
+	client := *c.httpClient
+	client.CheckRedirect = func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }
+	response, err := client.Do(request)
+	if err != nil {
+		return nil, fmt.Errorf("relay request failed: %w", err)
+	}
+	defer func() { _ = response.Body.Close() }()
+	if response.StatusCode != http.StatusOK {
+		return nil, &relayRejectionError{status: response.StatusCode}
+	}
+	raw, err := io.ReadAll(io.LimitReader(response.Body, int64(maximum)+1))
+	if err != nil || len(raw) > maximum {
+		return nil, errors.New("invalid relay response")
+	}
+	if responseValue == nil {
+		return raw, nil
+	}
+	if err := json.Unmarshal(raw, responseValue); err != nil {
+		return nil, fmt.Errorf("decode relay response: %w", err)
+	}
+	return raw, nil
+}
+
 func (c *HTTPRelayClient) doJSON(ctx context.Context, method, path string, requestValue, responseValue any) (int, error) {
 	return c.doJSONAllowing(ctx, method, path, requestValue, responseValue)
 }

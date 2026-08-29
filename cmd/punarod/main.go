@@ -224,6 +224,9 @@ func run(args []string, stderr io.Writer) int {
 		if stopMaintain := startDeliveryMaintenance(relayStore, postgresRelay); stopMaintain != nil {
 			defer stopMaintain()
 		}
+		if stopWake := startFleetWake(relayHandler); stopWake != nil {
+			defer stopWake()
+		}
 	}
 	relayMetricsSnapshot := func() relay.MetricsSnapshot { return relay.MetricsSnapshot{} }
 	if provider, ok := relayHandler.(interface{ MetricsSnapshot() relay.MetricsSnapshot }); ok {
@@ -832,12 +835,14 @@ func buildRelayHandler(cfg config.Config, fleet relay.FleetConfigStore, postgres
 		}
 		handler = verifier.Middleware(handler)
 	}
-	return relayMetricsHandler{Handler: handler, metrics: metrics}, store, nil
+	return relayMetricsHandler{Handler: handler, metrics: metrics, notifier: notifier, fleet: fleet}, store, nil
 }
 
 type relayMetricsHandler struct {
 	http.Handler
-	metrics *relay.Metrics
+	metrics  *relay.Metrics
+	notifier *relay.Notifier
+	fleet    relay.FleetConfigStore
 }
 
 func (h relayMetricsHandler) MetricsSnapshot() relay.MetricsSnapshot {
@@ -846,6 +851,24 @@ func (h relayMetricsHandler) MetricsSnapshot() relay.MetricsSnapshot {
 
 type deliveryMaintainer interface {
 	MaintainDeliveries(time.Time) (relay.MaintenanceResult, error)
+}
+
+func startFleetWake(handler http.Handler) func() {
+	metricsHandler, ok := handler.(relayMetricsHandler)
+	if !ok || metricsHandler.fleet == nil || metricsHandler.notifier == nil {
+		return nil
+	}
+	// #nosec G118 -- the returned stop function owns and invokes cancel.
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		relay.WatchFleetDesired(ctx, metricsHandler.fleet, metricsHandler.notifier, 2*time.Second)
+	}()
+	return func() {
+		cancel()
+		<-done
+	}
 }
 
 func startDeliveryMaintenance(store *relay.Store, postgresRelay relay.Backend) func() {

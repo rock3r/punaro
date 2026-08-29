@@ -25,6 +25,7 @@ import (
 	"github.com/rock3r/punaro/internal/bootstrap"
 	"github.com/rock3r/punaro/internal/clientidentity"
 	"github.com/rock3r/punaro/internal/clienttransport"
+	"github.com/rock3r/punaro/internal/fleetconfig"
 	"github.com/rock3r/punaro/internal/memoryclient"
 	"github.com/rock3r/punaro/internal/relay"
 )
@@ -1057,6 +1058,9 @@ func run() error {
 				reportedReady = true
 			}
 		}
+		if err := reconcileFleet(ctx, config, relayClient); err != nil && !errors.Is(err, context.Canceled) {
+			log.Printf("fleet-config reconcile failed: %v", err)
+		}
 		timer := time.NewTimer(config.pollInterval)
 		select {
 		case <-ctx.Done():
@@ -1097,6 +1101,31 @@ func runNotifications(ctx context.Context, client *adapter.HTTPRelayClient, wake
 			backoff *= 2
 		}
 	}
+}
+
+func reconcileFleet(ctx context.Context, config adapterConfig, client *adapter.HTTPRelayClient) error {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return err
+	}
+	local, err := fleetconfig.LoadLocalConfig(fleetLocalConfigPath(config))
+	if err != nil {
+		return err
+	}
+	_, err = adapter.ReconcileFleetOnce(ctx, adapter.FleetReconcileRequest{
+		Client: client,
+		Root:   filepath.Join(config.dataDir, "fleet"),
+		Home:   home,
+		Local:  local,
+	})
+	return err
+}
+
+func fleetLocalConfigPath(config adapterConfig) string {
+	if config.profileFile != "" {
+		return filepath.Join(filepath.Dir(config.profileFile), "fleet-config.local.json")
+	}
+	return filepath.Join(config.dataDir, "fleet-config.local.json")
 }
 
 func loadConfig() (adapterConfig, error) {
