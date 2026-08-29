@@ -244,8 +244,8 @@ Fence-legal order (operator chooses which topic **keeps**
 3. **Adopt both live conversations** without creating topics:
 
    ```sh
-   punaro-telegram adopt --conversation <KEEPER_CONVERSATION_ID>
-   punaro-telegram adopt --conversation <NON_KEEPER_CONVERSATION_ID>
+   punaro-telegram adopt --conversation KEEPER_CONVERSATION_ID
+   punaro-telegram adopt --conversation NON_KEEPER_CONVERSATION_ID
    ```
 
    Resolve the corresponding `<KEEPER_THREAD_ID>` and
