@@ -115,6 +115,18 @@ HUNG_CHECK_THRESHOLDS_SECONDS = {
 RETRY_ELIGIBLE_WORKFLOW_KEYWORDS = {
     "e2e",
 }
+
+# Expected jobs from .github/workflows/quality.yml. Readiness requires every
+# named quality job to be present and passed so a lone third-party check (e.g.
+# Bugbot) cannot satisfy merge after Bugbot stopped being assumed-present.
+QUALITY_WORKFLOW_NAME = "quality"
+QUALITY_JOB_NAMES = frozenset({
+    "Go tests and analysis",
+    "PostgreSQL integration",
+    "Complete product E2E",
+    "Configuration lint",
+    "Windows client build",
+})
 # Login keyword fragments for Codex bot, used for emoji reaction gate detection.
 # Codex signals it is reviewing a PR by adding a 👀 reaction; it either posts a
 # review with comments (issues found) or removes the reaction silently (clean).
@@ -436,11 +448,43 @@ def is_pending_check(check):
     return bucket == "pending" or state in PENDING_CHECK_STATES
 
 
+def is_quality_job_check(check):
+    """Return whether a check is one of the expected quality.yml jobs."""
+    if not isinstance(check, dict):
+        return False
+    name = str(check.get("name") or "")
+    if name not in QUALITY_JOB_NAMES:
+        return False
+    workflow = str(check.get("workflow") or "").lower()
+    # Prefer an explicit quality workflow label when present; still accept the
+    # known job name if workflow is blank (some payloads omit it).
+    return (not workflow) or workflow == QUALITY_WORKFLOW_NAME
+
+
+def quality_jobs_passed(checks):
+    """True only when every expected quality.yml job is present and passed."""
+    by_name = {}
+    for check in checks:
+        if not is_quality_job_check(check):
+            continue
+        name = str(check.get("name") or "")
+        by_name[name] = check
+    if set(by_name) != QUALITY_JOB_NAMES:
+        return False
+    for check in by_name.values():
+        bucket = str(check.get("bucket") or "").lower()
+        state = str(check.get("state") or "").upper()
+        if bucket != "pass" and state != "SUCCESS":
+            return False
+    return True
+
+
 def summarize_checks(checks):
     pending_count = 0
     failed_count = 0
     passed_count = 0
     skipping_count = 0
+    quality_passed_count = 0
     for check in checks:
         bucket = str(check.get("bucket") or "").lower()
         if is_pending_check(check):
@@ -449,6 +493,8 @@ def summarize_checks(checks):
             failed_count += 1
         elif bucket == "pass":
             passed_count += 1
+            if is_quality_job_check(check):
+                quality_passed_count += 1
         elif bucket in ("neutral", "skipping"):
             skipping_count += 1
     return {
@@ -456,6 +502,8 @@ def summarize_checks(checks):
         "failed_count": failed_count,
         "passed_count": passed_count,
         "skipping_count": skipping_count,
+        "quality_passed_count": quality_passed_count,
+        "quality_jobs_passed": quality_jobs_passed(checks),
         "all_terminal": pending_count == 0,
     }
 
@@ -1411,10 +1459,10 @@ def is_pr_ready_to_merge(
         return False
     if not checks_summary["all_terminal"]:
         return False
-    # An empty check set is all_terminal with passed_count==0 (e.g. right after a
-    # push, before quality.yml jobs register). Bugbot is no longer assumed-present,
-    # so require at least one passing check before declaring readiness.
-    if int(checks_summary.get("passed_count") or 0) < 1:
+    # Bugbot is no longer assumed-present, so an empty/pre-registration check set
+    # (or a lone third-party pass) must not declare readiness. Require every
+    # expected quality.yml job to be present and passed.
+    if not bool(checks_summary.get("quality_jobs_passed")):
         return False
     if (
         checks_summary["failed_count"] > 0
@@ -1878,7 +1926,7 @@ def is_ci_green(snapshot):
     coderabbit_reviewing = bool(coderabbit_gate.get("reviewing"))
     return (
         bool(checks.get("all_terminal"))
-        and int(checks.get("passed_count") or 0) >= 1
+        and bool(checks.get("quality_jobs_passed"))
         and int(checks.get("failed_count") or 0) == 0
         and int(checks.get("pending_count") or 0) == 0
         and not blocking_review_items
