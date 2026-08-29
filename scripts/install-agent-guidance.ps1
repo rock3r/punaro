@@ -26,12 +26,14 @@ function Get-MarkedGuidance([string]$Text, [string]$Path) {
     $end = '<!-- punaro-agent-guidance:end -->'
     $startMatches = [System.Text.RegularExpressions.Regex]::Matches($Text, [System.Text.RegularExpressions.Regex]::Escape($start))
     $endMatches = [System.Text.RegularExpressions.Regex]::Matches($Text, [System.Text.RegularExpressions.Regex]::Escape($end))
+    $startLineMatches = [System.Text.RegularExpressions.Regex]::Matches($Text, '(?m)^' + [System.Text.RegularExpressions.Regex]::Escape($start) + '\r?$')
+    $endLineMatches = [System.Text.RegularExpressions.Regex]::Matches($Text, '(?m)^' + [System.Text.RegularExpressions.Regex]::Escape($end) + '\r?$')
     if ($startMatches.Count -eq 0 -and $endMatches.Count -eq 0) { return $null }
-    if ($startMatches.Count -ne 1 -or $endMatches.Count -ne 1 -or $endMatches[0].Index -le $startMatches[0].Index) {
+    if ($startMatches.Count -ne 1 -or $endMatches.Count -ne 1 -or $startLineMatches.Count -ne 1 -or $endLineMatches.Count -ne 1 -or $endLineMatches[0].Index -le $startLineMatches[0].Index) {
         Stop-Guidance "invalid existing Punaro guidance markers: $Path"
     }
-    $startIndex = $startMatches[0].Index
-    $endIndex = $endMatches[0].Index
+    $startIndex = $startLineMatches[0].Index
+    $endIndex = $endLineMatches[0].Index
     return [pscustomobject]@{
         StartIndex = $startIndex
         EndIndex = $endIndex

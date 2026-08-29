@@ -87,6 +87,8 @@ replace_marked_guidance() {
 	path=$1
 	tmp=$(mktemp "${TMPDIR:-/tmp}/punaro-guidance-replace.XXXXXXXX")
 	block_tmp=$(mktemp "${TMPDIR:-/tmp}/punaro-guidance-block.XXXXXXXX")
+	backup=$(mktemp "$path.punaro-backup.XXXXXXXX")
+	cat "$path" >"$backup" || { rm -f -- "$tmp" "$block_tmp"; fail "could not retain managed Punaro guidance recovery copy: $path"; }
 	if awk '{ normalized=$0; sub(/\r$/, "", normalized); if (normalized == "<!-- punaro-agent-guidance:start -->" && $0 != normalized) found=1 } END { exit !found }' "$path"; then
 		printf '%s\n' "$guidance_block" | awk '{ printf "%s\r\n", $0 }' >"$block_tmp"
 	else
@@ -107,7 +109,7 @@ replace_marked_guidance() {
 		!inside { print }
 		END { if (!replaced) exit 3 }
 	' "$path" >"$tmp" || { rm -f -- "$tmp" "$block_tmp"; fail "could not replace managed Punaro guidance: $path"; }
-	cat "$tmp" >"$path"
+	cat "$tmp" >"$path" || { rm -f -- "$tmp" "$block_tmp"; fail "could not replace managed Punaro guidance; recovery copy retained at $backup"; }
 	rm -f -- "$tmp" "$block_tmp"
 }
 

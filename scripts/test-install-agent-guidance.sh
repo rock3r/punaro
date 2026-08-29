@@ -102,7 +102,11 @@ Use the local `agent-mailbox` MCP for Punaro-delivered mail.
 
 # Keep after
 EOF
+cp "$managed_project/AGENTS.md" "$managed_project/AGENTS.original"
 sh "$repo_dir/scripts/install-agent-guidance.sh" --directory "$managed_project" --guidance-only --replace-managed
+managed_backup=$(find "$managed_project" -maxdepth 1 -type f -name 'AGENTS.md.punaro-backup.*' -print | head -n 1)
+[ -n "$managed_backup" ] || { printf '%s\n' 'managed guidance replacement did not retain a recovery copy' >&2; exit 1; }
+cmp -s "$managed_project/AGENTS.original" "$managed_backup" || { printf '%s\n' 'managed guidance recovery copy does not match the original' >&2; exit 1; }
 cp "$managed_project/AGENTS.md" "$managed_project/AGENTS.after-first-replace"
 sh "$repo_dir/scripts/install-agent-guidance.sh" --directory "$managed_project" --guidance-only --replace-managed
 cmp -s "$managed_project/AGENTS.after-first-replace" "$managed_project/AGENTS.md" || { printf '%s\n' 'managed guidance replacement was not idempotent' >&2; exit 1; }

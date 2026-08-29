@@ -207,6 +207,19 @@ try {
     }
     if (-not $duplicateBlocked) { throw 'Windows guidance installer accepted duplicate blocks' }
     if ([System.IO.File]::ReadAllText($duplicatePath) -ne $duplicateGuidance) { throw 'Windows guidance installer changed a file with duplicate blocks' }
+    $inlineProject = Join-Path $fixture 'inline-guidance'
+    [System.IO.Directory]::CreateDirectory($inlineProject) | Out-Null
+    $inlinePath = Join-Path $inlineProject 'AGENTS.md'
+    $inlineGuidance = "Document <!-- punaro-agent-guidance:start --> and keep these user instructions before <!-- punaro-agent-guidance:end --> as literal examples.`r`n"
+    [System.IO.File]::WriteAllText($inlinePath, $inlineGuidance, [System.Text.Encoding]::UTF8)
+    $inlineBlocked = $false
+    try {
+        & (Join-Path $repoDir 'scripts\install-agent-guidance.ps1') -Directory $inlineProject -GuidanceOnly -ReplaceManaged
+    } catch {
+        if ($_.Exception.Message.Contains('invalid existing Punaro guidance markers:')) { $inlineBlocked = $true } else { throw }
+    }
+    if (-not $inlineBlocked) { throw 'Windows guidance installer accepted inline marker examples' }
+    if ([System.IO.File]::ReadAllText($inlinePath) -ne $inlineGuidance) { throw 'Windows guidance installer changed a file with inline marker examples' }
     $freshReplaceProject = Join-Path $fixture 'fresh-replace-guidance'
     [System.IO.Directory]::CreateDirectory($freshReplaceProject) | Out-Null
     $freshReplacePath = Join-Path $freshReplaceProject 'AGENTS.md'
