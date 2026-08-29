@@ -222,9 +222,10 @@ if you decline it during client setup.
 
 Install the concise default coordination policy globally after installing the
 plugin. The explicit replacement flag rewrites only the complete marked Punaro
-block and preserves every surrounding instruction. The POSIX installer keeps
-an owner-only `AGENTS.md.punaro-backup.*` recovery copy beside each file it
-rewrites in place so existing links remain intact:
+block and preserves every surrounding instruction. Both installers keep an
+`AGENTS.md.punaro-backup.*` recovery copy beside each file before rewriting it;
+the POSIX copy is owner-only, and the Windows copy inherits the directory ACL.
+The live file is rewritten in place so existing links remain intact:
 
 ```sh
 ./scripts/install-agent-guidance.sh --directory "$HOME/.codex" --guidance-only --replace-managed

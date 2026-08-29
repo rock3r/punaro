@@ -65,6 +65,11 @@ for expected in \
 	grep -Fq -- "$expected" "$installer" || { printf '%s\n' "Windows installer is missing required safety behavior: $expected" >&2; exit 1; }
 done
 
+grep -Fq -- ".punaro-backup." "$guidance_installer" || {
+	printf '%s\n' 'Windows guidance replacement does not retain a recovery copy' >&2
+	exit 1
+}
+
 for retired_package in 'cmd\punaro-dpapi' 'cmd\punaro-directory' 'cmd\punaro-attachment' 'cmd\punaro-keychain'; do
 	if grep -F "Build-PunaroBinary" "$installer" | grep -Fq "$retired_package"; then
 		printf '%s\n' "Windows installer still builds retired attachment package: $retired_package" >&2

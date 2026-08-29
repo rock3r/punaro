@@ -162,6 +162,7 @@ try {
     [System.IO.Directory]::CreateDirectory($managedProject) | Out-Null
     $managedPath = Join-Path $managedProject 'AGENTS.md'
     [System.IO.File]::WriteAllText($managedPath, "# Keep before`r`n<!-- punaro-agent-guidance:start -->`r`nUse the local ``agent-mailbox`` MCP.`r`n<!-- punaro-agent-guidance:end -->`r`n# Keep after`r`n", [System.Text.Encoding]::UTF8)
+    $managedOriginalBytes = [System.IO.File]::ReadAllBytes($managedPath)
     & (Join-Path $repoDir 'scripts\install-agent-guidance.ps1') -Directory $managedProject -GuidanceOnly -ReplaceManaged
     $managedGuidance = [System.IO.File]::ReadAllText($managedPath)
     if (-not $managedGuidance.Contains('# Keep before') -or -not $managedGuidance.Contains('# Keep after') -or -not $managedGuidance.Contains('At the start of every session') -or $managedGuidance.Contains('Use the local `agent-mailbox` MCP.')) {
@@ -169,6 +170,9 @@ try {
     }
     $managedBytes = [System.IO.File]::ReadAllBytes($managedPath)
     if ($managedBytes.Length -lt 3 -or $managedBytes[0] -ne 0xef -or $managedBytes[1] -ne 0xbb -or $managedBytes[2] -ne 0xbf) { throw 'Windows managed guidance replacement stripped the UTF-8 BOM' }
+    $managedBackups = @(Get-ChildItem -LiteralPath $managedProject -Filter 'AGENTS.md.punaro-backup.*' -File)
+    if ($managedBackups.Count -ne 1) { throw 'Windows managed guidance replacement did not retain exactly one recovery copy' }
+    if ([Convert]::ToBase64String([System.IO.File]::ReadAllBytes($managedBackups[0].FullName)) -ne [Convert]::ToBase64String($managedOriginalBytes)) { throw 'Windows managed guidance recovery copy does not match the original' }
     & (Join-Path $repoDir 'scripts\install-agent-guidance.ps1') -Directory $managedProject -GuidanceOnly -ReplaceManaged
     if ([System.IO.File]::ReadAllText($managedPath) -ne $managedGuidance) { throw 'Windows managed guidance replacement was not idempotent' }
     if (Test-Path -LiteralPath (Join-Path $managedProject '.agents')) { throw 'Windows guidance-only install copied project skills' }

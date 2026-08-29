@@ -52,7 +52,17 @@ function Add-Guidance([string]$Path, [string]$Block, [bool]$ReplaceExisting) {
         if ($null -ne $range) {
             if ($ReplaceExisting) {
                 $updated = $existing.Substring(0, $range.StartIndex) + $Block + $existing.Substring($range.EndExclusive)
-                [System.IO.File]::WriteAllText($Path, $updated, (New-Object System.Text.UTF8Encoding($hasUtf8Bom)))
+                $backupPath = $Path + '.punaro-backup.' + [Guid]::NewGuid().ToString('N')
+                try {
+                    [System.IO.File]::WriteAllBytes($backupPath, $existingBytes)
+                } catch {
+                    Stop-Guidance "could not retain managed Punaro guidance recovery copy: $Path"
+                }
+                try {
+                    [System.IO.File]::WriteAllText($Path, $updated, (New-Object System.Text.UTF8Encoding($hasUtf8Bom)))
+                } catch {
+                    Stop-Guidance "could not replace managed Punaro guidance; recovery copy retained at $backupPath"
+                }
                 return
             }
             $marked = $range.Text
