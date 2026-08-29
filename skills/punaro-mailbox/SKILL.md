@@ -18,11 +18,12 @@ message-handling task.
 
 ## Check readiness
 
-Before the first Punaro operation in a task, or after a local mailbox, relay,
-notification, service, or authorization failure, run the installed adapter's
-read-only doctor through the packaged [POSIX launcher](scripts/punaro-adapter)
-or [Windows launcher](scripts/punaro-adapter.cmd). Resolve the plugin root as
-the directory two levels above this `SKILL.md` and pass its absolute path:
+After status reports a warning or failure, or after a local mailbox, relay,
+notification, service, or authorization operation fails, run the installed
+adapter's read-only doctor through the packaged [POSIX launcher](scripts/punaro-adapter)
+or [Windows launcher](scripts/punaro-adapter.cmd) before retrying. Resolve the
+plugin root as the directory two levels above this `SKILL.md` and pass its
+absolute path:
 
 ```text
 /absolute/path/to/punaro-mailbox/scripts/punaro-adapter doctor --plugin-root /absolute/path/to/punaro-plugin

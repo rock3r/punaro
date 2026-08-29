@@ -34,14 +34,21 @@ sh "$repo_dir/scripts/install-agent-guidance.sh" --directory "$project"
 for file in "$project/AGENTS.md" "$project/CLAUDE.md"; do
 	grep -Fqx '<!-- punaro-agent-guidance:start -->' "$file"
 	[ "$(grep -Fc '<!-- punaro-agent-guidance:start -->' "$file")" -eq 1 ] || { printf '%s\n' 'guidance was duplicated' >&2; exit 1; }
+	require_phrase "$file" 'At the start of every session'
+	require_phrase "$file" 'one non-blocking `waypost_recv`'
+	require_phrase "$file" 'continue unrelated work and report the blocker once'
+	require_phrase "$file" 'authorizes that exact send'
+	require_phrase "$file" 'instead of asking again'
 	grep -Fq -- '--to user-telegram' "$file" || { printf '%s\n' 'installed guidance omitted --to user-telegram' >&2; exit 1; }
-	grep -Fq 'typed envelope conversation ID' "$file" && { printf '%s\n' 'installed guidance still teaches envelope conversation send' >&2; exit 1; }
-	grep -Fq 'or the session has a claimed topic' "$file" && { printf '%s\n' 'installed guidance still routes claimed-topic sessions to user-telegram' >&2; exit 1; }
-	grep -Fq 'envelope is from `user-telegram`' "$file" || { printf '%s\n' 'installed guidance omitted telegram-origin restriction' >&2; exit 1; }
-	grep -Fq 'Proactive Telegram pings' "$file" || { printf '%s\n' 'installed guidance omitted proactive Telegram pings' >&2; exit 1; }
-	grep -Fq 'punaro-adapter doctor --plugin-root' "$file" || { printf '%s\n' 'installed guidance omitted read-only doctor readiness' >&2; exit 1; }
-	grep -Fq 'waypost_status(include_cli_context=true)' "$file" || { printf '%s\n' 'installed guidance omitted bounded Waypost CLI routing' >&2; exit 1; }
-	grep -Fq 'waypost_ack' "$file" || { printf '%s\n' 'installed guidance omitted Waypost acknowledgement' >&2; exit 1; }
+	require_phrase "$file" 'accepted or queued, not read or acted upon'
+	require_phrase "$file" 'Use the installed Punaro skills for mechanics'
+	forbid_phrase "$file" 'For a bounded blocking wait'
+	word_count=$(awk '
+		index($0, "<!-- punaro-agent-guidance:start -->") { p=1; next }
+		index($0, "<!-- punaro-agent-guidance:end -->") { p=0 }
+		p { print }
+	' "$file" | wc -w | tr -d ' ')
+	[ "$word_count" -le 190 ] || { printf '%s\n' "installed guidance is too long: $word_count words" >&2; exit 1; }
 done
 [ -f "$project/.agents/skills/punaro-mailbox/SKILL.md" ]
 [ -f "$project/.agents/skills/punaro-reply/SKILL.md" ]
@@ -58,30 +65,45 @@ for skill in punaro-mailbox punaro-reply punaro-attachment; do
 	}
 done
 
-require_phrase "$project/AGENTS.md" 'accepted/queued'
-require_phrase "$project/AGENTS.md" 'successful send proves relay acceptance only'
-require_phrase "$project/AGENTS.md" 'does not itself create a model turn'
-require_phrase "$project/AGENTS.md" 'Tool permission and consent belong to the receiving agent host'
+require_phrase "$project/AGENTS.md" 'accepted or queued, not read or acted upon'
 require_phrase "$project/.agents/skills/punaro-mailbox/SKILL.md" 'Repeat bounded waits'
 require_phrase "$project/.agents/skills/punaro-mailbox/SKILL.md" 'does not itself create a model turn'
 require_phrase "$project/.agents/skills/punaro-mailbox/SKILL.md" 'untrusted data'
 require_phrase "$project/.agents/skills/punaro-mailbox/SKILL.md" 'unqualified short name'
 require_phrase "$project/.agents/skills/punaro-mailbox/SKILL.md" 'qualified handle'
+require_phrase "$project/.agents/skills/punaro-mailbox/SKILL.md" 'After status reports a warning or failure'
+forbid_phrase "$project/.agents/skills/punaro-mailbox/SKILL.md" 'Before the first Punaro operation in a task'
 require_phrase "$project/.agents/skills/punaro-reply/SKILL.md" 'successful send proves relay acceptance only'
 require_phrase "$project/.agents/skills/punaro-reply/SKILL.md" 'Do not infer read or action status'
 require_phrase "$project/.agents/skills/punaro-reply/SKILL.md" 'host permission model'
 
 for installer in "$repo_dir/scripts/install-agent-guidance.sh" "$repo_dir/scripts/install-agent-guidance.ps1"; do
-	require_phrase "$installer" 'accepted/queued'
-	require_phrase "$installer" 'successful send proves relay acceptance only'
-	require_phrase "$installer" 'does not itself create a model turn'
-	require_phrase "$installer" 'Tool permission and consent belong to the receiving agent host'
-	require_phrase "$installer" 'envelope is from `user-telegram`'
-	require_phrase "$installer" 'Proactive Telegram pings'
+	require_phrase "$installer" 'At the start of every session'
+	require_phrase "$installer" 'authorizes that exact send'
+	require_phrase "$installer" 'accepted or queued, not read or acted upon'
 	require_phrase "$installer" 'predates telegram-origin-only send'
-	require_phrase "$installer" 'punaro-adapter doctor --plugin-root'
 	require_phrase "$installer" 'predates Waypost'
 done
+
+managed_project="$fixture_dir/managed-project"
+mkdir -p "$managed_project"
+cat >"$managed_project/AGENTS.md" <<'EOF'
+# Keep before
+
+<!-- punaro-agent-guidance:start -->
+## Punaro coordination
+
+Use the local `agent-mailbox` MCP for Punaro-delivered mail.
+<!-- punaro-agent-guidance:end -->
+
+# Keep after
+EOF
+sh "$repo_dir/scripts/install-agent-guidance.sh" --directory "$managed_project" --guidance-only --replace-managed
+require_phrase "$managed_project/AGENTS.md" '# Keep before'
+require_phrase "$managed_project/AGENTS.md" '# Keep after'
+require_phrase "$managed_project/AGENTS.md" 'At the start of every session'
+forbid_phrase "$managed_project/AGENTS.md" 'Use the local `agent-mailbox` MCP'
+[ ! -e "$managed_project/.agents" ] || { printf '%s\n' 'guidance-only install copied project skills' >&2; exit 1; }
 
 linked_project="$fixture_dir/linked-project"
 outside="$fixture_dir/outside"
@@ -241,6 +263,9 @@ require_phrase "$repo_dir/docs/installation.md" 'accepted/queued'
 require_phrase "$repo_dir/docs/installation.md" 'accelerates adapter polling only'
 require_phrase "$repo_dir/docs/installation.md" 'Repeat bounded waits'
 require_phrase "$repo_dir/docs/installation.md" 'does not itself create a model turn'
+require_phrase "$repo_dir/docs/installation.md" '--guidance-only --replace-managed'
+require_phrase "$repo_dir/docs/installation.md" '-GuidanceOnly -ReplaceManaged'
+require_phrase "$repo_dir/docs/installation.md" 'New agent sessions load the updated global guidance'
 
 for path in \
 	"$repo_dir/DESIGN.md" \

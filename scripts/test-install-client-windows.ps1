@@ -154,6 +154,20 @@ try {
     foreach ($path in @((Join-Path $root 'config\machine.key'), (Join-Path $root 'config\enrollment.json'), (Join-Path $root 'config\adapter.env'), (Join-Path $root 'bin\punaro-trusted-attachment.exe'), (Join-Path $root 'bin\punaro-memory.exe'), (Join-Path $root 'bin\punaro-enroll.exe'), (Join-Path $project '.agents\skills\punaro-mailbox\SKILL.md'))) {
         if (-not (Test-Path -LiteralPath $path -PathType Leaf)) { throw "Windows client installer did not create $path" }
     }
+    $installedGuidance = [System.IO.File]::ReadAllText((Join-Path $project 'AGENTS.md'))
+    foreach ($expected in @('At the start of every session', 'authorizes that exact send', 'accepted or queued, not read or acted upon')) {
+        if (-not $installedGuidance.Contains($expected)) { throw "Windows guidance omitted concise default behavior: $expected" }
+    }
+    $managedProject = Join-Path $fixture 'managed-guidance'
+    [System.IO.Directory]::CreateDirectory($managedProject) | Out-Null
+    $managedPath = Join-Path $managedProject 'AGENTS.md'
+    [System.IO.File]::WriteAllText($managedPath, "# Keep before`r`n<!-- punaro-agent-guidance:start -->`r`nUse the local ``agent-mailbox`` MCP.`r`n<!-- punaro-agent-guidance:end -->`r`n# Keep after`r`n", [System.Text.Encoding]::UTF8)
+    & (Join-Path $repoDir 'scripts\install-agent-guidance.ps1') -Directory $managedProject -GuidanceOnly -ReplaceManaged
+    $managedGuidance = [System.IO.File]::ReadAllText($managedPath)
+    if (-not $managedGuidance.Contains('# Keep before') -or -not $managedGuidance.Contains('# Keep after') -or -not $managedGuidance.Contains('At the start of every session') -or $managedGuidance.Contains('Use the local `agent-mailbox` MCP.')) {
+        throw 'Windows managed guidance replacement did not preserve surrounding instructions'
+    }
+    if (Test-Path -LiteralPath (Join-Path $managedProject '.agents')) { throw 'Windows guidance-only install copied project skills' }
     & (Join-Path $repoDir 'scripts\punaro-plugin-mcp.cmd')
     if ($LASTEXITCODE -ne 0) { throw 'Windows plugin launcher could not start the installer-owned adapter' }
     $fixedAdapter = Join-Path $root 'bin\punaro-adapter.exe'

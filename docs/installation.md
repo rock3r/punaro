@@ -220,6 +220,27 @@ overwrites a differing local skill.
 Run `./scripts/install-agent-guidance.sh --directory /path/to/project` later
 if you decline it during client setup.
 
+Install the concise default coordination policy globally after installing the
+plugin. The explicit replacement flag rewrites only the complete marked Punaro
+block and preserves every surrounding instruction:
+
+```sh
+./scripts/install-agent-guidance.sh --directory "$HOME/.codex" --guidance-only --replace-managed
+./scripts/install-agent-guidance.sh --directory "$HOME/.agents" --guidance-only --replace-managed
+```
+
+On Windows, use the equivalent PowerShell installer for both global roots:
+
+```powershell
+.\scripts\install-agent-guidance.ps1 -Directory "$HOME\.codex" -GuidanceOnly -ReplaceManaged
+.\scripts\install-agent-guidance.ps1 -Directory "$HOME\.agents" -GuidanceOnly -ReplaceManaged
+```
+
+`~/.codex/AGENTS.md` is Codex's global instruction file. `~/.agents/AGENTS.md`
+is the shared source used by the supported Claude link layout and other agent
+launchers. New agent sessions load the updated global guidance; already-running
+sessions keep the instructions they loaded at startup.
+
 Agents with plugin support can instead load the repository's
 [Punaro agent plugin](agent-plugin.md). It provides the same three skills plus
 the local Waypost MCP declaration without modifying a project's
