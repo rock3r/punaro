@@ -42,6 +42,8 @@ Non-obvious caveats:
 - For a real durable round trip (create conversation → advertise → send →
   lease → ack, including unauthorized-lease and retry boundaries), use the
   maintained gate rather than hand-rolling signed client calls here: on a
-  disposable macOS GUI login run `make test-real-relay-e2e`, and follow
+  disposable macOS GUI login with `agent-mailbox` on `PATH`, run
+  `make test-real-relay-e2e`, and follow
   [`docs/alpha-text-relay.md`](docs/alpha-text-relay.md) for operator/adapter
-  command sequences.
+  command sequences. That target LookPaths the legacy `agent-mailbox` binary
+  name (a PATH with only `waypost` is not enough for this smoke test).
