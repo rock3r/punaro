@@ -23,10 +23,17 @@ Non-obvious caveats:
 - `punarod` never auto-loads `.env`; pass `--env-file` or set `PUNARO_ENV_FILE`.
   It also deliberately mounts no relay routes unless `PUNARO_RELAY_ENABLED=true`
   with public machine enrollment records in `PUNARO_RELAY_MACHINES_JSON`.
-- To run the relay locally and exercise a real durable message round trip:
-  generate an enrolled machine key with `go run ./cmd/punaro-keygen --id <id>
+- To bring up a local loopback relay for Cloud smoke checks: generate an
+  enrolled machine key with `go run ./cmd/punaro-keygen --id <id>
   --endpoint-prefix agent/<id>/ --private-key-file <path>`, collect the printed
   public record into `PUNARO_RELAY_MACHINES_JSON`, then start
   `PUNARO_RELAY_ENABLED=true PUNARO_RELAY_MACHINES_JSON=... go run ./cmd/punarod`.
   Health/readiness are on the separate `PUNARO_HEALTH_LISTEN_ADDR` (default
-  `127.0.0.1:8081`): `curl http://127.0.0.1:8081/healthz` and `/readyz`.
+  `127.0.0.1:8081`): `curl http://127.0.0.1:8081/healthz` and `/readyz`. Those
+  probes only prove daemon startup, not durable delivery.
+- For a real durable round trip (create conversation → advertise → send →
+  lease → ack, including unauthorized-lease and retry boundaries), use the
+  maintained gate rather than hand-rolling signed client calls here: on a
+  disposable macOS GUI login run `make test-real-relay-e2e`, and follow
+  [`docs/alpha-text-relay.md`](docs/alpha-text-relay.md) for operator/adapter
+  command sequences.
