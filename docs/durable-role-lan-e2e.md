@@ -1,5 +1,8 @@
 # Durable-role LAN release-candidate validation
 
+Fleet-global agent configuration uses the same owner-managed hosts and safety
+rules; see [`fleet-config-lan-e2e.md`](fleet-config-lan-e2e.md).
+
 This opt-in runbook validates durable conversation-role replacement against an
 already deployed release candidate. It does not provision a relay, create
 credentials, change an adapter profile, or infer topology. Run it only with
