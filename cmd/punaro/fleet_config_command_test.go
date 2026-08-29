@@ -311,6 +311,33 @@ func TestFleetConfigPublishFromRealGitCommit(t *testing.T) {
 	}
 }
 
+func TestFleetConfigStatusOmitsContentsAndIncludesClientStates(t *testing.T) {
+	preserveFleetConfig(t)
+	directory := testInstallation(t)
+	loadFleetDesired = func(context.Context, string) (punaropostgres.FleetDesired, error) {
+		return punaropostgres.FleetDesired{Digest: strings.Repeat("ab", 32), SourceCommit: testPublishCommit, Generation: 3}, nil
+	}
+	loadFleetClients = func(context.Context, string) ([]punaropostgres.FleetClientStatus, error) {
+		return []punaropostgres.FleetClientStatus{{
+			MachineID: "mac-studio", AppliedDigest: strings.Repeat("ab", 32), State: "current",
+			Activation: "next_turn", TrailerState: "present", AliasState: "linked", ProjectMatchState: "matched",
+		}}, nil
+	}
+	var stdout bytes.Buffer
+	if code := run([]string{"fleet-config", "status", "--directory", directory}, &stdout, bytes.NewBuffer(nil)); code != 0 {
+		t.Fatalf("code=%d body=%s", code, stdout.String())
+	}
+	body := stdout.String()
+	for _, want := range []string{`"state": "current"`, `"trailer_state": "present"`, `"alias_state": "linked"`, `"project_match_state": "matched"`, `"activation": "next_turn"`, strings.Repeat("ab", 32)} {
+		if !strings.Contains(body, want) {
+			t.Fatalf("missing %s in %s", want, body)
+		}
+	}
+	if strings.Contains(body, "# fleet") || strings.Contains(body, "/Users/") || strings.Contains(body, "pq:") {
+		t.Fatalf("status leaked contents or paths: %s", body)
+	}
+}
+
 func TrailerLeak() string { return fleetconfig.TrailerStart }
 
 func testRelease() fleetconfig.Release {
@@ -409,12 +436,15 @@ func gitHead(t *testing.T, repo string) string {
 func preserveFleetConfig(t *testing.T) {
 	t.Helper()
 	preserveDependencies(t)
-	originalMaterialize, originalPersist, originalDesired, originalStored, originalWake := materializeFleetCommit, persistFleetRelease, loadFleetDesired, loadStoredFleetRelease, afterFleetPublish
+	originalMaterialize, originalPersist, originalDesired, originalStored, originalWake, originalClients := materializeFleetCommit, persistFleetRelease, loadFleetDesired, loadStoredFleetRelease, afterFleetPublish, loadFleetClients
 	t.Cleanup(func() {
-		materializeFleetCommit, persistFleetRelease, loadFleetDesired, loadStoredFleetRelease, afterFleetPublish = originalMaterialize, originalPersist, originalDesired, originalStored, originalWake
+		materializeFleetCommit, persistFleetRelease, loadFleetDesired, loadStoredFleetRelease, afterFleetPublish, loadFleetClients = originalMaterialize, originalPersist, originalDesired, originalStored, originalWake, originalClients
 	})
 	loadStoredFleetRelease = func(context.Context, string, string) (fleetconfig.Release, error) {
 		return fleetconfig.Release{}, errors.New("no stored release")
+	}
+	loadFleetClients = func(context.Context, string) ([]punaropostgres.FleetClientStatus, error) {
+		return nil, nil
 	}
 	inspectSchema = func(context.Context, string) (punaropostgres.SchemaState, error) {
 		return punaropostgres.SchemaState{Classification: punaropostgres.Compatible, Version: 58}, nil

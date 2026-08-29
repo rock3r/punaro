@@ -19,6 +19,18 @@ type FleetDesired struct {
 	TotalBytes   int64
 }
 
+// FleetClientStatus is one enrolled client's content-free convergence row.
+type FleetClientStatus struct {
+	MachineID         string `json:"machine_id"`
+	AppliedDigest     string `json:"applied_digest"`
+	State             string `json:"state"`
+	Activation        string `json:"activation"`
+	TrailerState      string `json:"trailer_state"`
+	AliasState        string `json:"alias_state"`
+	ProjectMatchState string `json:"project_match_state"`
+	Generation        int64  `json:"generation"`
+}
+
 // LoadFleetDesired returns the current desired revision, or a zero value when none exists.
 func (a *Administration) LoadFleetDesired(ctx context.Context) (FleetDesired, error) {
 	if a == nil {
@@ -180,6 +192,38 @@ func nullIfEmpty(value string) any {
 		return nil
 	}
 	return value
+}
+
+// ListFleetClientStatus returns bounded client rows without configuration contents.
+func (a *Administration) ListFleetClientStatus(ctx context.Context) ([]FleetClientStatus, error) {
+	if a == nil {
+		return nil, errors.New("fleet-config store is unavailable")
+	}
+	rows, err := a.db.QueryContext(ctx, `
+SELECT client.machine_id, COALESCE(status.applied_digest, ''), COALESCE(status.state, 'offline'),
+       COALESCE(status.activation, ''), COALESCE(status.trailer_state, ''), COALESCE(status.alias_state, ''),
+       COALESCE(status.project_match_state, ''), COALESCE(status.generation, 0)
+FROM auth.client_installations AS client
+LEFT JOIN fleet.client_status AS status ON status.client_id = client.id
+WHERE client.lifecycle_state = 'active'
+ORDER BY client.machine_id
+LIMIT 256`)
+	if err != nil {
+		return nil, errors.New("fleet-config status is unavailable")
+	}
+	defer func() { _ = rows.Close() }()
+	var result []FleetClientStatus
+	for rows.Next() {
+		var row FleetClientStatus
+		if err := rows.Scan(&row.MachineID, &row.AppliedDigest, &row.State, &row.Activation, &row.TrailerState, &row.AliasState, &row.ProjectMatchState, &row.Generation); err != nil {
+			return nil, errors.New("fleet-config status is unavailable")
+		}
+		result = append(result, row)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, errors.New("fleet-config status is unavailable")
+	}
+	return result, nil
 }
 
 func postgresFleetStatusError(err error) string {

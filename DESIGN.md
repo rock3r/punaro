@@ -674,6 +674,10 @@ closed without copying. Unmanaged Claude files are never overwritten.
 Activation is reported as immediate, next turn, next session, or restart
 required. Unknown installed harnesses are `unsupported`.
 
+`punaro fleet-config status` and content-free Canopi/doctor hooks expose
+desired/applied generation, digest, and trailer/alias/project-match states
+without file contents, host paths, or raw errors.
+
 ## Canonical memory model
 
 Canonical memory is project-scoped PostgreSQL authority. Each item has an
