@@ -228,6 +228,7 @@ the POSIX copy is owner-only, and the Windows copy inherits the directory ACL.
 The live file is rewritten in place so existing links remain intact:
 
 ```sh
+mkdir -p "$HOME/.codex" "$HOME/.agents"
 ./scripts/install-agent-guidance.sh --directory "$HOME/.codex" --guidance-only --replace-managed
 ./scripts/install-agent-guidance.sh --directory "$HOME/.agents" --guidance-only --replace-managed
 ```
@@ -235,6 +236,7 @@ The live file is rewritten in place so existing links remain intact:
 On Windows, use the equivalent PowerShell installer for both global roots:
 
 ```powershell
+New-Item -ItemType Directory -Force -Path "$HOME\.codex", "$HOME\.agents" | Out-Null
 .\scripts\install-agent-guidance.ps1 -Directory "$HOME\.codex" -GuidanceOnly -ReplaceManaged
 .\scripts\install-agent-guidance.ps1 -Directory "$HOME\.agents" -GuidanceOnly -ReplaceManaged
 ```

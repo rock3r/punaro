@@ -121,11 +121,12 @@ install_guidance_file() {
 	[ "$marker_state" != invalid ] || fail "invalid existing Punaro guidance markers: $path"
 	if [ "$marker_state" = valid ]; then
 		block=$(marked_guidance "$path")
-		if [ "$replace_managed" = true ]; then
-			replace_marked_guidance "$path"
+		normalized_block=$(printf '%s\n' "$block" | sed 's/\r$//')
+		if [ "$normalized_block" = "$guidance_block" ]; then
 			return
 		fi
-		if printf '%s\n' "$block" | grep -Fq 'At the start of every session' && printf '%s\n' "$block" | grep -Fq 'authorizes that exact send' && printf '%s\n' "$block" | grep -Fq 'accepted or queued, not read or acted upon'; then
+		if [ "$replace_managed" = true ]; then
+			replace_marked_guidance "$path"
 			return
 		fi
 		if printf '%s\n' "$block" | grep -Fq 'Use the local `agent-mailbox` MCP'; then

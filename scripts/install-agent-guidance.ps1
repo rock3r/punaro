@@ -50,6 +50,10 @@ function Add-Guidance([string]$Path, [string]$Block, [bool]$ReplaceExisting) {
         $existing = [System.IO.File]::ReadAllText($Path)
         $range = Get-MarkedGuidance -Text $existing -Path $Path
         if ($null -ne $range) {
+            $marked = $range.Text
+            $normalizedMarked = $marked.Replace("`r`n", "`n").Replace("`r", "`n")
+            $normalizedBlock = $Block.Replace("`r`n", "`n").Replace("`r", "`n")
+            if ($normalizedMarked -ceq $normalizedBlock) { return }
             if ($ReplaceExisting) {
                 $updated = $existing.Substring(0, $range.StartIndex) + $Block + $existing.Substring($range.EndExclusive)
                 $backupPath = $Path + '.punaro-backup.' + [Guid]::NewGuid().ToString('N')
@@ -65,8 +69,6 @@ function Add-Guidance([string]$Path, [string]$Block, [bool]$ReplaceExisting) {
                 }
                 return
             }
-            $marked = $range.Text
-            if ($marked.Contains('At the start of every session') -and $marked.Contains('authorizes that exact send') -and $marked.Contains('accepted or queued, not read or acted upon')) { return }
             if ($marked.Contains('Use the local `agent-mailbox` MCP')) {
                 Stop-Guidance "existing Punaro guidance predates Waypost: $Path; review and remove only the marked Punaro block, then rerun"
             }

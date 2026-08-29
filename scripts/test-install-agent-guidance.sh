@@ -110,6 +110,7 @@ cmp -s "$managed_project/AGENTS.original" "$managed_backup" || { printf '%s\n' '
 cp "$managed_project/AGENTS.md" "$managed_project/AGENTS.after-first-replace"
 sh "$repo_dir/scripts/install-agent-guidance.sh" --directory "$managed_project" --guidance-only --replace-managed
 cmp -s "$managed_project/AGENTS.after-first-replace" "$managed_project/AGENTS.md" || { printf '%s\n' 'managed guidance replacement was not idempotent' >&2; exit 1; }
+[ "$(find "$managed_project" -maxdepth 1 -type f -name 'AGENTS.md.punaro-backup.*' -print | wc -l | tr -d ' ')" -eq 1 ] || { printf '%s\n' 'idempotent managed replacement created another recovery copy' >&2; exit 1; }
 require_phrase "$managed_project/AGENTS.md" '# Keep before'
 require_phrase "$managed_project/AGENTS.md" '# Keep after'
 require_phrase "$managed_project/AGENTS.md" 'At the start of every session'
@@ -349,6 +350,8 @@ require_phrase "$repo_dir/docs/installation.md" 'Repeat bounded waits'
 require_phrase "$repo_dir/docs/installation.md" 'does not itself create a model turn'
 require_phrase "$repo_dir/docs/installation.md" '--guidance-only --replace-managed'
 require_phrase "$repo_dir/docs/installation.md" '-GuidanceOnly -ReplaceManaged'
+require_phrase "$repo_dir/docs/installation.md" 'mkdir -p "$HOME/.codex" "$HOME/.agents"'
+require_phrase "$repo_dir/docs/installation.md" "New-Item -ItemType Directory -Force"
 require_phrase "$repo_dir/docs/installation.md" 'global guidance expects the Punaro plugin'
 require_phrase "$repo_dir/docs/agent-plugin.md" 'After status reports a warning or failure'
 forbid_phrase "$repo_dir/docs/agent-plugin.md" 'before first use when readiness is uncertain'

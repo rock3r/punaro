@@ -175,6 +175,7 @@ try {
     if ([Convert]::ToBase64String([System.IO.File]::ReadAllBytes($managedBackups[0].FullName)) -ne [Convert]::ToBase64String($managedOriginalBytes)) { throw 'Windows managed guidance recovery copy does not match the original' }
     & (Join-Path $repoDir 'scripts\install-agent-guidance.ps1') -Directory $managedProject -GuidanceOnly -ReplaceManaged
     if ([System.IO.File]::ReadAllText($managedPath) -ne $managedGuidance) { throw 'Windows managed guidance replacement was not idempotent' }
+    if (@(Get-ChildItem -LiteralPath $managedProject -Filter 'AGENTS.md.punaro-backup.*' -File).Count -ne 1) { throw 'Windows idempotent managed replacement created another recovery copy' }
     if (Test-Path -LiteralPath (Join-Path $managedProject '.agents')) { throw 'Windows guidance-only install copied project skills' }
     $signatureProject = Join-Path $fixture 'signature-guidance'
     [System.IO.Directory]::CreateDirectory($signatureProject) | Out-Null
