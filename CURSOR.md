@@ -26,11 +26,16 @@ Non-obvious caveats:
 - To bring up a local loopback relay for Cloud smoke checks: generate an
   enrolled machine key with `go run ./cmd/punaro-keygen --id <id>
   --endpoint-prefix agent/<id>/ --private-key-file <path>`. Keygen prints one
-  enrollment object; wrap it in a JSON array before setting
-  `PUNARO_RELAY_MACHINES_JSON` (e.g. `PUNARO_RELAY_MACHINES_JSON="[<printed
-  object>]"`), then start
-  `PUNARO_RELAY_ENABLED=true PUNARO_RELAY_MACHINES_JSON=... go run ./cmd/punarod`.
-  A bare object fails with `parse machine enrollment: expected array`.
+  enrollment object; capture it and wrap it in a JSON array with shell-safe
+  quoting before starting the relay (a bare object fails with
+  `parse machine enrollment: expected array`; nesting the object inside
+  `"[{...}]"` also breaks JSON quotes in the shell):
+
+  ```sh
+  record="$(go run ./cmd/punaro-keygen --id <id> --endpoint-prefix agent/<id>/ --private-key-file <path>)"
+  PUNARO_RELAY_ENABLED=true PUNARO_RELAY_MACHINES_JSON="[$record]" go run ./cmd/punarod
+  ```
+
   Health/readiness are on the separate `PUNARO_HEALTH_LISTEN_ADDR` (default
   `127.0.0.1:8081`): `curl http://127.0.0.1:8081/healthz` and `/readyz`. Those
   probes only prove daemon startup, not durable delivery.
