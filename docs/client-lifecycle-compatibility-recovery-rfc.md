@@ -5,8 +5,9 @@ implemented or released security boundary. Acceptance requires corresponding
 updates to `DESIGN.md`, tests, release gates, and operator documentation. The
 fixed public origin is now GitHub Releases; see
 [`github-releases.md`](github-releases.md). Catalog/manifest parsers, offline
-signing tooling, and the draft publish workflow exist. Bootstrap, signed
-production keys, fleet rollout, and recovery remain outstanding.
+signing tooling, the draft publish workflow, signed pull, and
+`punaro-bootstrap run` with one-shot catalog-gated rollback exist. Signed
+production keys, enrollment, fleet rollout, and recovery remain outstanding.
 
 Implementation is intentionally incremental. Database schema 44 and the first
 server-side bearer-client lifecycle sub-slice implement authoritative client
@@ -188,6 +189,13 @@ local destination before calling the existing strict
 `POST /v1/enrollments/redeem` route. It chooses one UUID idempotency key and
 retains it until the response is durably committed. An exact retry must recover
 the same credential after a lost response.
+
+A registered legacy installation instead uses the strict
+`POST /v1/legacy-enrollments/redeem` route. It adds only its canonical public
+key and an Ed25519 signature over the enrollment ID, client binding,
+idempotency key, and decoded code digest. PostgreSQL verifies that proof against
+the exact pending legacy inventory record in the same redemption transaction;
+the private key never crosses the client boundary.
 
 The credential is written atomically beneath the platform's existing protected
 client directory. The invitation secret is removed only after the credential
@@ -445,7 +453,9 @@ A separately signed, short-lived release catalog lists the current release
 manifests, minimum safe sequences, and critical-release blocks. It has no key
 delegation. Online update and automatic recovery require a fresh catalog. This
 lets Punaro retire a vulnerable release without making the immutable manifest
-itself unverifiable years later.
+itself unverifiable years later. The named current release must have the
+highest retained release sequence, so a new installation cannot default to an
+older release that an already-updated client would reject as a downgrade.
 
 Artifact paths are relative names beneath a fixed configured release origin.
 They cannot contain a scheme, host, credentials, query, fragment, empty path
@@ -663,6 +673,12 @@ against newer state.
 Corrupt or incompatible database state is not repaired by installing a newer
 binary. Recovery remains fenced and follows the existing verified-backup
 restore workflow into safe paths.
+
+Every online preflight, candidate handoff, rollback, and interrupted-update
+recovery uses the same bounded non-mutating component doctor contract described
+in [doctor.md](doctor.md). Bootstrap and fleet doctor verify signed release
+state independently; a remediation identifier is evidence for an operator and
+is never executed as a command or treated as remote repair authority.
 
 ### Offline recovery bundle
 

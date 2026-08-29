@@ -8,7 +8,7 @@ mailbox; a native local client translates between that mailbox and Punaro.
 
 The accepted production direction is a versioned OCI application image with
 Docker Compose as the reference single-node deployment. The service is written
-in Go. Go matches the existing `agent-mailbox` toolchain, produces small
+in Go. Go matches the existing Waypost toolchain, produces small
 auditable binaries, and supports native clients on the existing platforms.
 
 ## Architectural authority
@@ -31,7 +31,8 @@ The accepted target is not yet a released service. The current `punarod`
 binary provides a loopback-only alpha text relay: explicit
 machine enrollment, signed requests, durable append/lease/ack, attached-endpoint
 advertising, and payload-free WebSocket wake hints. A local adapter bridges
-this to `agent-mailbox`. The separately deployable `punaro-telegram` bridge
+this to Waypost, retaining a bounded legacy `agent-mailbox` compatibility path
+during migration. The separately deployable `punaro-telegram` bridge
 adds explicit Telegram topic routing and a restricted Bot API client.
 Authenticated attachments use the separately gated trusted-relay surface and
 native client. V2/v3 production settings are rejected, their routes are
@@ -219,6 +220,10 @@ rebuilds remain later derived-index work.
 - Multi-node high availability, federation, or remote filesystem access.
 - Treating model-visible content as routing, authorization, URL-fetch, secret
   resolution, or execution authority.
+- Universal turn injection into a receiving model.
+- Universal runtime resume of an idle agent process.
+- Permission brokering for a receiving host's tool consent.
+- Read/action receipts for ordinary message delivery.
 
 ## Accepted deployment direction
 
@@ -278,8 +283,19 @@ Punaro separates four principals:
 | --- | --- | --- |
 | Machine | `workstation-a` | A single enrolled adapter installation. |
 | Endpoint | `agent/build-review` | A locally attached agent session advertised by one machine. |
-| Role | `role/plan-reviewer` | A durable conversation identity owned by one enrolled machine and bound to one live endpoint at a time. |
+| Role | `role/plan-reviewer` or `role/<machine>/<slug>` | A durable conversation identity owned by one enrolled machine and bound to one live endpoint at a time. Canonical `role/<machine>/<slug>` handles are opt-in public addresses; legacy names remain valid conversation members until explicitly registered. |
 | Conversation | `conv_01…` | The durable room/thread which has members and messages. |
+
+Enrollment templates are server-owned authorization choices, not client
+labels. A `trusted-agent` template expands only the exact confirmed project or
+all-project capability grants. A `service` template expands to an exactly empty
+grant set and creates a revocable device principal that can authenticate only
+routes requiring no capability grant, such as server doctor probes. Template,
+scope, and grants are bound into the owner-confirmed preview hash and pending
+enrollment; `service` cannot be combined with project scope, all-project scope,
+or any capability grant. It may carry one exact owner-selected legacy principal
+only for a proof-bound exchange, allowing an existing server doctor to replace
+its Ed25519 key with a zero-grant device credential without widening authority.
 
 An endpoint belongs to exactly one currently connected machine lease. A machine
 can only advertise endpoints in its configured namespace (for example,
@@ -293,6 +309,45 @@ not an alias or prefix rule for an endpoint. Conversation creation may name a
 role with `role_machine_id`; the server rejects an unknown machine and rejects
 any later attempt to reuse that role for another machine. A role may be a member
 of many conversations, but it has one active session binding at a time.
+
+Canonical public addresses use `role/<machine>/<slug>`, where `<machine>` is the
+authenticated owner and `<slug>` is lowercase ASCII matching
+`[a-z0-9][a-z0-9-]{0,62}`. The handle is immutable and unique in the
+installation. An optional display name is portable UTF-8, trimmed, and at most
+128 bytes; it is never authorization. `direct_addressable` defaults to false.
+Owning machines register or update that profile with `POST /v1/roles/register`
+and a required `Idempotency-Key`. The first call may create the durable role;
+later calls may change only display name and addressability. Exact retries
+return the first result. Legacy roles such as `role/plan-reviewer` stay valid
+conversation members and are not silently renamed; they remain hidden from
+addressable identity until explicitly registered under a canonical handle.
+Registration never returns bindings, endpoints, credentials, or membership.
+Authenticated machines list opted-in addresses with `POST /v1/roles/list` and
+resolve a name with `POST /v1/roles/resolve`. Listing is cursor-stable, bounded
+to 1–100 rows (default 50), ordered by canonical role, and includes only
+`direct_addressable` profiles plus a server-computed `online` flag from the
+current valid binding and endpoint ownership generation. Resolve accepts a
+fully qualified handle such as `role/workstation-review/reviewer` or an
+unqualified slug such as `reviewer`. Display names are never keys. Zero matches
+are indistinguishable from hidden or legacy roles. Multiple slug matches return
+a typed ambiguity result with at most 20 qualified roles and display names,
+never sessions or conversation inventory. After resolve, an authenticated
+machine sends with `POST /v1/direct-messages` and a required `Idempotency-Key`.
+The request names canonical `from_role` and `to_role` handles plus a body. The
+server proves `from_role` is owned by the signed machine and currently bound to
+one of its live advertised sessions. `to_role` must exist and remain
+`direct_addressable`; it may be offline. Self-send is rejected. One transaction
+reuses the unique unordered-role conversation or creates it with exactly those
+two role members, both send and receive, and no endpoint membership from
+request text. The immutable message is targeted only to `to_role`. The envelope
+sender is the source role, not the bound session. Exact retries of the same
+machine, key, roles, and body return the original conversation, message, and
+sequence. Changing target, body, or source with the same key conflicts.
+Revoking addressability before commit creates nothing; revocation after
+acceptance does not recall. Direct-role conversations are writable only
+through this route; generic `POST /v1/conversations/{id}/messages` appends,
+including targeted `target_role` sends, are refused. Delivery remains durable
+while the target is offline and becomes leaseable when that role binds later.
 
 The owning machine renews that binding with `POST /v1/roles/bindings`, supplying
 the role and one of its currently advertised endpoints. The server verifies the
@@ -341,6 +396,20 @@ Punaro. Signed request bodies, machine signatures, nonces, and idempotency keys
 are never sent through an Access-session preflight. All signed relay operations
 still reject redirects.
 
+Every Ed25519-authenticated relay request carries a fresh signed
+`X-Punaro-Nonce`; every device-bearer-authenticated relay request instead
+carries a fresh random, non-secret `X-Punaro-Request-Correlation`. The origin
+validates the correlation token's bounded canonical form and echoes the
+applicable request token exactly once as `X-Punaro-Response-Nonce` before route
+handling, including HTTP errors and WebSocket upgrades. Clients compare the
+echo with the token they generated to distinguish a Punaro-origin response or
+upgrade from an Access or reverse-proxy rejection. Bearer clients require
+exactly one matching echo before accepting any allowed HTTP response; doctor
+and WebSocket handshakes enforce the same exact match. The correlation token is
+neither a credential nor authorization, replay protection, or idempotency;
+bearer authorization remains independently mandatory, Ed25519 replay defense
+continues to use the signed nonce, and redirects remain rejections.
+
 `punarod` validates Cloudflare Access JWTs itself (audience, issuer, expiry,
 not-before, and signature via cached JWKS) in addition to accepting traffic
 only through the tunnel. Both the issuer and JWKS endpoint must be
@@ -368,7 +437,49 @@ create returns the original conversation; changing the request under the same
 key is a conflict. Messages are immutable rows. A relay-assigned UUID is the
 message identity; the sender supplies a separate idempotency key scoped to its
 machine. Each conversation has a monotonically increasing `sequence` assigned
-transactionally at acceptance. The guarantee is **at-least-once delivery**: a crash after a
+transactionally at acceptance. New-message creation is independently rate
+limited per authenticated sender machine and per conversation with durable
+token buckets. The limiter uses server time, not a client timestamp. An exact
+retry of a committed idempotency key returns the original message without
+charging. A new request consumes one token from each bucket in the same
+transaction that accepts the message. Exhaustion returns HTTP `429` with a
+bounded integer `Retry-After` and the stable error `rate limited`. After rate
+limits pass, the same transaction reserves pending-delivery capacity for every
+recipient identity before sequence allocation: count and body-byte ceilings per
+recipient, plus installation-wide count and body-byte ceilings. Broadcast
+reserves the complete fan-out or creates nothing. Acknowledgement, membership-
+revocation retirement, and other terminal delivery transitions release that
+reservation once. Lease and redelivery do not change charged capacity. Capacity
+exhaustion returns HTTP `429` with a bounded integer `Retry-After` and the
+stable error `capacity exceeded`. A rejected request creates no sequence,
+message, delivery, idempotency, or audit row. Explicit counters are updated in
+the append transaction; the send path does not scan pending deliveries.
+Startup and readiness verify counter consistency or fail closed. The operator
+`punaro relay reconcile-capacity` command uses a repair opener that preserves
+that fail-closed path while rebuilding drifted counters. Bodies are
+never hashed, compared, or parsed for loop detection.
+
+Pending deliveries also have a startup-validated maximum age. Conservative
+defaults expire work after seven days. Maintenance uses injected or database
+time, never sleep-based tests, and processes expiry and terminal prune in
+bounded pages with stable continuation. A delivery older than the inclusive
+age boundary transitions atomically from pending to terminal `expired`,
+releases pending capacity once, and advances only that recipient's contiguous
+cursor through the expired sequence. Another recipient of the same message is
+unchanged. An expired active lease cannot later acknowledge. Closed reasons
+are `acked`, `expired`, and `revoked`. Terminal records keep opaque
+message, conversation, and recipient identifiers, sequence, closed reason,
+lease generation, and timestamps; they never duplicate bodies or credentials.
+A separate terminal retention period, default thirty days, then prunes that
+metadata in bounded pages. Host-local `punaro relay list-terminals` and
+`punaro relay maintain-deliveries --yes` inspect and trigger that work.
+Ordinary agent HTTP exposes neither dead-letter inventory nor delivery
+receipts. Sender-facing append remains accepted/queued or rejected only.
+The loopback health listener publishes unlabeled counters for pending count
+and bytes, oldest pending age, terminal transitions by closed reason, retained
+terminals, and lease redeliveries.
+
+The guarantee is **at-least-once delivery**: a crash after a
 local mailbox injection but before the relay receives the acknowledgement can
 produce a redelivery.
 
@@ -452,6 +563,27 @@ The actionable local interface is `punaro-adapter member set --conversation
 or `punaro-adapter member remove --conversation ... --actor ... --member
 endpoint --idempotency-key ...`. These paths call the typed control endpoint;
 they never interpret local or delivered text as a command.
+
+Optional conversation display names are sanitized UTF-8 labels, not routing
+authority. Create may leave a room unnamed. `POST
+/v1/conversations/{id}/display-name` requires a live admin session and an
+`Idempotency-Key`; repeating the same sanitized label is a no-op. Once a room
+has a name it cannot be unnamed again. The adapter surfaces this as
+`punaro-adapter create --name ...` and `punaro-adapter rename --conversation
+... --actor ... --name ... --idempotency-key ...`.
+
+An agent session may occupy at most one conversation that is named or claimed.
+Occupancy is a direct membership or a live role binding to a role member of
+such a room. Joining a second named or claimed room is a conflict. Several
+sessions may share one topic. Unnamed, unclaimed rooms stay many-to-many.
+Exactly `telegram/primary` is exempt so the gateway can occupy every claimed
+topic. The fence is enforced on create, control upsert, role membership,
+bind-role, the first rename that assigns a name, and Telegram claim reserve.
+PostgreSQL serializes that first rename and claim reserve with
+`BindRoleToSession` using conversation then endpoint row locks, including
+still-unnamed rooms the role already occupies, so an uncommitted bind cannot
+hide a second exclusive occupancy. Memberships stay
+keyed by `(conversation, endpoint)` and are not unique on endpoint.
 
 `ack` is idempotent. It is conditional on the current recipient, lease token,
 and lease generation. Acks from the wrong machine, stale lease holders, expired
@@ -819,10 +951,15 @@ API client and reaches the relay using its own enrolled machine credential.
 | Method | Route | Purpose |
 | --- | --- | --- |
 | `PUT` | `/v1/machines/me/endpoints` | Atomically advertise active local attachments. |
-| `POST` | `/v1/conversations` | Create a conversation with explicit members; idempotent per signed machine and key. |
+| `POST` | `/v1/conversations` | Create a conversation with explicit members and an optional display name; idempotent per signed machine and key. |
+| `POST` | `/v1/roles/register` | Register or update one machine-owned canonical role profile; idempotent per signed machine and key. |
+| `POST` | `/v1/roles/list` | Bounded listing of opted-in addressable roles; no session inventory. |
+| `POST` | `/v1/roles/resolve` | Deterministic name resolution; short names are unambiguous or typed-ambiguous. |
+| `POST` | `/v1/direct-messages` | Create or reuse the unique direct-role conversation and send; idempotent per signed machine and key. |
 | `POST` | `/v1/roles/bindings` | Renew one durable role onto a currently attached session of its owning machine. |
-| `GET` | `/v1/conversations` | List conversations the caller may discover. |
-| `POST` | `/v1/conversations/{id}/messages` | Append an authorized broadcast, or set `target_role` for one durable receiving role. |
+| `GET` | `/v1/conversations` | List conversations the caller may discover, including optional display names. |
+| `POST` | `/v1/conversations/{id}/display-name` | Set a conversation display name from a live admin session; idempotent per signed machine and key bound to the original conversation, actor, and label. |
+| `POST` | `/v1/conversations/{id}/messages` | Append an authorized broadcast, or set `target_role` for one durable receiving role. Distinct new messages are admitted only within the configured sender and conversation rate limits and pending-delivery capacity ceilings; committed idempotent retries do not consume tokens or reserve capacity again. |
 | `POST` | `/v1/conversations/{id}/invocations` | Request a server-authorized, body-free offline-role handoff. |
 | `POST` | `/v1/deliveries/lease` | Lease bounded durable deliveries for one endpoint. |
 | `POST` | `/v1/deliveries/{id}/ack` | Acknowledge after local injection. |
@@ -837,36 +974,190 @@ cover client retry windows.
 
 ## Telegram integration
 
+A Punaro conversation is the topic. `user-telegram` is a conversation-scoped
+built-in participant, not a durable `roles` row: creating or member-setting
+that label is rejected. `POST /v1/conversations/{id}/telegram-claim` is a
+singleton reservation (`request_hash` is SHA-256 of the conversation id).
+Only a live `telegram/primary` advertisement may complete a claim, list
+unclaimed named rooms, poll pending reservations, or submit
+`telegram-inbound`. Complete inserts `telegram/primary` with send|receive
+and materializes `user-telegram`. Targeted send `target_role=user-telegram`
+requires a completed claim and creates one delivery to `telegram/primary`.
+SQLite-to-PostgreSQL mail cutover exports `telegram_claims`,
+`telegram_participants`, `telegram_claim_events`, and inbound `messages`
+metadata (`from_participant`, `in_reply_to_*`, `telegram_thread_id`) so a
+claimed installation keeps reservation authority and reply context.
+
 The Telegram gateway converts one explicitly configured topic into one Punaro
 conversation. It verifies the configured allowed Telegram user ID on every
-update. It persists `update_id` only after the relay append succeeds; retrying
-an unrecorded update uses the same relay idempotency key, so crashes or
-transient relay failures do not silently lose user input.
+update, including `callback_query`. It persists `update_id` only after the
+relay append succeeds (or after an inert command/callback is finalized);
+retrying an unrecorded update uses the same relay idempotency key, so crashes
+or transient relay failures do not silently lose user input.
+
+Operator `/list` is a private-chat topic picker: the gateway polls
+`callback_query` and sends display-name buttons whose `callback_data` is a raw
+256-bit token. Only SHA-256(token) is stored, with a 15-minute TTL and a cap
+of 100 outstanding tokens. Conversation ids never appear in Telegram. A `/list`
+tap persists `claim_executions` reserved, then consumes the token in the same
+SQLite transaction, and `SyncOnce` resumes any incomplete execution. The
+gateway persists a `creating` fence under the same SQLite `BEGIN IMMEDIATE`
+write lock as `route`, rechecking `topic_routes` and adopting a concurrent
+emergency route instead of creating a second topic, then calls
+`createForumTopic` only when no route exists,
+persists `message_thread_id` and the creation `chat_id` immediately, and
+never calls `getForumTopic`. Resume of `topic_created` binds that stored
+pair; a changed allowed user fails closed instead of attaching the old
+thread to a new chat. A crash after Bot API success and before the thread
+id is stored keeps the fence, so resume does not create a second
+user-visible topic. An emergency `route` of a known thread is the supported
+recovery: unthreaded `creating` may be remapped, and resume binds that route
+without calling `createForumTopic`. A thread already bound to `creating`
+still cannot be stolen. An ambiguous
+createForumTopic error (timeout, lost response, or decode failure) also
+keeps the fence instead of retrying create. A completed 4xx Bot API
+rejection, including HTTP 429, returns the row to reserved so resume can
+retry createForumTopic; the topic was not created. Agent-side pending reservations
+are polled with `POST /v1/telegram/claims/pending`; those rows skip a second
+reserve. A locally reserved execution whose relay claim is already complete
+continues only when this gateway already has a recoverable topic route for
+the configured chat; otherwise it fails closed and requires
+`punaro-telegram adopt` instead of creating a second topic. Reusing a stored
+route requires its `chat_id` to match the configured allowed user.
+`punaro-telegram adopt` writes the local `claim_executions` fence from
+`topic_routes` under one SQLite `BEGIN IMMEDIATE` as `adopting` before the
+remote reserve, so an emergency `route` remap cannot leave a pending relay
+claim without a protected local route. A crash after that fence and before
+`ClaimConversation` resumes through the adopt reservation instead of
+`CompleteTelegramClaim`. `route` refuses a conversation that is adopting, topic-created, routed, or
+complete, or a `(chat,thread)` already bound to a `creating` or later claim.
+Unthreaded `creating` may be bound to a known thread. Main-chat
+ordinary text stays unbound. There is no main-chat fallback. Gateway startup
+and `SendDelivery` fail closed when a completed route's `chat_id` is not the
+configured allowed user. `/list` fails closed when two unclaimed rooms share
+the same 64-rune button label: it sends a generic operator error, consumes
+the update, and does not stall later Telegram polling or outbound leasing. One `SyncOnce` starts at most ten new pending
+claims, retries at most ten incomplete local executions, and revalidates at
+most ten completed routes so Bot API retries cannot starve inbound and
+outbound mail; durable cursors continue later rows on the next cycle.
+A machine's Telegram claim idempotency key maps to one conversation. Every
+successful reserve or ensure records `(machine, key)` in
+`telegram_claim_idempotency` bound to that conversation hash: exact replay
+returns the existing claim, and reuse on another conversation fails closed.
+PostgreSQL serializes reserve/ensure by `(machine, key)` with
+`pg_advisory_xact_lock` before the mapping lookup. Claim and mapping
+inserts use untargeted `ON CONFLICT DO NOTHING` and then read the winning
+row, so a racing unique `(requested_by_machine, idempotency_key)` cannot
+abort the transaction. Opening a pre-v8 SQLite database that already stored
+the same machine key on two conversations never deletes a complete claim:
+extra completes are rekeyed to a collision-free `legacy-dup-` token, extra
+pending rows are dropped, then the unique index is created so inspect/migrate
+can start.
+
+Inbound topic text is submitted on `POST /v1/conversations/{id}/telegram-inbound`
+with `from_participant=user-telegram`. A local `telegram_outbound` map, filled
+from each successful `sendRichMessage` `message_id`, resolves `reply_to_message`
+into inert `in_reply_to_*` metadata. A map miss delivers the text without that
+metadata.
 
 For outbound messages, it leases a durable gateway delivery and posts it using
 the exact stored `message_thread_id`. One durable unique route prevents a
-conversation from fanning out to multiple topics. There is no topic picker,
-callback data, or main-chat fallback. The Bot API does not expose a send
-idempotency key, so a crash after an accepted Telegram send and before relay
-acknowledgement is deliberately at-least-once. Agent text is rendered as
-escaped rich HTML with entity detection disabled and content protection set.
+conversation from fanning out to multiple topics. `SendDelivery` stays
+route-based (`topic_routes` only) and refuses a `chat_id` other than the
+configured allowed user. A missing or foreign route fails closed and leaves
+the delivery unacked. Requiring a
+completed claim on that path is a post-adopt soak follow-up. The Bot API does
+not expose a send idempotency key, so a crash after an accepted Telegram send
+and before relay acknowledgement is deliberately at-least-once. Agent text is
+rendered as escaped rich HTML with entity detection disabled and content
+protection set.
+Gateway health persists inbound poll-offset progress separately from outbound
+delivery-head progress. Only a completed relay acknowledgement advances the
+outbound clock during a failing cycle, so ongoing inbound traffic cannot mask a
+repeatedly failing outbound head. The endpoint-specific read-only doctor probe
+hashes the exact `X-Punaro-Doctor-Endpoint` value into the machine-signed
+canonical request; a proxy cannot change the asserted endpoint without making
+authentication fail.
 
-An optional major-update adapter action resolves the registered
-conversation/topic and submits a concise milestone or blocker message. It must
-fail closed if there is no explicit thread route.
+Product pings and replies to the human use `punaro-adapter send --to
+user-telegram`. The adapter resolves the session's sole claimed topic and
+sets `target_role=user-telegram`. Pending quota for that send charges
+`telegram/primary` only when the sender is not the gateway; a gateway
+self-send creates no delivery and must not leave an un-ackable quota charge.
+Agents never pass a Telegram thread or chat id.
+`telegram-major-updates` / `send_major_update.py` is not a production
+sender.
+
+Adopt of the two live routes is fence-legal only in this order: rename the
+keeper while the non-keeper is still unnamed; run `punaro-relay-adopt-prepare
+--drop-role role/telegram-codex --yes` on the non-keeper; then
+`punaro-telegram adopt` on `<KEEPER_CONVERSATION_ID>` (thread
+`<KEEPER_THREAD_ID>`) and `<NON_KEEPER_CONVERSATION_ID>` (thread
+`<NON_KEEPER_THREAD_ID>`). Resolve those operator-protected values from the
+live gateway state; never record them in source. Adopt never calls
+`createForumTopic`.
 
 ## Local adapter boundary
 
-The Go adapter runs on each agent machine. It owns the local `agent-mailbox`
+The Go adapter runs on each agent machine. It owns the local Waypost
 CLI/MCP integration and no remote actor may invoke the CLI directly. It:
 
 1. Watches or periodically reads the locally configured attachment group.
 2. Advertises only currently attached sessions to Punaro with a renewable lease.
 3. Converts inbound Punaro messages to local mailbox messages, preserving
-   `punaro_message_id`, conversation ID, and Telegram thread metadata.
-4. Watches local replies and major-update events, then submits them to Punaro.
+   `punaro_message_id`, conversation ID, `from_participant`, `in_reply_to_*`,
+   and `telegram_thread_id`. When `from_participant` is `user-telegram`, the
+   envelope `from_endpoint` is rewritten to `user-telegram`. Agents cannot set
+   those metadata fields on `POST /v1/conversations/{id}/messages`.
+4. Watches local replies and submits them to Punaro. Pings use
+   `punaro-adapter send --to user-telegram`, not a Bot API side channel.
 5. Keeps a local encrypted-or-permission-restricted SQLite journal of received
    message UUIDs and pending acknowledgements.
+
+## Agent runtime boundary
+
+Punaro's portable contract stops at durable relay acceptance, local mailbox
+injection, and optional fenced process start. Agent-runtime behavior—model
+turns, tool permission, and whether an idle session continues—belongs to the
+receiving agent host and is not a Punaro guarantee.
+
+Punaro intentionally mediates both same-machine and cross-machine messages
+through the Linux gateway: the Linux-hosted relay and, when configured, the
+Linux Telegram process. Adapter and native clients are supported on macOS,
+Linux, and Windows. Linux gateway hosting plus cross-platform clients is
+intentional, not a parity gap.
+
+`notify`, mailbox delivery, and `invoke` remain three distinct mechanisms:
+
+- `notify` is a best-effort, payload-free WebSocket wake. It can accelerate an
+  already-attached adapter's next poll. It cannot create a process, inject
+  between tool calls, start a model turn, or resume an idle runtime.
+- Mailbox delivery is the durable path: advertise attached sessions, lease
+  deliveries, inject an inert typed envelope into the local `agent_mailbox`,
+  then acknowledge. Relay append acceptance means durable `accepted/queued` for
+  authorized recipients. It does not mean the recipient's mailbox has been
+  acknowledged, that a model read the body, or that an agent acted.
+- `invoke` is optional, operator-configured, fenced runtime start. It is granted
+  as an endpoint capability, carries no message body, and is separate from
+  ordinary delivery. Without a local invoker command, ordinary mail continues
+  and invoke work is not leased. A possible future Pi or provider-specific
+  extension that starts or resumes a runtime is non-normative and out of scope.
+
+An active agent must monitor its local mailbox with bounded wait/receive/ack
+behavior, repeating those waits during long-running work. Ordinary delivery does
+not universally inject between tool calls, create a new turn, or resume an idle
+runtime. This boundary excludes universal turn injection, universal runtime resume,
+permission brokering, and read/action receipts.
+
+Tool permission and consent belong to the receiving agent host. Punaro does not
+broker, cache, or replay host permission decisions. Punaro's enforceable safety
+invariant is narrower: message content is inert data and
+cannot directly alter Punaro configuration, credentials, routing, membership,
+or invoke authority.
+
+There is no per-message accept/hold/refuse UI and no delivered, read, or action
+receipt. Installation, role addressability, and conversation membership are the
+authorization boundary.
 
 ## Superseded attachment-transfer v2 foundation
 
@@ -1302,13 +1593,18 @@ The supported onboarding client is `punaro-enroll`. `prepare` creates a
 private current-user state directory and records only the canonical origin,
 an explicit containing CIDR for trusted-LAN plaintext when selected, and a
 fresh opaque binding in the versioned non-secret sidecar. It
+accepts literal loopback HTTP under the same zero-policy version-one identity
+shape as HTTPS; non-loopback HTTP still requires the version-two explicit LAN
+acknowledgement and containing CIDR. It
 prints that public binding for the server owner to use in the exact
 least-privilege `trusted-agent` grant preview. `redeem` reads the server's
 short-lived enrollment JSON only from a protected local file, requires its
 binding to equal the sidecar before any request, and posts only to that stored
 origin. Before any network operation it creates a protected recovery journal
-containing the code and fresh idempotency UUID. Server retry with that UUID
-yields the same credential; successful persistence removes the journal. No
+containing the code, fresh idempotency UUID, and, for a legacy exchange, the
+non-secret public key proving the selected legacy private key. Recovery rejects
+a changed proof locally without mutating that journal. Server retry with the
+preserved UUID yields the same credential; successful persistence removes the journal. No
 command-line argument, environment variable, sidecar, normal output, or
 diagnostic includes the code or bearer credential. POSIX storage rejects
 symlinks, non-regular files, non-owner files, and group/other-readable state.
@@ -1331,6 +1627,33 @@ for the exact committed self-revocation key. Authentication and session checks
 fail closed unless every lifecycle generation agrees. This sub-slice does not
 yet replace static relay endpoint authority, import exact legacy enrollments,
 or implement the new invitation, hello, updater, fleet, or recovery protocols.
+
+Schema version 45 adds opt-in canonical `role/<machine>/<slug>` profiles. The
+handle is immutable and unique; display name is never authorization.
+`direct_addressable` defaults to false. Legacy role names remain valid
+conversation members until explicitly registered.
+
+Schema version 46 adds durable per-sender and per-conversation token buckets
+for new relay messages. Token state survives daemon restart. Configuration
+bounds are startup-validated. Exact committed retries do not consume tokens.
+Current SQLite sources that contain `rate_buckets` are migration-source
+version 5 and copy those rows into PostgreSQL during cutover so a depleted
+sender cannot regain burst after authority transfer. A prepared parent source
+without that table remains version 4 and exports an empty `mail_rate_buckets`
+page, so crash-during-cutover plus an upgraded admin binary can still inspect
+and resume.
+
+Schema version 47 adds idempotent direct-role conversations. Schema version 48
+adds explicit pending-delivery capacity counters per recipient identity and
+installation-wide. Quota tables are derived operational
+state, not cutover content: inspect and fingerprint ignore them, and activation
+rebuilds them from pending deliveries. Capacity denial is distinct from rate
+limiting. Schema version 49 adds content-free `mail_delivery_terminals` for
+acked, expired, and revoked deliveries. Terminal tables are the same class of
+derived operational state: inspect and fingerprint ignore them, abort still
+deletes them, and they are not cutover content. Pending-age expiry and
+terminal prune run in bounded host-local maintenance; they are not an agent
+receipt API.
 
 The supported cutover action is `punaro mail cutover`. Its dry-run reads the
 service-owned `relay.db` from the installation data directory and prints the
@@ -1469,6 +1792,192 @@ This generated-stack contract covers the single configured `punarod` writer and
 externally provisioned PostgreSQL; the production PostgreSQL/profile bundle is
 still M-23.
 
+## Canopi lifecycle dashboard boundary
+
+Canopi is Punaro's independently deployable coding-agent status surface. Its
+versioned protocol is intentionally outside the Punaro relay/mail contract:
+provider adapters normalize lifecycle signals into strict events without
+knowing whether direct HTTP, a local spool, or a future Punaro bridge transports
+them. Punaro message content is never interpreted as Canopi control data.
+
+The MVP collector uses a separate bearer-authenticated loopback HTTP or LAN TLS
+listener, a bounded durable state snapshot, and at-least-once event IDs.
+Duplicate IDs are harmless and an already-durable duplicate is acknowledged
+before future-skew validation, preserving exact-retry idempotency across clock
+corrections.
+For one card, `activity_at` and then `event_id` fence delayed/out-of-order
+updates. Admission durably expires stale records before rejecting new identities
+at a configured live-record ceiling, and rejects activity timestamps beyond
+configured future clock skew. A failed
+state-file write never mutates the acknowledged in-memory revision, record, or
+dedupe set, so an exact retry still attempts persistence. Non-terminal TTL
+expiry archives/hides abandoned work and never converts it to success; done
+retention is independent. Expiry commits transactionally; a failed state-file
+write leaves the acknowledged record visible under the unchanged revision.
+The configured aggregate serialized-state budget is checked transactionally
+before an event is acknowledged; startup rejects a larger state file before
+allocating or decoding its body, and snapshot JSON is bounded by the same
+invariant. Admission evicts the oldest dedupe IDs until the candidate fits but
+never evicts the newly acknowledged ID; record overflow still fails
+transactionally. Serialized updates reclaim crash-left state
+temporaries in per-target namespaces and bounded directory batches before
+creating a replacement, without racing another state file in the same parent.
+The state path is absolute and clean. Its parent must be current-user-owned and
+is made owner-only; existing Unix state files must be stable, singly linked,
+current-user-owned `0600` regular files opened without following symlinks.
+Windows applies equivalent owner, protected-DACL, and no-reparse checks to the
+directory, existing state, and replacement temporary. Windows replacement
+hard-links the old target as a recovery copy, flushes that directory entry,
+publishes with `MoveFileEx` replacement plus write-through semantics, flushes
+the directory again, and restores the backup at startup if the target is absent.
+Each replacement also recovers or clears a leftover backup before creating the
+next one, preventing a failed flush or cleanup from wedging later writes.
+A kernel-held lifetime lock keyed by the state path excludes overlapping
+collector writers and is released by orderly close or process exit. Windows
+derives that lock key from the final path of an open state or parent-directory
+handle, collapsing case, extended-device, short-name, and directory aliases.
+Unix resolves the existing state path or its parent before deriving the key,
+collapsing aliases introduced by symlinks in ancestor directories.
+The fixed lock file uses exclusive creation and no-follow opening on both
+platforms; unsafe pre-existing entries are removed, directory-synced, and
+recreated with current-user-only protection. Repair is serialized cross-process
+with the parent-directory kernel lock on Unix and a case-normalized named kernel
+mutex on Windows before rechecking and unlinking the unsafe entry.
+Signal shutdown waits for the HTTP server to drain active handlers before closing
+the store and releasing this lifetime lock, so a rolling replacement cannot load
+or write state while an old ingestion is still persisting. This drain is
+deliberately unbounded rather than releasing the writer lock after a timeout.
+Snapshot and image ETags change only with state revision or rendered response
+content. Snapshot responses use a weak revision validator because their
+generation timestamp changes without a semantic state change; rendered PNGs
+use strong content hashes. TTL checks always use the real clock; only
+relative-time rendering and its image cache key use the configured bucket.
+
+Prompts, transcripts, assistant messages, credentials, tool inputs, and tool
+outputs are not part of the protocol. Metadata is default-deny: the schema and
+Go validator expose only `hook`, `simulated`, and `agent_type`, with matching
+per-key types. Wire and persisted decoding retain numeric metadata as exact JSON
+numbers instead of converting through `float64`; omission is valid, while an
+explicit JSON `null` is rejected because the schema requires an object. Only
+valid UTF-8 reaches JSON decoding, preventing malformed identifiers from being
+normalized into colliding replacement-character strings. Only explicit,
+trusted hook fields drive lifecycle state;
+assistant text is neither inspected for classification nor forwarded. Claude
+invocation IDs are random, fixed-length 256-bit values independent of both the
+bearer credential and provider payload, preventing the collector or a token
+holder from testing guesses about private hook content through visible IDs.
+The queued normalized event retains that ID across delivery retries. Raw Claude
+hook input must also pass the protocol's UTF-8 and paired-scalar-escape checks
+before provider JSON decoding. Adapter delivery is detached, bounded, and
+incapable of controlling the coding agent. Derived machine labels and task
+titles are rune-safely bounded.
+
+The provider-facing Claude process is configured as a current-schema asynchronous
+Claude Code command hook (30-second timeout), so it cannot block or control the
+agent while it normalizes raw input only in memory and writes each privacy-safe
+event to a bounded owner-only spool before launching a detached delivery process.
+Raw input is never placed in process arguments,
+environment variables, durable files, or requests. The completed event inode is
+hard-linked into its final queue name before file or directory sync begins. If
+Claude terminates a hook during either uncancellable durability barrier, or the
+detached supervisor launch fails, the target remains recoverable. A hook reports
+success only after the file and directory barriers succeed; on a sync failure it
+kicks the persistent supervisor and exits non-zero. The persistent supervisor
+reopens and re-syncs the file and directory before any delivery.
+Claude Code's current hook payload has neither a source timestamp nor a
+monotonic invocation sequence. The asynchronous integration therefore uses
+best-effort local invocation/admission ordering and never reads private
+transcripts to manufacture ordering data.
+Unix
+spools must be current-user-owned and are tightened to mode `0700`; Windows
+spools must be current-user-owned and receive a protected DACL containing only
+the current user's full-access ACE. One
+cross-process worker retries queued events with their original IDs until
+acknowledged, while continuing past a rejected event so independent later
+updates are not starved. Per-attempt network timeouts and kernel-released file
+locks keep provider hooks isolated from collector outages. Enqueue, drain, and
+supervisor ownership is bound to each process's open handle, so process exit
+releases it and neither stale timestamps nor wall-clock jumps can fence out a
+live holder. Concurrent enqueues wait at most 250 ms for the primary lane. Longer
+contention publishes through an atomically claimed reserve slot within the same
+total event bound; no collector network I/O runs under the primary lock. The
+target link precedes sync in both lanes, so a provider timeout cannot remove a
+complete event merely because sync stalled. The configurable primary phase is
+capped at 750 ms, maintenance and capacity
+scans are cancellable in 128-entry batches, and primary-budget exhaustion falls
+through to the reserve. The fallback temporary starts
+under a pre-lock staging name, acquires its kernel lock, and only then renames
+into the cleanup-visible namespace. Cleanup therefore cannot unlink the file in
+the create-to-lock window; a pre-lock crash remnant becomes reclaimable after one
+minute. Under the enqueue lock, every enqueue removes
+crash-left temporary event files before admitting new work. The same protected-token checks apply on the adapter
+host. A persistent
+`supervise` mode runs under the host service manager, holds a singleton lease,
+polls even while the spool is empty, and provides a durable wake/restart path
+when a detached kick or worker crashes during a quiet session.
+On Windows, each hard-link publication and acknowledgement removal is followed
+by a directory `FlushFileBuffers`, matching the Unix directory-sync durability
+contract. The supervisor repeats the file and directory barrier before it can
+authenticate an event to the collector.
+Queued event reads stat the opened file and remain stream-limited to 64 KiB, so
+corrupt oversized entries cannot turn the event-count bound into unbounded memory.
+Each queued child must also be a stable, no-follow, private current-user-owned
+regular file. Event enumeration discards pre-existing foreign or shared children
+after the parent is tightened and before capacity accounting or delivery; enqueue
+protects new files before publication.
+Fixed-name enqueue, drain, and supervisor locks are created exclusively and
+opened without following links. Pre-existing entries that fail current-user
+ownership or privacy checks are removed, directory-synced, and safely recreated.
+One sixteenth of the configured capacity (at least one, at most 256) is reserved
+for contention slots, so the primary and fallback lanes remain jointly bounded.
+Kernel locks on active fallback temporaries distinguish live publication from
+crash leftovers during cleanup.
+
+Structurally valid event batches continue across per-event admission failures
+and return ordered per-event status records with HTTP 207 when mixed; only a
+shared persistence failure aborts the batch. This prevents one permanently
+rejected identity from starving later updates on every retry. The simulator
+retains only rejected events from a mixed response and retries their stable IDs
+before advancing. The batch envelope is strictly an array; JSON `null` is not
+an empty batch and is rejected.
+
+The renderer always sorts the complete state set waiting, done, working, then
+recent-first inside each state, before applying configurable capacity. Accepted
+fixed-panel grids have one or two columns and one through six rows; other shapes
+are rejected before they can overlap typography or icons. The last slot becomes
+an omitted-tail per-state count when overflowing. Its output is an exact
+800x480 two-color PNG. Custom header titles are fitted into the pixels reserved
+before the right-aligned lifecycle totals. Each tile similarly fits its machine
+label only into the pixels preceding the right-aligned relative time plus a
+fixed gap. The panel thresholds each decoded RGB565 scanline and packs it
+MSB-first for the Seeed_GFX one-bit sprite; it performs a full e-paper
+refresh only after a changed ETag, bounded PNG download, successful decode, and
+exact dimension validation. The RTC-retained validator is versioned so a
+firmware update that changes image interpretation forces one corrective redraw.
+
+Canopi's first listener is loopback by default. A concrete private/link-local
+listener requires explicit LAN opt-in and an absolute TLS certificate/key pair;
+wildcard, public, and plaintext LAN binds fail closed. The panel accepts only an
+HTTPS render URL, synchronizes a valid wall clock over NTP before its first
+request, and validates the collector certificate against its configured CA.
+Adapter and simulator origins use the same HTTPS-except-literal-loopback
+policy and refuse redirects, so no reusable bearer is sent to an unvalidated
+target or over plaintext LAN traffic.
+This shared-token LAN MVP is not yet Punaro device-authenticated and must not be
+mounted on the public Punaro origin. Its bearer token must be a protected,
+current-user-owned regular file (or equivalent current-user-only Windows ACL),
+opened without following symlinks and rejected if its identity changes during
+open. The collector loads its TLS private key through that protected loader and
+constructs the in-memory certificate before serving, so the HTTP server never
+reopens a replaceable key path. Collector, provider adapter, and simulator share
+the same bearer-token loader.
+
+Simulator event IDs include a random per-process run identity, preventing a
+restart from colliding with the collector's durable dedupe window. A failed
+post retains the exact pending batch and event IDs for retry before the
+simulation advances. State transitions use the current tick timestamp so a
+resumed working update always orders after the preceding wait.
+
 ## Required adversarial acceptance tests
 
 The implementation is not internet-exposure-ready until these cases pass:
@@ -1495,12 +2004,59 @@ The implementation is not internet-exposure-ready until these cases pass:
 - Go, not Rust, for v1.
 - Versioned OCI images and Docker Compose are the reference production path;
   a dedicated Linux LXC remains a valid OCI host.
+- Server, adapter, bootstrap, Telegram, and fleet readiness use the shared
+  schema-version 1 doctor contract in `docs/doctor.md`. Reports are bounded,
+  content-free, deterministic, and read-only; remediation identifiers never
+  grant authority to repair, restart, enroll, update, or reroute anything.
 - Client updates pull signed artifacts from the fixed GitHub Releases origin
   `https://github.com/rock3r/punaro/releases/download`. The gateway names a
   signed release; it never supplies a URL, command, or unsigned `latest`
   pointer. `punaro-bootstrap update` verifies catalog/manifest signatures and
   exact artifact digests, then publishes `current`/`previous` slots.
-  `punaro-bootstrap run`, health, and enrollment are not implemented yet.
+  Familiar client command names are installer-owned copies of one stable,
+  closed-allowlist dispatcher. On POSIX it replaces itself with the selected
+  signed-slot payload; on Windows it starts that exact payload with inherited
+  stdio and propagates its exit status. Built-in updates replace signed slot
+  artifacts, never these dispatcher copies. Doctor requires the adapter,
+  enrollment, memory, and trusted-attachment dispatchers to be regular,
+  byte-identical executables, while the client installer waits for every
+  Windows destination to become replaceable before overwriting it. When that
+  installer replaces an enabled repeating Windows task, it disables the task
+  for the complete replacement critical section, stops instances even if they
+  started while the fence was acquired, and restores the prior enabled/running
+  state on failure. A restoration failure is reported together with the original
+  installation error. It terminates only processes whose verified image is the
+  exact fixed bootstrap path, confirms their bounded exit, and then applies the
+  same replaceability fence.
+  Platform services launch `punaro-bootstrap run`, which supervises the
+  current-slot adapter, requires a local ready signal within 60 seconds when a
+  previous slot exists, rolls back once if the fresh catalog still allows that
+  previous release, and otherwise enters recovery-only. A generation that
+  already passed that ready gate is not re-tested as a candidate after reboot.
+  The supervisor stays
+  parked until a later signed update or seed clears that marker, then exits so
+  the platform service restarts onto the repaired slot. An unreadable update
+  journal also enters recovery-only. Invalid `generation.json`,
+  `healthy-generation.json`, `release.pub`, or `auto-rollback.json` nodes are
+  quarantined so signed repair and supervision can continue. An exhausted
+  generation high-water mark is rejected instead of wrapping. Source installers
+  persist `--keys-file` into `release.pub` and refuse to leave a signed previous
+  slot without that key set, so catalog-gated rollback remains available. `run` holds a separate `run.lock` lease for
+  the child's lifetime so two supervisors cannot share the same mailbox and
+  ready file; the transaction lock stays free for `update`. A crash-safe
+  `run.pid` records the child's pid and image path. A starting marker is written
+  before the child is launched so a crash in that window cannot leave an
+  untracked adapter; the next supervisor identity-checks matching images on
+  Linux, macOS, and Windows and takes the lease only when they are gone. The next supervisor kills
+  that process only when the live image still matches, and it removes the file
+  when the child or supervisor exits. If the image cannot be verified, the
+  next supervisor refuses the run lease instead of launching a second adapter. A later publish stops the old adapter
+  with SIGTERM and a bounded wait before SIGKILL so the service can restart
+  onto the new slot. A healthy child that exits while the
+  supervisor is still running is a supervisor failure so systemd/launchd restart
+  it. The one-shot rollback decision is durable across supervisor restarts so a
+  later failure cannot swap back to the known-unhealthy slot. Enrollment is not
+  implemented yet.
 - PostgreSQL is the sole authoritative server database after cutover; SQLite is
   retained for client recovery, migration evidence, and parity tests only.
 - HTTP fetch/ack is authoritative; WebSocket carries topic ID and sequence only.

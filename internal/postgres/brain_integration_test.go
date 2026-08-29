@@ -2354,6 +2354,9 @@ OR EXISTS (SELECT 1 FROM relay.idempotency_records WHERE resource_id=$1 AND resu
 			t.Fatalf("clean up evidence mail endpoint: %v", err)
 		}
 	}
+	if _, err := app.ReconcilePendingQuota(ctx); err != nil {
+		t.Fatalf("reconcile leftover mail pending quota: %v", err)
+	}
 }
 
 func testSecretGuardSchemaDriftIntegration(ctx context.Context, t *testing.T, app *Database, ownerDB *sql.DB) {

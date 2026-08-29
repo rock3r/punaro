@@ -12,6 +12,7 @@ import (
 	"fmt"
 	"io"
 	"log"
+	"net/http"
 	"os"
 	"os/exec"
 	"os/signal"
@@ -21,23 +22,30 @@ import (
 	"time"
 
 	"github.com/rock3r/punaro/internal/adapter"
+	"github.com/rock3r/punaro/internal/bootstrap"
 	"github.com/rock3r/punaro/internal/clientidentity"
 	"github.com/rock3r/punaro/internal/clienttransport"
+	"github.com/rock3r/punaro/internal/memoryclient"
 	"github.com/rock3r/punaro/internal/relay"
 )
 
 type adapterConfig struct {
-	relayURL        string
-	machineID       string
-	privateKey      ed25519.PrivateKey
-	attachedGroup   string
-	mailboxBinary   string
-	mailboxState    string
-	dataDir         string
-	pollInterval    time.Duration
-	accessToken     adapter.AccessServiceToken
-	transportPolicy clienttransport.Policy
-	invokerCommand  string
+	relayURL             string
+	machineID            string
+	privateKey           ed25519.PrivateKey
+	deviceCredential     string
+	attachedGroup        string
+	mailboxBinary        string
+	mailboxState         string
+	dataDir              string
+	pollInterval         time.Duration
+	accessToken          adapter.AccessServiceToken
+	transportPolicy      clienttransport.Policy
+	invokerCommand       string
+	profileFile          string
+	privateKeyFile       string
+	deviceCredentialFile string
+	identityFile         string
 }
 
 const (
@@ -49,6 +57,7 @@ var adapterProfileKeys = map[string]struct{}{
 	"PUNARO_ADAPTER_RELAY_URL":        {},
 	"PUNARO_MACHINE_ID":               {},
 	"PUNARO_MACHINE_PRIVATE_KEY_FILE": {},
+	"PUNARO_DEVICE_CREDENTIAL_FILE":   {},
 	"PUNARO_ATTACHED_GROUP":           {},
 	"PUNARO_ADAPTER_DATA_DIR":         {},
 	"PUNARO_MAILBOX_STATE_DIR":        {},
@@ -70,10 +79,20 @@ func main() {
 		err = run()
 	case os.Args[1] == "send":
 		err = runSend(os.Args[2:])
+	case os.Args[1] == "claim":
+		err = runClaim(os.Args[2:])
+	case os.Args[1] == "get":
+		err = runGet(os.Args[2:])
 	case os.Args[1] == "create":
 		err = runCreate(os.Args[2:])
+	case os.Args[1] == "rename":
+		err = runRename(os.Args[2:])
 	case os.Args[1] == "bind-role":
 		err = runBindRole(os.Args[2:])
+	case os.Args[1] == "register-role":
+		err = runRegisterRole(os.Args[2:])
+	case os.Args[1] == "contacts":
+		err = runContacts(os.Args[2:])
 	case os.Args[1] == "invoke":
 		err = runInvoke(os.Args[2:])
 	case os.Args[1] == "member" && len(os.Args) > 2 && os.Args[2] == "set":
@@ -84,15 +103,49 @@ func main() {
 		err = runAttachmentNotify(os.Args[2:])
 	case os.Args[1] == "mailbox-mcp":
 		err = runMailboxMCP()
+	case os.Args[1] == "doctor":
+		os.Exit(runAdapterDoctor(os.Args[2:], os.Stdout, os.Stderr))
+	case os.Args[1] == "doctor-bootstrap-report":
+		os.Exit(bootstrap.RunDoctorHelper(os.Args[2:], os.Stdout))
+	case os.Args[1] == "doctor-plugin-inspect":
+		os.Exit(runAdapterPluginInspect(os.Args[2:], os.Stdout))
+	case os.Args[1] == "doctor-mailbox-inspect":
+		os.Exit(runAdapterMailboxInspect(os.Args[2:], os.Stdout))
+	case os.Args[1] == "doctor-service-inspect":
+		os.Exit(runAdapterServiceInspect(os.Args[2:], os.Stdout))
+	case os.Args[1] == "doctor-bootstrap-release-inspect":
+		os.Exit(runAdapterBootstrapReleaseInspect(os.Args[2:], os.Stdout))
+	case os.Args[1] == "doctor-client-launchers-inspect":
+		os.Exit(runAdapterClientLaunchersInspect(os.Args[2:], os.Stdout))
+	case os.Args[1] == "version":
+		if adapterBuildRelease == "" {
+			os.Exit(1)
+		}
+		_, err = fmt.Fprintln(os.Stdout, adapterBuildRelease)
 	case os.Args[1] == "validate-relay-transport":
 		err = validateRelayTransport(os.Args[2:])
 	default:
-		err = fmt.Errorf("unknown command %q (supported: send, create, bind-role, invoke, member set, member remove, attachment-notify, mailbox-mcp, validate-relay-transport)", os.Args[1])
+		err = fmt.Errorf("unknown command %q (supported: send, claim, get, create, rename, bind-role, register-role, contacts list, contacts resolve, invoke, member set, member remove, attachment-notify, mailbox-mcp, doctor, version, validate-relay-transport)", os.Args[1])
 	}
 	if err != nil {
-		log.Printf("punaro-adapter stopped: %v", err)
-		os.Exit(1)
+		if shouldLogAdapterStop(err) {
+			log.Printf("punaro-adapter stopped: %v", err)
+		}
+		os.Exit(exitStatus(err))
 	}
+}
+
+func shouldLogAdapterStop(err error) bool {
+	var status *contactsStatusError
+	return !errors.As(err, &status)
+}
+
+func exitStatus(err error) int {
+	var coded interface{ ExitCode() int }
+	if errors.As(err, &coded) {
+		return coded.ExitCode()
+	}
+	return 1
 }
 
 func mailboxMCPCommand() ([]string, error) {
@@ -237,7 +290,7 @@ func runMemberControl(request memberControlRequest) error {
 	if err != nil {
 		return fmt.Errorf("configuration: %w", err)
 	}
-	client, err := adapter.NewHTTPRelayClientWithPolicy(config.relayURL, config.machineID, config.privateKey, nil, config.accessToken, config.transportPolicy)
+	client, err := newAdapterRelayClient(config)
 	if err != nil {
 		return err
 	}
@@ -251,6 +304,7 @@ func runMemberControl(request memberControlRequest) error {
 
 type createRequest struct {
 	creator        string
+	displayName    string
 	members        []relay.Member
 	idempotencyKey string
 }
@@ -266,6 +320,7 @@ func parseCreateArgs(args []string) (createRequest, error) {
 	var members memberFlags
 	var roleMembers memberFlags
 	flags.StringVar(&request.creator, "creator", "", "attached creator endpoint")
+	flags.StringVar(&request.displayName, "name", "", "optional conversation display name")
 	flags.Var(&members, "member", "endpoint:send,receive,admin (repeatable)")
 	flags.Var(&roleMembers, "role-member", `JSON {"role":"...","machine_id":"...","capabilities":["send","receive","admin"]} (repeatable)`)
 	flags.StringVar(&request.idempotencyKey, "idempotency-key", "", "stable retry key")
@@ -360,7 +415,7 @@ func runInvoke(args []string) error {
 	if err != nil {
 		return fmt.Errorf("configuration: %w", err)
 	}
-	client, err := adapter.NewHTTPRelayClientWithPolicy(config.relayURL, config.machineID, config.privateKey, nil, config.accessToken, config.transportPolicy)
+	client, err := newAdapterRelayClient(config)
 	if err != nil {
 		return err
 	}
@@ -381,15 +436,57 @@ func runCreate(args []string) error {
 	if err != nil {
 		return fmt.Errorf("configuration: %w", err)
 	}
-	client, err := adapter.NewHTTPRelayClientWithPolicy(config.relayURL, config.machineID, config.privateKey, nil, config.accessToken, config.transportPolicy)
+	client, err := newAdapterRelayClient(config)
 	if err != nil {
 		return err
 	}
-	conversation, err := client.CreateConversation(context.Background(), request.creator, request.members, request.idempotencyKey)
+	conversation, err := client.CreateConversation(context.Background(), request.creator, request.members, request.displayName, request.idempotencyKey)
 	if err != nil {
 		return err
 	}
 	_, err = fmt.Fprintf(os.Stdout, "{\"id\":%q}\n", conversation.ID)
+	return err
+}
+
+type renameRequest struct {
+	conversationID string
+	actor          string
+	displayName    string
+	idempotencyKey string
+}
+
+func parseRenameArgs(args []string) (renameRequest, error) {
+	flags := flag.NewFlagSet("punaro-adapter rename", flag.ContinueOnError)
+	flags.SetOutput(io.Discard)
+	var request renameRequest
+	flags.StringVar(&request.conversationID, "conversation", "", "conversation ID")
+	flags.StringVar(&request.actor, "actor", "", "attached admin endpoint")
+	flags.StringVar(&request.displayName, "name", "", "conversation display name")
+	flags.StringVar(&request.idempotencyKey, "idempotency-key", "", "stable retry key")
+	if err := flags.Parse(args); err != nil || flags.NArg() != 0 || request.conversationID == "" || request.actor == "" || request.displayName == "" || request.idempotencyKey == "" {
+		return renameRequest{}, fmt.Errorf("--conversation, --actor, --name, and --idempotency-key are required")
+	}
+	return request, nil
+}
+
+func runRename(args []string) error {
+	request, err := parseRenameArgs(args)
+	if err != nil {
+		return err
+	}
+	config, err := loadConfig()
+	if err != nil {
+		return fmt.Errorf("configuration: %w", err)
+	}
+	client, err := newAdapterRelayClient(config)
+	if err != nil {
+		return err
+	}
+	conversation, err := client.SetConversationDisplayName(context.Background(), request.conversationID, request.actor, request.displayName, request.idempotencyKey)
+	if err != nil {
+		return err
+	}
+	_, err = fmt.Fprintf(os.Stdout, "{\"id\":%q,\"display_name\":%q}\n", conversation.ID, conversation.DisplayName)
 	return err
 }
 
@@ -419,19 +516,275 @@ func runBindRole(args []string) error {
 	if err != nil {
 		return fmt.Errorf("configuration: %w", err)
 	}
-	client, err := adapter.NewHTTPRelayClientWithPolicy(config.relayURL, config.machineID, config.privateKey, nil, config.accessToken, config.transportPolicy)
+	client, err := newAdapterRelayClient(config)
 	if err != nil {
 		return err
 	}
 	return client.BindRole(context.Background(), request.role, request.session)
 }
 
+type registerRoleRequest struct {
+	role              string
+	displayName       string
+	directAddressable bool
+	idempotencyKey    string
+}
+
+func parseRegisterRoleArgs(args []string) (registerRoleRequest, error) {
+	flags := flag.NewFlagSet("punaro-adapter register-role", flag.ContinueOnError)
+	flags.SetOutput(io.Discard)
+	var request registerRoleRequest
+	flags.StringVar(&request.role, "role", "", "canonical role handle role/<machine>/<slug>")
+	flags.StringVar(&request.displayName, "display-name", "", "optional portable display name")
+	flags.BoolVar(&request.directAddressable, "direct-addressable", false, "opt the role into later discovery")
+	flags.StringVar(&request.idempotencyKey, "idempotency-key", "", "stable key for retries")
+	if err := flags.Parse(args); err != nil || flags.NArg() != 0 || !relay.CanonicalRoleHandle(request.role) || !relay.ValidRequestToken(request.idempotencyKey) {
+		return registerRoleRequest{}, fmt.Errorf("--role and --idempotency-key are required")
+	}
+	if request.displayName != "" {
+		if _, ok := relay.NormalizeRoleDisplayName(request.displayName); !ok {
+			return registerRoleRequest{}, fmt.Errorf("--display-name is invalid")
+		}
+	}
+	return request, nil
+}
+
+func runRegisterRole(args []string) error {
+	request, err := parseRegisterRoleArgs(args)
+	if err != nil {
+		return err
+	}
+	config, err := loadConfig()
+	if err != nil {
+		return fmt.Errorf("configuration: %w", err)
+	}
+	if !relay.CanonicalRoleForMachine(request.role, config.machineID) {
+		return fmt.Errorf("role must be owned by this machine")
+	}
+	client, err := newAdapterRelayClient(config)
+	if err != nil {
+		return err
+	}
+	profile, err := client.RegisterRole(context.Background(), request.role, request.displayName, request.directAddressable, request.idempotencyKey)
+	if err != nil {
+		return err
+	}
+	encoded, err := json.Marshal(profile)
+	if err != nil {
+		return err
+	}
+	_, err = fmt.Fprintf(os.Stdout, "%s\n", encoded)
+	return err
+}
+
+type contactsListRequest struct {
+	cursor string
+	limit  int
+}
+
+type contactsStatusError struct {
+	message string
+	code    int
+}
+
+func (e *contactsStatusError) Error() string { return e.message }
+func (e *contactsStatusError) ExitCode() int { return e.code }
+
+func parseContactsListArgs(args []string) (contactsListRequest, error) {
+	flags := flag.NewFlagSet("punaro-adapter contacts list", flag.ContinueOnError)
+	flags.SetOutput(io.Discard)
+	var request contactsListRequest
+	flags.StringVar(&request.cursor, "cursor", "", "opaque directory cursor")
+	flags.IntVar(&request.limit, "limit", relay.DefaultRoleListLimit, "page size from 1 to 100")
+	if err := flags.Parse(args); err != nil || flags.NArg() != 0 {
+		return contactsListRequest{}, fmt.Errorf("contacts list accepts optional --cursor and --limit")
+	}
+	if request.limit < 1 || request.limit > relay.MaxRoleListLimit {
+		return contactsListRequest{}, fmt.Errorf("contacts list --limit must be between 1 and 100")
+	}
+	return request, nil
+}
+
+func parseContactsResolveArgs(args []string) (string, error) {
+	flags := flag.NewFlagSet("punaro-adapter contacts resolve", flag.ContinueOnError)
+	flags.SetOutput(io.Discard)
+	if err := flags.Parse(args); err != nil || flags.NArg() != 1 || strings.TrimSpace(flags.Arg(0)) == "" {
+		return "", fmt.Errorf("contacts resolve requires NAME")
+	}
+	return flags.Arg(0), nil
+}
+
+func contactsResolveExit(result relay.RoleResolveResult) int {
+	switch result.Status {
+	case relay.RoleResolveResolved:
+		return 0
+	case relay.RoleResolveAmbiguous:
+		return 2
+	default:
+		return 1
+	}
+}
+
+func runContacts(args []string) error {
+	if len(args) == 0 {
+		return fmt.Errorf("contacts requires list or resolve")
+	}
+	switch args[0] {
+	case "list":
+		return runContactsList(args[1:])
+	case "resolve":
+		return runContactsResolve(args[1:])
+	default:
+		return fmt.Errorf("unknown contacts command %q", args[0])
+	}
+}
+
+func newRelayClient() (*adapter.HTTPRelayClient, error) {
+	config, err := loadConfig()
+	if err != nil {
+		return nil, fmt.Errorf("configuration: %w", err)
+	}
+	return newAdapterRelayClient(config)
+}
+
+func writeJSONLine(value any) error {
+	encoded, err := json.Marshal(value)
+	if err != nil {
+		return err
+	}
+	_, err = fmt.Fprintf(os.Stdout, "%s\n", encoded)
+	return err
+}
+
+func runContactsList(args []string) error {
+	request, err := parseContactsListArgs(args)
+	if err != nil {
+		return err
+	}
+	client, err := newRelayClient()
+	if err != nil {
+		return err
+	}
+	page, err := client.ListRoles(context.Background(), request.cursor, request.limit)
+	if err != nil {
+		return err
+	}
+	return writeJSONLine(page)
+}
+
+func runContactsResolve(args []string) error {
+	name, err := parseContactsResolveArgs(args)
+	if err != nil {
+		return err
+	}
+	client, err := newRelayClient()
+	if err != nil {
+		return err
+	}
+	result, err := client.ResolveRole(context.Background(), name)
+	if err != nil {
+		return err
+	}
+	if err := writeJSONLine(result); err != nil {
+		return err
+	}
+	if code := contactsResolveExit(result); code != 0 {
+		return &contactsStatusError{message: result.Status, code: code}
+	}
+	return nil
+}
+
 type sendRequest struct {
 	conversationID string
 	fromEndpoint   string
 	targetRole     string
+	to             string
+	toRole         string
+	fromRole       string
 	bodyFile       string
 	idempotencyKey string
+}
+
+type claimRequest struct {
+	conversationID string
+	fromEndpoint   string
+	idempotencyKey string
+}
+
+type getRequest struct {
+	fromEndpoint string
+}
+
+func parseClaimArgs(args []string) (claimRequest, error) {
+	flags := flag.NewFlagSet("punaro-adapter claim", flag.ContinueOnError)
+	flags.SetOutput(io.Discard)
+	var request claimRequest
+	flags.StringVar(&request.conversationID, "conversation", "", "conversation ID")
+	flags.StringVar(&request.fromEndpoint, "from", "", "attached member session")
+	flags.StringVar(&request.idempotencyKey, "idempotency-key", "", "stable retry key")
+	if err := flags.Parse(args); err != nil || flags.NArg() != 0 || strings.TrimSpace(request.conversationID) == "" || strings.TrimSpace(request.fromEndpoint) == "" || strings.TrimSpace(request.idempotencyKey) == "" {
+		return claimRequest{}, fmt.Errorf("--conversation, --from, and --idempotency-key are required")
+	}
+	return request, nil
+}
+
+func runClaim(args []string) error {
+	request, err := parseClaimArgs(args)
+	if err != nil {
+		return err
+	}
+	config, err := loadConfig()
+	if err != nil {
+		return fmt.Errorf("configuration: %w", err)
+	}
+	client, err := newAdapterRelayClient(config)
+	if err != nil {
+		return err
+	}
+	claim, err := client.ClaimConversation(context.Background(), request.conversationID, request.fromEndpoint, request.idempotencyKey)
+	if err != nil {
+		return mapClaimError(err)
+	}
+	if claim.Status != "pending" && claim.Status != "complete" {
+		return fmt.Errorf("telegram claim was not accepted")
+	}
+	_, err = fmt.Fprintf(os.Stdout, "{\"conversation_id\":%q,\"status\":%q}\n", claim.ConversationID, claim.Status)
+	return err
+}
+
+func parseGetArgs(args []string) (getRequest, error) {
+	flags := flag.NewFlagSet("punaro-adapter get", flag.ContinueOnError)
+	flags.SetOutput(io.Discard)
+	var request getRequest
+	flags.StringVar(&request.fromEndpoint, "from", "", "attached session endpoint")
+	if err := flags.Parse(args); err != nil || flags.NArg() != 0 || strings.TrimSpace(request.fromEndpoint) == "" {
+		return getRequest{}, fmt.Errorf("--from is required")
+	}
+	return request, nil
+}
+
+func runGet(args []string) error {
+	request, err := parseGetArgs(args)
+	if err != nil {
+		return err
+	}
+	config, err := loadConfig()
+	if err != nil {
+		return fmt.Errorf("configuration: %w", err)
+	}
+	client, err := newAdapterRelayClient(config)
+	if err != nil {
+		return err
+	}
+	topic, err := client.GetSessionTopic(context.Background(), request.fromEndpoint)
+	if err != nil {
+		return mapSessionTopicError(err)
+	}
+	if !topic.Claimed {
+		return errTopicNotClaimed
+	}
+	_, err = fmt.Fprintf(os.Stdout, "{\"id\":%q,\"display_name\":%q,\"claimed\":true}\n", topic.ID, topic.DisplayName)
+	return err
 }
 
 func parseSendArgs(args []string) (sendRequest, error) {
@@ -441,12 +794,51 @@ func parseSendArgs(args []string) (sendRequest, error) {
 	flags.StringVar(&request.conversationID, "conversation", "", "conversation ID")
 	flags.StringVar(&request.fromEndpoint, "from", "", "attached sender endpoint")
 	flags.StringVar(&request.targetRole, "target-role", "", "deliver only to this durable conversation role")
+	flags.StringVar(&request.to, "to", "", "user-telegram or canonical destination role")
+	flags.StringVar(&request.fromRole, "from-role", "", "canonical source role")
 	flags.StringVar(&request.bodyFile, "body-file", "", "message body file or - for stdin")
 	flags.StringVar(&request.idempotencyKey, "idempotency-key", "", "stable key for retries")
 	if err := flags.Parse(args); err != nil || flags.NArg() != 0 {
 		return sendRequest{}, fmt.Errorf("invalid send arguments")
 	}
-	if strings.TrimSpace(request.conversationID) == "" || strings.TrimSpace(request.fromEndpoint) == "" || request.bodyFile == "" || strings.TrimSpace(request.idempotencyKey) == "" {
+	to := strings.TrimSpace(request.to)
+	fromRole := strings.TrimSpace(request.fromRole)
+	if to == relay.TelegramUserParticipant {
+		if fromRole != "" {
+			return sendRequest{}, fmt.Errorf("--to user-telegram cannot be combined with --from-role")
+		}
+		if request.targetRole != "" && request.targetRole != relay.TelegramUserParticipant {
+			return sendRequest{}, fmt.Errorf("--to and --target-role do not match")
+		}
+		request.to = to
+		request.targetRole = relay.TelegramUserParticipant
+		if strings.TrimSpace(request.fromEndpoint) == "" || request.bodyFile == "" || strings.TrimSpace(request.idempotencyKey) == "" {
+			return sendRequest{}, fmt.Errorf("--from, --body-file, and --idempotency-key are required")
+		}
+		return request, nil
+	}
+	if to != "" || fromRole != "" {
+		if strings.TrimSpace(request.conversationID) != "" || strings.TrimSpace(request.fromEndpoint) != "" || request.targetRole != "" {
+			return sendRequest{}, fmt.Errorf("--to/--from-role cannot be combined with --conversation, --from, or --target-role")
+		}
+		if to == "" || fromRole == "" || request.bodyFile == "" || strings.TrimSpace(request.idempotencyKey) == "" {
+			return sendRequest{}, fmt.Errorf("--to, --from-role, --body-file, and --idempotency-key are required")
+		}
+		if !relay.CanonicalRoleHandle(to) || !relay.CanonicalRoleHandle(fromRole) {
+			return sendRequest{}, fmt.Errorf("--to and --from-role must be canonical role handles")
+		}
+		request.to = to
+		request.toRole = to
+		request.fromRole = fromRole
+		return request, nil
+	}
+	if strings.TrimSpace(request.fromEndpoint) == "" || request.bodyFile == "" || strings.TrimSpace(request.idempotencyKey) == "" {
+		if request.targetRole == relay.TelegramUserParticipant {
+			return sendRequest{}, fmt.Errorf("--from, --body-file, and --idempotency-key are required")
+		}
+		return sendRequest{}, fmt.Errorf("--conversation, --from, --body-file, and --idempotency-key are required")
+	}
+	if request.targetRole != relay.TelegramUserParticipant && strings.TrimSpace(request.conversationID) == "" {
 		return sendRequest{}, fmt.Errorf("--conversation, --from, --body-file, and --idempotency-key are required")
 	}
 	if request.targetRole != "" && !relay.ValidRole(request.targetRole) {
@@ -468,21 +860,73 @@ func runSend(args []string) error {
 	if err != nil {
 		return err
 	}
-	client, err := adapter.NewHTTPRelayClientWithPolicy(config.relayURL, config.machineID, config.privateKey, nil, config.accessToken, config.transportPolicy)
+	client, err := newAdapterRelayClient(config)
 	if err != nil {
 		return err
 	}
+	conversationID := request.conversationID
+	if request.targetRole == relay.TelegramUserParticipant {
+		topic, err := client.GetSessionTopic(context.Background(), request.fromEndpoint)
+		if err != nil {
+			return mapSessionTopicError(err)
+		}
+		if !topic.Claimed {
+			return errTopicNotClaimed
+		}
+		if conversationID != "" && conversationID != topic.ID {
+			return errConversationMismatch
+		}
+		conversationID = topic.ID
+	}
 	var message relay.Message
-	if request.targetRole == "" {
-		message, err = client.Send(context.Background(), request.conversationID, request.fromEndpoint, string(body), request.idempotencyKey)
-	} else {
-		message, err = client.SendToRole(context.Background(), request.conversationID, request.fromEndpoint, request.targetRole, string(body), request.idempotencyKey)
+	switch {
+	case request.toRole != "":
+		message, err = client.SendDirectMessage(context.Background(), request.fromRole, request.toRole, string(body), request.idempotencyKey)
+	case request.targetRole == "":
+		message, err = client.Send(context.Background(), conversationID, request.fromEndpoint, string(body), request.idempotencyKey)
+	default:
+		message, err = client.SendToRole(context.Background(), conversationID, request.fromEndpoint, request.targetRole, string(body), request.idempotencyKey)
 	}
 	if err != nil {
+		return err
+	}
+	if request.toRole != "" {
+		_, err = fmt.Fprintf(os.Stdout, "{\"id\":%q,\"conversation_id\":%q,\"sequence\":%d}\n", message.ID, message.ConversationID, message.Sequence)
 		return err
 	}
 	_, err = fmt.Fprintf(os.Stdout, "{\"id\":%q,\"sequence\":%d}\n", message.ID, message.Sequence)
 	return err
+}
+
+var (
+	errTopicNotClaimed        = errors.New("topic is not claimed")
+	errSessionHasNoTopic      = errors.New("session has no topic")
+	errConversationMismatch   = errors.New("conversation does not match session topic")
+	errSessionTopicAmbiguous  = errors.New("session topic is ambiguous")
+	errTelegramClaimForbidden = errors.New("telegram claim is not authorized")
+	errTelegramClaimConflict  = errors.New("telegram claim conflicts")
+)
+
+func mapSessionTopicError(err error) error {
+	switch adapter.RelayHTTPStatus(err) {
+	case http.StatusForbidden:
+		return errSessionHasNoTopic
+	case http.StatusConflict:
+		return errSessionTopicAmbiguous
+	default:
+		return err
+	}
+}
+
+func mapClaimError(err error) error {
+	switch adapter.RelayHTTPStatus(err) {
+	case http.StatusForbidden:
+		return errTelegramClaimForbidden
+	case http.StatusConflict:
+		return errTelegramClaimConflict
+	default:
+		return err
+	}
 }
 
 // attachmentNotifyRequest is intentionally an explicit post-offer handoff:
@@ -530,7 +974,7 @@ func runAttachmentNotify(args []string) error {
 	if err := outbox.EnqueueV3OfferNotice(context.Background(), request.conversationID, request.fromEndpoint, offer, request.idempotencyKey); err != nil {
 		return err
 	}
-	client, err := adapter.NewHTTPRelayClientWithPolicy(config.relayURL, config.machineID, config.privateKey, nil, config.accessToken, config.transportPolicy)
+	client, err := newAdapterRelayClient(config)
 	if err != nil {
 		return err
 	}
@@ -571,7 +1015,7 @@ func run() error {
 	if err != nil {
 		return err
 	}
-	relayClient, err := adapter.NewHTTPRelayClientWithPolicy(config.relayURL, config.machineID, config.privateKey, nil, config.accessToken, config.transportPolicy)
+	relayClient, err := newAdapterRelayClient(config)
 	if err != nil {
 		return err
 	}
@@ -597,6 +1041,7 @@ func run() error {
 	defer stop()
 	wake := make(chan struct{}, 1)
 	go runNotifications(ctx, relayClient, wake)
+	reportedReady := false
 	for {
 		if err := offerOutbox.Flush(ctx, relayClient); err != nil && !errors.Is(err, context.Canceled) {
 			// Durable rows remain for the next poll; never log their offer body.
@@ -605,6 +1050,12 @@ func run() error {
 		if err := syncer.SyncOnce(ctx); err != nil && !errors.Is(err, context.Canceled) {
 			// Errors deliberately omit remote and mailbox output bodies.
 			log.Printf("synchronization failed: %v", err)
+		} else if err == nil && !reportedReady {
+			if readyErr := writeBootstrapReady(); readyErr != nil {
+				log.Printf("bootstrap ready file is invalid: %v", readyErr)
+			} else {
+				reportedReady = true
+			}
 		}
 		timer := time.NewTimer(config.pollInterval)
 		select {
@@ -661,8 +1112,9 @@ func loadConfig() (adapterConfig, error) {
 	relayURL := settings["PUNARO_ADAPTER_RELAY_URL"]
 	machineID := settings["PUNARO_MACHINE_ID"]
 	keyFile := settings["PUNARO_MACHINE_PRIVATE_KEY_FILE"]
+	credentialFile := settings["PUNARO_DEVICE_CREDENTIAL_FILE"]
 	group := settings["PUNARO_ATTACHED_GROUP"]
-	if relayURL == "" || machineID == "" || keyFile == "" || group == "" {
+	if relayURL == "" || machineID == "" || (keyFile == "") == (credentialFile == "") || group == "" {
 		return adapterConfig{}, errors.New("adapter configuration is incomplete")
 	}
 	allowLANHTTP, err := parseLANHTTPSetting(settings["PUNARO_ADAPTER_ALLOW_LAN_HTTP"])
@@ -676,9 +1128,15 @@ func loadConfig() (adapterConfig, error) {
 	if err := loadClientIdentity(settings, relayURL, machineID, transportPolicy); err != nil {
 		return adapterConfig{}, err
 	}
-	key, err := loadPrivateKey(keyFile)
+	var key ed25519.PrivateKey
+	var credential string
+	if keyFile != "" {
+		key, err = loadPrivateKey(keyFile)
+	} else {
+		credential, err = memoryclient.LoadCredential(credentialFile)
+	}
 	if err != nil {
-		return adapterConfig{}, err
+		return adapterConfig{}, errors.New("machine credential file is invalid")
 	}
 	dataDir := settings["PUNARO_ADAPTER_DATA_DIR"]
 	if dataDir == "" {
@@ -705,7 +1163,21 @@ func loadConfig() (adapterConfig, error) {
 	if (accessToken.ClientID == "") != (accessToken.ClientSecret == "") {
 		return adapterConfig{}, fmt.Errorf("both PUNARO_CF_ACCESS_CLIENT_ID and PUNARO_CF_ACCESS_CLIENT_SECRET are required together")
 	}
-	return adapterConfig{relayURL: relayURL, machineID: machineID, privateKey: key, attachedGroup: group, mailboxBinary: mailboxBinary, mailboxState: settings["PUNARO_MAILBOX_STATE_DIR"], dataDir: dataDir, pollInterval: pollInterval, accessToken: accessToken, transportPolicy: transportPolicy, invokerCommand: settings["PUNARO_INVOKER_COMMAND"]}, nil
+	return adapterConfig{relayURL: relayURL, machineID: machineID, privateKey: key, deviceCredential: credential, attachedGroup: group, mailboxBinary: mailboxBinary, mailboxState: settings["PUNARO_MAILBOX_STATE_DIR"], dataDir: dataDir, pollInterval: pollInterval, accessToken: accessToken, transportPolicy: transportPolicy, invokerCommand: settings["PUNARO_INVOKER_COMMAND"], profileFile: selectedAdapterProfilePath(), privateKeyFile: keyFile, deviceCredentialFile: credentialFile, identityFile: settings["PUNARO_CLIENT_IDENTITY_FILE"]}, nil
+}
+
+func newAdapterRelayClient(config adapterConfig) (*adapter.HTTPRelayClient, error) {
+	if config.deviceCredential != "" {
+		return adapter.NewDeviceHTTPRelayClientWithPolicy(config.relayURL, config.machineID, config.deviceCredential, nil, config.accessToken, config.transportPolicy)
+	}
+	return adapter.NewHTTPRelayClientWithPolicy(config.relayURL, config.machineID, config.privateKey, nil, config.accessToken, config.transportPolicy)
+}
+
+func (config adapterConfig) machineCredentialFile() string {
+	if config.deviceCredentialFile != "" {
+		return config.deviceCredentialFile
+	}
+	return config.privateKeyFile
 }
 
 func parseLANHTTPSetting(raw string) (bool, error) {
@@ -742,10 +1214,10 @@ func loadClientIdentity(settings map[string]string, relayURL, machineID string, 
 // than evaluating it as shell or service-manager syntax. A non-empty process
 // environment setting intentionally overrides the corresponding profile entry.
 func loadAdapterProfile() (map[string]string, error) {
-	path := strings.TrimSpace(os.Getenv(adapterProfileFileEnv))
+	path := selectedAdapterProfilePath()
 	explicitPath := path != ""
-	if !explicitPath {
-		path = installedAdapterProfilePath()
+	if strings.TrimSpace(os.Getenv(adapterProfileFileEnv)) == "" {
+		explicitPath = false
 		if path == "" {
 			// Preserve environment-only deployments when the optional default
 			// profile root is unavailable. An explicitly selected profile still
@@ -787,6 +1259,71 @@ func loadAdapterProfile() (map[string]string, error) {
 		settings[name] = strings.TrimSpace(value)
 	}
 	return settings, nil
+}
+
+func selectedAdapterProfilePath() string {
+	if path := strings.TrimSpace(os.Getenv(adapterProfileFileEnv)); path != "" {
+		return path
+	}
+	return installedAdapterProfilePath()
+}
+
+const (
+	bootstrapReadyEnv  = "PUNARO_BOOTSTRAP_READY_FILE"
+	bootstrapReadyBody = `{"schema":1,"status":"healthy"}`
+)
+
+func writeBootstrapReady() error {
+	path := strings.TrimSpace(os.Getenv(bootstrapReadyEnv))
+	if path == "" {
+		return nil
+	}
+	if !filepath.IsAbs(path) || filepath.Clean(path) != path {
+		return errors.New("bootstrap ready file is invalid")
+	}
+	// #nosec G703 -- ready path is the absolute bootstrap-owned file passed by the local supervisor.
+	info, err := os.Lstat(path)
+	if err == nil && !info.Mode().IsRegular() {
+		return errors.New("bootstrap ready file is invalid")
+	} else if err != nil && !errors.Is(err, os.ErrNotExist) {
+		return errors.New("bootstrap ready file is invalid")
+	}
+	dir := filepath.Dir(path)
+	file, err := os.CreateTemp(dir, ".health-*.tmp")
+	if err != nil {
+		return errors.New("bootstrap ready file is invalid")
+	}
+	tmp := file.Name()
+	if _, err := file.WriteString(bootstrapReadyBody); err != nil {
+		_ = file.Close()
+		removeReadyTemp(tmp)
+		return errors.New("bootstrap ready file is invalid")
+	}
+	if err := file.Chmod(0o600); err != nil {
+		_ = file.Close()
+		removeReadyTemp(tmp)
+		return errors.New("bootstrap ready file is invalid")
+	}
+	if err := file.Sync(); err != nil {
+		_ = file.Close()
+		removeReadyTemp(tmp)
+		return errors.New("bootstrap ready file is invalid")
+	}
+	if err := file.Close(); err != nil {
+		removeReadyTemp(tmp)
+		return errors.New("bootstrap ready file is invalid")
+	}
+	// #nosec G703 -- ready path is the absolute bootstrap-owned file passed by the local supervisor.
+	if err := os.Rename(tmp, path); err != nil {
+		removeReadyTemp(tmp)
+		return errors.New("bootstrap ready file is invalid")
+	}
+	return nil
+}
+
+func removeReadyTemp(tmp string) {
+	// #nosec G703 -- tmp is the sibling CreateTemp file beside the supervisor-owned ready path.
+	_ = os.Remove(tmp)
 }
 
 func loadPrivateKey(path string) (ed25519.PrivateKey, error) {

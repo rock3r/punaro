@@ -143,6 +143,48 @@ func readPrivate(path string, maximum int) ([]byte, error) {
 	}
 	return raw, nil
 }
+
+func protectEnrollmentMaterial(path string) error {
+	if !filepath.IsAbs(path) || filepath.Clean(path) != path {
+		return errors.New("unsafe enrollment material")
+	}
+	before, err := os.Lstat(path)
+	if err != nil {
+		return err
+	}
+	if !before.Mode().IsRegular() || before.Mode()&os.ModeSymlink != 0 || !ownedByCurrentUser(before) || before.Size() < 1 || before.Size() > maxEnrollmentMaterial {
+		return errors.New("unsafe enrollment material")
+	}
+	// Open without following a replacement link. O_NONBLOCK prevents a raced
+	// FIFO from blocking before the post-open type and identity checks.
+	fd, err := unix.Open(path, unix.O_RDONLY|unix.O_CLOEXEC|unix.O_NOFOLLOW|unix.O_NONBLOCK, 0)
+	if err != nil {
+		return err
+	}
+	file := os.NewFile(uintptr(fd), path) // #nosec G115 -- unix.Open returns a non-negative descriptor for os.NewFile.
+	opened, err := file.Stat()
+	if err != nil || !opened.Mode().IsRegular() || !ownedByCurrentUser(opened) || opened.Size() < 1 || opened.Size() > maxEnrollmentMaterial || !os.SameFile(before, opened) {
+		_ = file.Close()
+		return errors.New("enrollment material changed while opening")
+	}
+	if err := unix.Fchmod(fd, 0o600); err != nil {
+		_ = file.Close()
+		return err
+	}
+	if err := file.Sync(); err != nil {
+		_ = file.Close()
+		return err
+	}
+	if err := file.Close(); err != nil {
+		return err
+	}
+	after, err := os.Lstat(path)
+	if err != nil || !os.SameFile(opened, after) || !privateFile(after) || after.Size() < 1 || after.Size() > maxEnrollmentMaterial {
+		return errors.New("protected enrollment material could not be verified")
+	}
+	return syncPrivateDirectory(filepath.Dir(path))
+}
+
 func writePrivateNew(path string, raw []byte) error {
 	if len(raw) == 0 || !filepath.IsAbs(path) {
 		return errors.New("unsafe private file")

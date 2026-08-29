@@ -18,9 +18,14 @@ import (
 )
 
 var tables = []string{
-	"mail_endpoints", "mail_conversations", "mail_memberships", "mail_roles", "mail_role_memberships", "mail_role_bindings", "mail_messages", "mail_deliveries",
+	"mail_endpoints", "mail_conversations",
+	"mail_telegram_claims", "mail_telegram_participants", "mail_telegram_claim_events", "mail_telegram_claim_idempotency",
+	"mail_memberships", "mail_roles", "mail_role_memberships", "mail_role_bindings", "mail_messages", "mail_deliveries",
 	"mail_recipient_cursors", "mail_message_idempotency", "mail_conversation_idempotency",
+	"mail_conversation_display_name_idempotency",
 	"mail_conversation_controls", "mail_conversation_control_idempotency", "mail_request_nonces",
+	"mail_role_profiles", "mail_role_profile_idempotency", "mail_rate_buckets",
+	"mail_direct_conversations", "mail_message_from_roles", "mail_direct_message_idempotency",
 }
 
 var digestPattern = regexp.MustCompile(`^[0-9a-f]{64}$`)
@@ -38,6 +43,7 @@ type Source interface {
 // Destination is the schema-owner PostgreSQL cutover surface.
 type Destination interface {
 	CheckMailCutoverSchemaReadiness(context.Context) error
+	InspectMailCutoverPreflight(context.Context) (postgres.MailCutoverPreflight, error)
 	Identity(context.Context) (string, error)
 	BeginMailCutover(context.Context, string, postgres.MailCutoverRequest) (postgres.MailCutoverEpoch, error)
 	MailCutoverStatus(context.Context, string, string) (postgres.MailCutoverEpoch, error)
@@ -73,11 +79,13 @@ type Request struct {
 
 // Plan is a read-only dry-run view.
 type Plan struct {
-	SourceID          string                      `json:"source_id"`
-	SourcePhase       relay.MigrationSourcePhase  `json:"source_phase"`
-	SourceFingerprint string                      `json:"source_fingerprint"`
-	TargetIdentity    string                      `json:"target_identity"`
-	Counts            relay.MigrationSourceCounts `json:"counts"`
+	SourceID          string                        `json:"source_id"`
+	SourcePhase       relay.MigrationSourcePhase    `json:"source_phase"`
+	SourceFingerprint string                        `json:"source_fingerprint"`
+	TargetIdentity    string                        `json:"target_identity"`
+	Counts            relay.MigrationSourceCounts   `json:"counts"`
+	Preflight         postgres.MailCutoverPreflight `json:"preflight"`
+	Ready             bool                          `json:"ready"`
 }
 
 // Result is the durable final authority binding.
@@ -104,7 +112,12 @@ func (e Executor) DryRun(ctx context.Context) (Plan, error) {
 	if err != nil {
 		return Plan{}, err
 	}
-	return Plan{SourceID: manifest.SourceID, SourcePhase: manifest.Phase, SourceFingerprint: manifest.Fingerprint, TargetIdentity: target, Counts: manifest.Counts}, nil
+	preflight, err := e.Destination.InspectMailCutoverPreflight(ctx)
+	if err != nil {
+		return Plan{}, err
+	}
+	ready := preflight.TargetRows == 0 && preflight.LegacyPending == 0 && preflight.IncompleteEpochs == 0
+	return Plan{SourceID: manifest.SourceID, SourcePhase: manifest.Phase, SourceFingerprint: manifest.Fingerprint, TargetIdentity: target, Counts: manifest.Counts, Preflight: preflight, Ready: ready}, nil
 }
 
 // Execute resumes from every durable boundary. It retires SQLite only after
@@ -128,6 +141,20 @@ func (e Executor) Execute(ctx context.Context, request Request) (Result, error) 
 	manifest, err := e.Source.Inspect(ctx)
 	if err != nil {
 		return Result{}, err
+	}
+	if manifest.Phase == relay.MigrationSourceActive {
+		preflight, err := e.Destination.InspectMailCutoverPreflight(ctx)
+		if err != nil {
+			return Result{}, err
+		}
+		switch {
+		case preflight.IncompleteEpochs != 0:
+			return Result{}, errors.New("mail cutover recovery is required")
+		case preflight.TargetRows != 0:
+			return Result{}, errors.New("mail cutover target is not empty")
+		case preflight.LegacyPending != 0:
+			return Result{}, errors.New("legacy authentication still has pending machines")
+		}
 	}
 	if err := e.Source.CheckEnrollmentCoverage(ctx, e.Enrollment); err != nil {
 		return Result{}, err
@@ -336,6 +363,28 @@ func tableEvidence(manifest relay.MigrationSourceManifest, table string) (int64,
 		return manifest.Counts.ControlIdempotency, manifest.TableSHA256.ControlIdempotency
 	case "mail_request_nonces":
 		return manifest.Counts.RequestNonces, manifest.TableSHA256.RequestNonces
+	case "mail_role_profiles":
+		return manifest.Counts.RoleProfiles, manifest.TableSHA256.RoleProfiles
+	case "mail_role_profile_idempotency":
+		return manifest.Counts.RoleProfileIdempotency, manifest.TableSHA256.RoleProfileIdempotency
+	case "mail_rate_buckets":
+		return manifest.Counts.RateBuckets, manifest.TableSHA256.RateBuckets
+	case "mail_direct_conversations":
+		return manifest.Counts.DirectConversations, manifest.TableSHA256.DirectConversations
+	case "mail_message_from_roles":
+		return manifest.Counts.MessageFromRoles, manifest.TableSHA256.MessageFromRoles
+	case "mail_direct_message_idempotency":
+		return manifest.Counts.DirectMessageIdempotency, manifest.TableSHA256.DirectMessageIdempotency
+	case "mail_telegram_claims":
+		return manifest.Counts.TelegramClaims, manifest.TableSHA256.TelegramClaims
+	case "mail_telegram_participants":
+		return manifest.Counts.TelegramParticipants, manifest.TableSHA256.TelegramParticipants
+	case "mail_telegram_claim_events":
+		return manifest.Counts.TelegramClaimEvents, manifest.TableSHA256.TelegramClaimEvents
+	case "mail_telegram_claim_idempotency":
+		return manifest.Counts.TelegramClaimIdempotency, manifest.TableSHA256.TelegramClaimIdempotency
+	case "mail_conversation_display_name_idempotency":
+		return manifest.Counts.DisplayNameIdempotency, manifest.TableSHA256.DisplayNameIdempotency
 	default:
 		return -1, ""
 	}

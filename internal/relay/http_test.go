@@ -46,7 +46,10 @@ func TestHTTPDurableMessageFlowRequiresSignedMachineRequests(t *testing.T) {
 	t.Cleanup(targetNotifications.Close)
 	handler := NewHandler(store, auth, HandlerOptions{Now: func() time.Time { return clock }, EndpointLeaseTTL: time.Minute, DeliveryLeaseTTL: time.Minute, Notifier: notifier})
 
-	serveSigned(t, handler, privateA, "machine-a", http.MethodPut, "/v1/machines/me/endpoints", `{"endpoints":["agent/a/session"]}`, "advertise-a", "")
+	advertiseA := serveSigned(t, handler, privateA, "machine-a", http.MethodPut, "/v1/machines/me/endpoints", `{"endpoints":["agent/a/session"]}`, "advertise-a", "")
+	if advertiseA.Header().Get(ResponseNonceHeader) != "advertise-a" {
+		t.Fatalf("relay response nonce=%q", advertiseA.Header().Get(ResponseNonceHeader))
+	}
 	serveSigned(t, handler, privateB, "machine-b", http.MethodPut, "/v1/machines/me/endpoints", `{"endpoints":["agent/b/session"]}`, "advertise-b", "")
 	create := serveSigned(t, handler, privateA, "machine-a", http.MethodPost, "/v1/conversations", `{"creator_endpoint":"agent/a/session","members":[{"endpoint":"agent/a/session","capabilities":["send","receive","admin"]},{"endpoint":"agent/b/session","capabilities":["receive"]}]}`, "create", "create-1")
 	if create.Code != http.StatusCreated {
@@ -364,6 +367,259 @@ func TestHTTPCreateConversationDeduplicatesSameMachineIdempotencyKey(t *testing.
 	changed := serveSigned(t, handler, private, "machine-a", http.MethodPost, "/v1/conversations", `{"creator_endpoint":"agent/a/session","members":[{"endpoint":"agent/a/session","capabilities":["send","receive","admin"]},{"endpoint":"agent/b/session","capabilities":["receive"]}]}`, "create-conflict", "create-1")
 	if changed.Code != http.StatusConflict {
 		t.Fatalf("changed create retry status=%d body=%s", changed.Code, changed.Body.String())
+	}
+}
+
+func TestHTTPCreateConversationPersistsDisplayNameAndAllowsUnnamed(t *testing.T) {
+	t.Parallel()
+	public, private, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	store, err := Open(filepath.Join(t.TempDir(), "relay.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+	auth, err := NewAuthenticator(store, []Machine{{ID: "machine-a", PublicKey: public, EndpointPrefixes: []string{"agent/a/"}}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	clock := time.Date(2026, time.July, 13, 12, 0, 0, 0, time.UTC)
+	handler := NewHandler(store, auth, HandlerOptions{Now: func() time.Time { return clock }, EndpointLeaseTTL: time.Minute})
+	serveSigned(t, handler, private, "machine-a", http.MethodPut, "/v1/machines/me/endpoints", `{"endpoints":["agent/a/session"]}`, "advertise", "")
+	named := serveSigned(t, handler, private, "machine-a", http.MethodPost, "/v1/conversations", `{"creator_endpoint":"agent/a/session","display_name":"  Review room  ","members":[{"endpoint":"agent/a/session","capabilities":["send","receive","admin"]}]}`, "create-named", "create-named")
+	var namedConversation Conversation
+	if named.Code != http.StatusCreated || json.NewDecoder(named.Body).Decode(&namedConversation) != nil || namedConversation.DisplayName != "Review room" {
+		t.Fatalf("named create=%d %s", named.Code, named.Body.String())
+	}
+	unnamed := serveSigned(t, handler, private, "machine-a", http.MethodPost, "/v1/conversations", `{"creator_endpoint":"agent/a/session","members":[{"endpoint":"agent/a/session","capabilities":["send","receive","admin"]}]}`, "create-unnamed", "create-unnamed")
+	var unnamedConversation Conversation
+	if unnamed.Code != http.StatusCreated || json.NewDecoder(unnamed.Body).Decode(&unnamedConversation) != nil || unnamedConversation.DisplayName != "" {
+		t.Fatalf("unnamed create=%d %s", unnamed.Code, unnamed.Body.String())
+	}
+	listed := serveSigned(t, handler, private, "machine-a", http.MethodGet, "/v1/conversations", "", "list", "")
+	var payload struct {
+		Conversations []Conversation `json:"conversations"`
+	}
+	if listed.Code != http.StatusOK || json.NewDecoder(listed.Body).Decode(&payload) != nil || len(payload.Conversations) != 2 {
+		t.Fatalf("list=%d %s", listed.Code, listed.Body.String())
+	}
+	foundNamed, foundUnnamed := false, false
+	for _, conversation := range payload.Conversations {
+		switch conversation.ID {
+		case namedConversation.ID:
+			foundNamed = conversation.DisplayName == "Review room"
+		case unnamedConversation.ID:
+			foundUnnamed = conversation.DisplayName == ""
+		}
+	}
+	if !foundNamed || !foundUnnamed {
+		t.Fatalf("list payload missing display names: %#v", payload.Conversations)
+	}
+	changed := serveSigned(t, handler, private, "machine-a", http.MethodPost, "/v1/conversations", `{"creator_endpoint":"agent/a/session","display_name":"Other room","members":[{"endpoint":"agent/a/session","capabilities":["send","receive","admin"]}]}`, "create-named-conflict", "create-named")
+	if changed.Code != http.StatusConflict {
+		t.Fatalf("changed named create=%d %s", changed.Code, changed.Body.String())
+	}
+}
+
+func TestHTTPSetConversationDisplayNameRequiresAdminAndIsIdempotent(t *testing.T) {
+	t.Parallel()
+	publicA, privateA, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	publicB, privateB, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	store, err := Open(filepath.Join(t.TempDir(), "relay.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+	auth, err := NewAuthenticator(store, []Machine{{ID: "machine-a", PublicKey: publicA, EndpointPrefixes: []string{"agent/a/"}}, {ID: "machine-b", PublicKey: publicB, EndpointPrefixes: []string{"agent/b/"}}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	now := time.Date(2026, time.July, 13, 12, 0, 0, 0, time.UTC)
+	handler := NewHandler(store, auth, HandlerOptions{Now: func() time.Time { return now }, EndpointLeaseTTL: time.Hour})
+	serveSigned(t, handler, privateA, "machine-a", http.MethodPut, "/v1/machines/me/endpoints", `{"endpoints":["agent/a/session"]}`, "advertise-a", "")
+	serveSigned(t, handler, privateB, "machine-b", http.MethodPut, "/v1/machines/me/endpoints", `{"endpoints":["agent/b/session"]}`, "advertise-b", "")
+	created := serveSigned(t, handler, privateA, "machine-a", http.MethodPost, "/v1/conversations", `{"creator_endpoint":"agent/a/session","members":[{"endpoint":"agent/a/session","capabilities":["send","receive","admin"]},{"endpoint":"agent/b/session","capabilities":["receive"]}]}`, "create", "create-1")
+	var conversation Conversation
+	if created.Code != http.StatusCreated || json.NewDecoder(created.Body).Decode(&conversation) != nil {
+		t.Fatalf("create=%d %s", created.Code, created.Body.String())
+	}
+	body := `{"actor_endpoint":"agent/a/session","display_name":"Ops room"}`
+	first := serveSigned(t, handler, privateA, "machine-a", http.MethodPost, "/v1/conversations/"+conversation.ID+"/display-name", body, "rename-first", "rename-1")
+	var renamed Conversation
+	if first.Code != http.StatusCreated || json.NewDecoder(first.Body).Decode(&renamed) != nil || renamed.DisplayName != "Ops room" {
+		t.Fatalf("rename=%d %s", first.Code, first.Body.String())
+	}
+	retry := serveSigned(t, handler, privateA, "machine-a", http.MethodPost, "/v1/conversations/"+conversation.ID+"/display-name", body, "rename-retry", "rename-1")
+	if retry.Code != http.StatusOK {
+		t.Fatalf("rename retry=%d %s", retry.Code, retry.Body.String())
+	}
+	denied := serveSigned(t, handler, privateB, "machine-b", http.MethodPost, "/v1/conversations/"+conversation.ID+"/display-name", `{"actor_endpoint":"agent/b/session","display_name":"Hijacked"}`, "rename-denied", "rename-2")
+	if denied.Code != http.StatusForbidden {
+		t.Fatalf("non-admin rename=%d %s", denied.Code, denied.Body.String())
+	}
+	if missing := serveSigned(t, handler, privateA, "machine-a", http.MethodPost, "/v1/conversations/"+conversation.ID+"/display-name", body, "rename-missing-key", ""); missing.Code != http.StatusBadRequest {
+		t.Fatalf("rename without idempotency key=%d %s", missing.Code, missing.Body.String())
+	}
+	if empty := serveSigned(t, handler, privateA, "machine-a", http.MethodPost, "/v1/conversations/"+conversation.ID+"/display-name", `{"actor_endpoint":"agent/a/session","display_name":""}`, "rename-empty", "rename-empty"); empty.Code != http.StatusBadRequest {
+		t.Fatalf("empty rename=%d %s", empty.Code, empty.Body.String())
+	}
+	if whitespace := serveSigned(t, handler, privateA, "machine-a", http.MethodPost, "/v1/conversations/"+conversation.ID+"/display-name", `{"actor_endpoint":"agent/a/session","display_name":"   "}`, "rename-whitespace", "rename-whitespace"); whitespace.Code != http.StatusBadRequest {
+		t.Fatalf("whitespace rename=%d %s", whitespace.Code, whitespace.Body.String())
+	}
+	if detach := serveSigned(t, handler, privateA, "machine-a", http.MethodPut, "/v1/machines/me/endpoints", `{"endpoints":[]}`, "detach-a", ""); detach.Code != http.StatusOK {
+		t.Fatalf("detach=%d %s", detach.Code, detach.Body.String())
+	}
+	if detached := serveSigned(t, handler, privateA, "machine-a", http.MethodPost, "/v1/conversations/"+conversation.ID+"/display-name", body, "rename-detached", "rename-detached"); detached.Code != http.StatusForbidden {
+		t.Fatalf("detached admin rename=%d %s", detached.Code, detached.Body.String())
+	}
+}
+
+func TestHTTPTelegramClaimAPIsAndUserTelegramSend(t *testing.T) {
+	t.Parallel()
+	publicA, privateA, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	publicB, privateB, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	publicTG, privateTG, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	store, err := Open(filepath.Join(t.TempDir(), "relay.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+	auth, err := NewAuthenticator(store, []Machine{
+		{ID: "machine-a", PublicKey: publicA, EndpointPrefixes: []string{"agent/a/"}},
+		{ID: "machine-b", PublicKey: publicB, EndpointPrefixes: []string{"agent/b/"}},
+		{ID: "machine-telegram", PublicKey: publicTG, Endpoints: []string{TelegramGatewayEndpoint}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	now := time.Date(2026, time.July, 13, 12, 0, 0, 0, time.UTC)
+	handler := NewHandler(store, auth, HandlerOptions{Now: func() time.Time { return now }, EndpointLeaseTTL: time.Hour, DeliveryLeaseTTL: time.Minute})
+	serveSigned(t, handler, privateA, "machine-a", http.MethodPut, "/v1/machines/me/endpoints", `{"endpoints":["agent/a/session"]}`, "advertise-a", "")
+	serveSigned(t, handler, privateB, "machine-b", http.MethodPut, "/v1/machines/me/endpoints", `{"endpoints":["agent/b/session"]}`, "advertise-b", "")
+	serveSigned(t, handler, privateTG, "machine-telegram", http.MethodPut, "/v1/machines/me/endpoints", `{"endpoints":["telegram/primary"]}`, "advertise-tg", "")
+	if reserved := serveSigned(t, handler, privateA, "machine-a", http.MethodPost, "/v1/conversations", `{"creator_endpoint":"agent/a/session","display_name":"Ops","members":[{"endpoint":"agent/a/session","capabilities":["send","receive","admin"]},{"role":"user-telegram","role_machine_id":"machine-a","capabilities":["receive"]}]}`, "create-reserved-role", "create-reserved"); reserved.Code != http.StatusBadRequest {
+		t.Fatalf("create user-telegram role=%d %s", reserved.Code, reserved.Body.String())
+	}
+	created := serveSigned(t, handler, privateA, "machine-a", http.MethodPost, "/v1/conversations", `{"creator_endpoint":"agent/a/session","display_name":"Ops","members":[{"endpoint":"agent/a/session","capabilities":["send","receive","admin"]},{"endpoint":"agent/b/session","capabilities":["receive"]}]}`, "create", "create-1")
+	var conversation Conversation
+	if created.Code != http.StatusCreated || json.NewDecoder(created.Body).Decode(&conversation) != nil {
+		t.Fatalf("create=%d %s", created.Code, created.Body.String())
+	}
+	if member := serveSigned(t, handler, privateA, "machine-a", http.MethodPost, "/v1/conversations/"+conversation.ID+"/controls", `{"actor_endpoint":"agent/a/session","operation":"upsert_member","member":{"endpoint":"user-telegram","capabilities":["receive"]}}`, "member-set", "member-set"); member.Code != http.StatusForbidden {
+		t.Fatalf("member set user-telegram=%d %s", member.Code, member.Body.String())
+	}
+	unclaimed := serveSigned(t, handler, privateB, "machine-b", http.MethodGet, "/v1/telegram/unclaimed", "", "unclaimed-denied", "")
+	if unclaimed.Code != http.StatusForbidden {
+		t.Fatalf("agent unclaimed=%d %s", unclaimed.Code, unclaimed.Body.String())
+	}
+	listed := serveSigned(t, handler, privateTG, "machine-telegram", http.MethodGet, "/v1/telegram/unclaimed", "", "unclaimed", "")
+	var topics struct {
+		Topics []UnclaimedTopic `json:"topics"`
+	}
+	if listed.Code != http.StatusOK || json.NewDecoder(listed.Body).Decode(&topics) != nil || len(topics.Topics) != 1 || topics.Topics[0].ID != conversation.ID {
+		t.Fatalf("unclaimed=%d %s", listed.Code, listed.Body.String())
+	}
+	topic := serveSigned(t, handler, privateA, "machine-a", http.MethodPost, "/v1/sessions/topic", `{"endpoint":"agent/a/session"}`, "topic", "")
+	var session SessionTopic
+	if topic.Code != http.StatusOK || json.NewDecoder(topic.Body).Decode(&session) != nil || session.ID != conversation.ID || session.Claimed {
+		t.Fatalf("session topic=%d %s", topic.Code, topic.Body.String())
+	}
+	if send := serveSigned(t, handler, privateA, "machine-a", http.MethodPost, "/v1/conversations/"+conversation.ID+"/messages", `{"from_endpoint":"agent/a/session","target_role":"user-telegram","body":"too soon"}`, "send-early", "send-early"); send.Code != http.StatusForbidden {
+		t.Fatalf("unclaimed send=%d %s", send.Code, send.Body.String())
+	}
+	first := serveSigned(t, handler, privateA, "machine-a", http.MethodPost, "/v1/conversations/"+conversation.ID+"/telegram-claim", `{"endpoint":"agent/a/session"}`, "claim-first", "claim-"+conversation.ID)
+	var reserved TelegramClaim
+	if first.Code != http.StatusCreated || json.NewDecoder(first.Body).Decode(&reserved) != nil || reserved.Status != "pending" {
+		t.Fatalf("reserve=%d %s", first.Code, first.Body.String())
+	}
+	retry := serveSigned(t, handler, privateTG, "machine-telegram", http.MethodPost, "/v1/conversations/"+conversation.ID+"/telegram-claim", `{"endpoint":"telegram/primary"}`, "claim-gateway", "gateway-claim-"+conversation.ID)
+	if retry.Code != http.StatusOK {
+		t.Fatalf("gateway ensure=%d %s", retry.Code, retry.Body.String())
+	}
+	pending := serveSigned(t, handler, privateTG, "machine-telegram", http.MethodPost, "/v1/telegram/claims/pending", `{"limit":1}`, "pending", "")
+	var pendingPayload struct {
+		Claims []TelegramClaim `json:"claims"`
+	}
+	if pending.Code != http.StatusOK || json.NewDecoder(pending.Body).Decode(&pendingPayload) != nil || len(pendingPayload.Claims) != 1 {
+		t.Fatalf("pending=%d %s", pending.Code, pending.Body.String())
+	}
+	if extra := serveSigned(t, handler, privateTG, "machine-telegram", http.MethodPost, "/v1/conversations/"+conversation.ID+"/telegram-claim/complete", `{"endpoint":"telegram/primary"}`, "complete-extra", ""); extra.Code != http.StatusBadRequest {
+		t.Fatalf("complete unknown field=%d %s", extra.Code, extra.Body.String())
+	}
+	if denied := serveSigned(t, handler, privateA, "machine-a", http.MethodPost, "/v1/conversations/"+conversation.ID+"/telegram-claim/complete", `{}`, "complete-denied", ""); denied.Code != http.StatusForbidden {
+		t.Fatalf("agent complete=%d %s", denied.Code, denied.Body.String())
+	}
+	complete := serveSigned(t, handler, privateTG, "machine-telegram", http.MethodPost, "/v1/conversations/"+conversation.ID+"/telegram-claim/complete", `{}`, "complete", "")
+	var completed TelegramClaim
+	if complete.Code != http.StatusCreated || json.NewDecoder(complete.Body).Decode(&completed) != nil || completed.Status != "complete" {
+		t.Fatalf("complete=%d %s", complete.Code, complete.Body.String())
+	}
+	if completeRetry := serveSigned(t, handler, privateTG, "machine-telegram", http.MethodPost, "/v1/conversations/"+conversation.ID+"/telegram-claim/complete", `{}`, "complete-retry", ""); completeRetry.Code != http.StatusOK {
+		t.Fatalf("complete retry=%d %s", completeRetry.Code, completeRetry.Body.String())
+	}
+	if query := serveSigned(t, handler, privateTG, "machine-telegram", http.MethodGet, "/v1/telegram/unclaimed?limit=10", "", "unclaimed-query", ""); query.Code != http.StatusBadRequest {
+		t.Fatalf("unclaimed query string=%d %s", query.Code, query.Body.String())
+	}
+	send := serveSigned(t, handler, privateA, "machine-a", http.MethodPost, "/v1/conversations/"+conversation.ID+"/messages", `{"from_endpoint":"agent/a/session","target_role":"user-telegram","body":"ping"}`, "send-user", "send-user")
+	var sent Message
+	if send.Code != http.StatusCreated || json.NewDecoder(send.Body).Decode(&sent) != nil || sent.ID == "" {
+		t.Fatalf("user-telegram send=%d %s", send.Code, send.Body.String())
+	}
+	lease := serveSigned(t, handler, privateTG, "machine-telegram", http.MethodPost, "/v1/deliveries/lease", `{"endpoint":"telegram/primary","consumer_id":"gateway"}`, "lease-tg", "")
+	var page DeliveryLeasePage
+	if lease.Code != http.StatusOK || json.NewDecoder(lease.Body).Decode(&page) != nil || len(page.Deliveries) != 1 || page.Deliveries[0].RecipientEndpoint != TelegramGatewayEndpoint {
+		t.Fatalf("gateway lease=%d %#v %s", lease.Code, page, lease.Body.String())
+	}
+	inbound := serveSigned(t, handler, privateTG, "machine-telegram", http.MethodPost, "/v1/conversations/"+conversation.ID+"/telegram-inbound", `{"from_endpoint":"telegram/primary","from_participant":"user-telegram","body":"ship it","in_reply_to_punaro_message_id":"`+sent.ID+`","in_reply_to_endpoint":"agent/a/session","telegram_thread_id":700001}`, "inbound", "telegram-update:7")
+	var inboundMessage Message
+	if inbound.Code != http.StatusCreated || json.NewDecoder(inbound.Body).Decode(&inboundMessage) != nil || inboundMessage.FromParticipant != TelegramUserParticipant || inboundMessage.InReplyToPunaroMessageID != sent.ID || inboundMessage.InReplyToEndpoint != "agent/a/session" || inboundMessage.TelegramThreadID != 700001 {
+		t.Fatalf("inbound=%d %s", inbound.Code, inbound.Body.String())
+	}
+	inboundRetry := serveSigned(t, handler, privateTG, "machine-telegram", http.MethodPost, "/v1/conversations/"+conversation.ID+"/telegram-inbound", `{"from_endpoint":"telegram/primary","from_participant":"user-telegram","body":"ship it"}`, "inbound-retry", "telegram-update:7")
+	if inboundRetry.Code != http.StatusOK {
+		t.Fatalf("inbound retry=%d %s", inboundRetry.Code, inboundRetry.Body.String())
+	}
+	if agentInbound := serveSigned(t, handler, privateA, "machine-a", http.MethodPost, "/v1/conversations/"+conversation.ID+"/telegram-inbound", `{"from_endpoint":"telegram/primary","from_participant":"user-telegram","body":"nope"}`, "inbound-agent", "telegram-update:8"); agentInbound.Code != http.StatusForbidden || agentInbound.Header().Get(ResponseNonceHeader) != "inbound-agent" {
+		t.Fatalf("agent inbound=%d nonce=%q %s", agentInbound.Code, agentInbound.Header().Get(ResponseNonceHeader), agentInbound.Body.String())
+	}
+	for _, field := range []struct {
+		name string
+		body string
+	}{
+		{"from_participant", `{"from_endpoint":"agent/a/session","body":"nope","from_participant":"user-telegram"}`},
+		{"in_reply_to_punaro_message_id", `{"from_endpoint":"agent/a/session","body":"nope","in_reply_to_punaro_message_id":"` + sent.ID + `"}`},
+		{"in_reply_to_endpoint", `{"from_endpoint":"agent/a/session","body":"nope","in_reply_to_endpoint":"agent/a/session"}`},
+		{"telegram_thread_id", `{"from_endpoint":"agent/a/session","body":"nope","telegram_thread_id":700001}`},
+	} {
+		if extra := serveSigned(t, handler, privateA, "machine-a", http.MethodPost, "/v1/conversations/"+conversation.ID+"/messages", field.body, "send-meta-"+field.name, "send-meta-"+field.name); extra.Code != http.StatusBadRequest {
+			t.Fatalf("agent %s send=%d %s", field.name, extra.Code, extra.Body.String())
+		}
+	}
+	leased := serveSigned(t, handler, privateB, "machine-b", http.MethodPost, "/v1/deliveries/lease", `{"endpoint":"agent/b/session","consumer_id":"adapter-b"}`, "lease-inbound", "")
+	var inboundPage DeliveryLeasePage
+	if leased.Code != http.StatusOK || json.NewDecoder(leased.Body).Decode(&inboundPage) != nil || len(inboundPage.Deliveries) != 1 {
+		t.Fatalf("inbound lease=%d %s", leased.Code, leased.Body.String())
+	}
+	got := inboundPage.Deliveries[0].Message
+	if got.ID != inboundMessage.ID || got.FromEndpoint != TelegramGatewayEndpoint || got.FromParticipant != TelegramUserParticipant || got.InReplyToPunaroMessageID != sent.ID || got.InReplyToEndpoint != "agent/a/session" || got.TelegramThreadID != 700001 {
+		t.Fatalf("leased inbound=%#v", got)
 	}
 }
 
@@ -717,6 +973,124 @@ func TestHTTPNotificationsCloseWithinFenceWhenTransitionAuthorityHangs(t *testin
 	}
 }
 
+func TestHTTPAppendRateLimitIsRetryableAndContentFree(t *testing.T) {
+	publicA, privateA, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	publicB, privateB, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	store, err := Open(filepath.Join(t.TempDir(), "relay.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+	if err := store.SetRateLimits(tightRateLimits()); err != nil {
+		t.Fatal(err)
+	}
+	auth, err := NewAuthenticator(store, []Machine{
+		{ID: "machine-a", PublicKey: publicA, EndpointPrefixes: []string{"agent/a/"}},
+		{ID: "machine-b", PublicKey: publicB, EndpointPrefixes: []string{"agent/b/"}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	clock := time.Date(2026, time.July, 13, 12, 0, 0, 0, time.UTC)
+	metrics := &Metrics{}
+	handler := NewHandler(store, auth, HandlerOptions{Now: func() time.Time { return clock }, EndpointLeaseTTL: time.Minute, DeliveryLeaseTTL: time.Minute, Metrics: metrics})
+	serveSigned(t, handler, privateA, "machine-a", http.MethodPut, "/v1/machines/me/endpoints", `{"endpoints":["agent/a/session"]}`, "rate-advertise-a", "")
+	serveSigned(t, handler, privateB, "machine-b", http.MethodPut, "/v1/machines/me/endpoints", `{"endpoints":["agent/b/session"]}`, "rate-advertise-b", "")
+	create := serveSigned(t, handler, privateA, "machine-a", http.MethodPost, "/v1/conversations", `{"creator_endpoint":"agent/a/session","members":[{"endpoint":"agent/a/session","capabilities":["send","receive","admin"]},{"endpoint":"agent/b/session","capabilities":["receive"]}]}`, "rate-create", "rate-create")
+	var conversation Conversation
+	if create.Code != http.StatusCreated || json.NewDecoder(create.Body).Decode(&conversation) != nil {
+		t.Fatalf("create status=%d body=%s", create.Code, create.Body.String())
+	}
+	first := serveSigned(t, handler, privateA, "machine-a", http.MethodPost, "/v1/conversations/"+conversation.ID+"/messages", `{"from_endpoint":"agent/a/session","body":"one"}`, "rate-send-1", "rate-send-1")
+	second := serveSigned(t, handler, privateA, "machine-a", http.MethodPost, "/v1/conversations/"+conversation.ID+"/messages", `{"from_endpoint":"agent/a/session","body":"two"}`, "rate-send-2", "rate-send-2")
+	if first.Code != http.StatusCreated || second.Code != http.StatusCreated {
+		t.Fatalf("accepted status first=%d second=%d", first.Code, second.Code)
+	}
+	replay := serveSigned(t, handler, privateA, "machine-a", http.MethodPost, "/v1/conversations/"+conversation.ID+"/messages", `{"from_endpoint":"agent/a/session","body":"one"}`, "rate-send-1-retry", "rate-send-1")
+	if replay.Code != http.StatusOK {
+		t.Fatalf("committed retry status=%d body=%s", replay.Code, replay.Body.String())
+	}
+	limited := serveSigned(t, handler, privateA, "machine-a", http.MethodPost, "/v1/conversations/"+conversation.ID+"/messages", `{"from_endpoint":"agent/a/session","body":"three"}`, "rate-send-3", "rate-send-3")
+	if limited.Code != http.StatusTooManyRequests {
+		t.Fatalf("limited status=%d body=%s", limited.Code, limited.Body.String())
+	}
+	if limited.Header().Get("Retry-After") != "1" {
+		t.Fatalf("Retry-After=%q", limited.Header().Get("Retry-After"))
+	}
+	body := limited.Body.String()
+	if !strings.Contains(body, `"error":"rate limited"`) || strings.Contains(body, conversation.ID) || strings.Contains(body, "three") || strings.Contains(body, "agent/") {
+		t.Fatalf("limited body leaked content: %s", body)
+	}
+	if snapshot := metrics.Snapshot(); snapshot.RelayRateLimitRejections != 1 {
+		t.Fatalf("metrics=%#v", snapshot)
+	}
+}
+
+func TestHTTPAppendCapacityExceededIsRetryableAndContentFree(t *testing.T) {
+	publicA, privateA, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	publicB, privateB, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	store, err := Open(filepath.Join(t.TempDir(), "relay.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+	if err := store.SetQuotaLimits(tightQuota(1, 1024, 8, 4096)); err != nil {
+		t.Fatal(err)
+	}
+	auth, err := NewAuthenticator(store, []Machine{
+		{ID: "machine-a", PublicKey: publicA, EndpointPrefixes: []string{"agent/a/"}},
+		{ID: "machine-b", PublicKey: publicB, EndpointPrefixes: []string{"agent/b/"}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	clock := time.Date(2026, time.July, 13, 12, 0, 0, 0, time.UTC)
+	metrics := &Metrics{}
+	handler := NewHandler(store, auth, HandlerOptions{Now: func() time.Time { return clock }, EndpointLeaseTTL: time.Minute, DeliveryLeaseTTL: time.Minute, Metrics: metrics})
+	serveSigned(t, handler, privateA, "machine-a", http.MethodPut, "/v1/machines/me/endpoints", `{"endpoints":["agent/a/session"]}`, "quota-advertise-a", "")
+	serveSigned(t, handler, privateB, "machine-b", http.MethodPut, "/v1/machines/me/endpoints", `{"endpoints":["agent/b/session"]}`, "quota-advertise-b", "")
+	create := serveSigned(t, handler, privateA, "machine-a", http.MethodPost, "/v1/conversations", `{"creator_endpoint":"agent/a/session","members":[{"endpoint":"agent/a/session","capabilities":["send","receive","admin"]},{"endpoint":"agent/b/session","capabilities":["receive"]}]}`, "quota-create", "quota-create")
+	var conversation Conversation
+	if create.Code != http.StatusCreated || json.NewDecoder(create.Body).Decode(&conversation) != nil {
+		t.Fatalf("create status=%d body=%s", create.Code, create.Body.String())
+	}
+	first := serveSigned(t, handler, privateA, "machine-a", http.MethodPost, "/v1/conversations/"+conversation.ID+"/messages", `{"from_endpoint":"agent/a/session","body":"one"}`, "quota-send-1", "quota-send-1")
+	if first.Code != http.StatusCreated {
+		t.Fatalf("accepted status=%d body=%s", first.Code, first.Body.String())
+	}
+	replay := serveSigned(t, handler, privateA, "machine-a", http.MethodPost, "/v1/conversations/"+conversation.ID+"/messages", `{"from_endpoint":"agent/a/session","body":"one"}`, "quota-send-1-retry", "quota-send-1")
+	if replay.Code != http.StatusOK {
+		t.Fatalf("committed retry status=%d body=%s", replay.Code, replay.Body.String())
+	}
+	limited := serveSigned(t, handler, privateA, "machine-a", http.MethodPost, "/v1/conversations/"+conversation.ID+"/messages", `{"from_endpoint":"agent/a/session","body":"two"}`, "quota-send-2", "quota-send-2")
+	if limited.Code != http.StatusTooManyRequests {
+		t.Fatalf("limited status=%d body=%s", limited.Code, limited.Body.String())
+	}
+	if limited.Header().Get("Retry-After") != "9" {
+		t.Fatalf("Retry-After=%q", limited.Header().Get("Retry-After"))
+	}
+	body := limited.Body.String()
+	if !strings.Contains(body, `"error":"capacity exceeded"`) || strings.Contains(body, "rate limited") || strings.Contains(body, conversation.ID) || strings.Contains(body, "two") || strings.Contains(body, "agent/") {
+		t.Fatalf("limited body leaked content: %s", body)
+	}
+	snapshot := metrics.Snapshot()
+	if snapshot.RelayCapacityRejections != 1 || snapshot.RelayPendingDeliveries != 1 || snapshot.RelayPendingBytes != 3 {
+		t.Fatalf("metrics=%#v", snapshot)
+	}
+}
+
 func serveSigned(t *testing.T, handler http.Handler, private ed25519.PrivateKey, machineID, method, path, body, nonce, idempotencyKey string) *httptest.ResponseRecorder {
 	t.Helper()
 	clock := time.Date(2026, time.July, 13, 12, 0, 0, 0, time.UTC)
@@ -733,4 +1107,127 @@ func serveSigned(t *testing.T, handler http.Handler, private ed25519.PrivateKey,
 	response := httptest.NewRecorder()
 	handler.ServeHTTP(response, request)
 	return response
+}
+
+func TestHTTPDoesNotExposeTerminalInventory(t *testing.T) {
+	t.Parallel()
+	public, private, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	store, err := Open(filepath.Join(t.TempDir(), "relay.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+	auth, err := NewAuthenticator(store, []Machine{{ID: "machine-a", PublicKey: public, EndpointPrefixes: []string{"agent/a/"}}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	clock := time.Date(2026, time.July, 13, 12, 0, 0, 0, time.UTC)
+	handler := NewHandler(store, auth, HandlerOptions{Now: func() time.Time { return clock }, EndpointLeaseTTL: time.Minute, DeliveryLeaseTTL: time.Minute})
+	for _, path := range []string{"/v1/terminals", "/v1/deliveries/terminals", "/v1/dead-letters"} {
+		nonce := strings.ReplaceAll(path, "/", "-")
+		response := serveSigned(t, handler, private, "machine-a", http.MethodGet, path, "", "get"+nonce, "")
+		if response.Code != http.StatusNotFound {
+			t.Fatalf("path=%s status=%d body=%s", path, response.Code, response.Body.String())
+		}
+		posted := serveSigned(t, handler, private, "machine-a", http.MethodPost, path, `{}`, "post"+nonce, "")
+		if posted.Code != http.StatusNotFound {
+			t.Fatalf("post path=%s status=%d body=%s", path, posted.Code, posted.Body.String())
+		}
+	}
+}
+
+func TestHTTPDoctorProbeAuthenticatesWithoutDurableMutation(t *testing.T) {
+	public, private, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	store, err := Open(filepath.Join(t.TempDir(), "relay.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+	auth, err := NewAuthenticator(store, []Machine{{ID: "machine-a", PublicKey: public, EndpointPrefixes: []string{"agent/a/"}}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	handler := NewHandler(store, auth, HandlerOptions{Now: func() time.Time {
+		return time.Date(2026, time.July, 13, 12, 0, 0, 0, time.UTC)
+	}})
+	for range 2 {
+		response := serveSigned(t, handler, private, "machine-a", http.MethodHead, DoctorPath, "", "reusable-doctor-probe", "")
+		if response.Code != http.StatusNoContent || response.Body.Len() != 0 || response.Header().Get(ResponseNonceHeader) != "reusable-doctor-probe" || response.Header().Get(ProtocolHeader) != "1" {
+			t.Fatalf("status=%d headers=%v body=%q", response.Code, response.Header(), response.Body.String())
+		}
+	}
+	var nonces int
+	if err := store.db.QueryRowContext(t.Context(), `SELECT count(*) FROM request_nonces`).Scan(&nonces); err != nil || nonces != 0 {
+		t.Fatalf("durable nonces=%d err=%v", nonces, err)
+	}
+	unsigned := httptest.NewRequestWithContext(t.Context(), http.MethodHead, DoctorPath, nil)
+	rejected := httptest.NewRecorder()
+	handler.ServeHTTP(rejected, unsigned)
+	if rejected.Code != http.StatusUnauthorized || rejected.Header().Get(ResponseNonceHeader) != "" {
+		t.Fatalf("unsigned status=%d headers=%v", rejected.Code, rejected.Header())
+	}
+	server := httptest.NewServer(handler)
+	t.Cleanup(server.Close)
+	signed := signRequest(private, "machine-a", http.MethodGet, DoctorNotificationsPath, nil, time.Date(2026, time.July, 13, 12, 0, 0, 0, time.UTC), "reusable-notification-doctor")
+	headers := http.Header{}
+	headers.Set("X-Punaro-Machine", signed.MachineID)
+	headers.Set("X-Punaro-Timestamp", signed.Timestamp.Format(time.RFC3339Nano))
+	headers.Set("X-Punaro-Nonce", signed.Nonce)
+	headers.Set("X-Punaro-Signature", base64.RawURLEncoding.EncodeToString(signed.Signature))
+	for range 2 {
+		connection, response, dialErr := websocket.Dial(t.Context(), "ws"+strings.TrimPrefix(server.URL, "http")+DoctorNotificationsPath, &websocket.DialOptions{HTTPHeader: headers})
+		if dialErr != nil || response == nil || response.Header.Get(ResponseNonceHeader) != signed.Nonce || response.Header.Get(ProtocolHeader) != "1" {
+			t.Fatalf("response=%v err=%v", response, dialErr)
+		}
+		_ = connection.Close(websocket.StatusNormalClosure, "")
+		if response.Body != nil {
+			_ = response.Body.Close()
+		}
+	}
+	if err := store.db.QueryRowContext(t.Context(), `SELECT count(*) FROM request_nonces`).Scan(&nonces); err != nil || nonces != 0 {
+		t.Fatalf("durable nonces after notification probe=%d err=%v", nonces, err)
+	}
+}
+
+func TestHTTPDoctorEndpointAssertionIsBoundToSignature(t *testing.T) {
+	public, private, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	store, err := Open(filepath.Join(t.TempDir(), "relay.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+	auth, err := NewAuthenticator(store, []Machine{{ID: "machine-a", PublicKey: public, EndpointPrefixes: []string{"agent/a/"}}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	clock := time.Date(2026, time.July, 13, 12, 0, 0, 0, time.UTC)
+	handler := NewHandler(store, auth, HandlerOptions{Now: func() time.Time { return clock }})
+	signedEndpoint := "agent/a/session"
+	signed := signRequest(private, "machine-a", http.MethodHead, DoctorPath, []byte(signedEndpoint), clock, "endpoint-bound-doctor")
+	probe := func(endpoint string) *httptest.ResponseRecorder {
+		request := httptest.NewRequestWithContext(t.Context(), http.MethodHead, DoctorPath, nil)
+		request.Header.Set("X-Punaro-Machine", signed.MachineID)
+		request.Header.Set("X-Punaro-Timestamp", signed.Timestamp.Format(time.RFC3339Nano))
+		request.Header.Set("X-Punaro-Nonce", signed.Nonce)
+		request.Header.Set("X-Punaro-Signature", base64.RawURLEncoding.EncodeToString(signed.Signature))
+		request.Header.Set(DoctorEndpointHeader, endpoint)
+		response := httptest.NewRecorder()
+		handler.ServeHTTP(response, request)
+		return response
+	}
+	if response := probe(signedEndpoint); response.Code != http.StatusNoContent {
+		t.Fatalf("signed endpoint status=%d body=%q", response.Code, response.Body.String())
+	}
+	if response := probe("agent/a/other"); response.Code != http.StatusUnauthorized || response.Header().Get(DoctorAttachmentHeader) != "" {
+		t.Fatalf("mutated endpoint status=%d headers=%v", response.Code, response.Header())
+	}
 }

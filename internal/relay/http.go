@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"strconv"
 	"strings"
 	"time"
 
@@ -18,6 +19,38 @@ const (
 	maxRequestBodyBytes              = 64 << 10
 	maximumSessionFenceAge           = 2 * time.Second
 	defaultSessionRevalidateInterval = maximumSessionFenceAge / 2
+	// DoctorPath is the exact signed, read-only relay reachability probe.
+	DoctorPath = "/v1/doctor"
+	// DoctorNotificationsPath is the exact signed, read-only WebSocket
+	// handshake probe. It never registers for or emits wake events.
+	DoctorNotificationsPath = "/v1/doctor/notifications"
+	// ResponseNonceHeader confirms that a response came from the authenticated
+	// Punaro route rather than an Access or reverse-proxy intermediary which
+	// rejected the request without echoing the per-request origin proof.
+	ResponseNonceHeader = "X-Punaro-Response-Nonce"
+	// RequestCorrelationHeader carries a random, non-secret bearer-client
+	// origin proof. Device credentials cannot send signed-request headers, so
+	// this separate token preserves intermediary-rejection detection without
+	// weakening the authentication boundary.
+	RequestCorrelationHeader = "X-Punaro-Request-Correlation"
+	// ProtocolHeader carries the bounded relay protocol identity.
+	ProtocolHeader = "X-Punaro-Protocol"
+	// DoctorEndpointHeader selects one endpoint owned by the authenticated
+	// machine for a read-only attachment check.
+	DoctorEndpointHeader = "X-Punaro-Doctor-Endpoint"
+	// DoctorAttachmentHeader and the following aggregate headers report only
+	// bounded, content-free endpoint and role attachment state.
+	DoctorAttachmentHeader = "X-Punaro-Endpoint-Attached"
+	// DoctorActiveEndpointsHeader reports a bounded count of active endpoints.
+	DoctorActiveEndpointsHeader = "X-Punaro-Active-Endpoints"
+	// DoctorExpiredEndpointsHeader reports a bounded count of expired endpoints.
+	DoctorExpiredEndpointsHeader = "X-Punaro-Expired-Endpoints"
+	// DoctorActiveRolesHeader reports a bounded count of active roles.
+	DoctorActiveRolesHeader = "X-Punaro-Active-Roles"
+	// DoctorExpiredRolesHeader reports a bounded count of expired roles.
+	DoctorExpiredRolesHeader = "X-Punaro-Expired-Roles"
+	// ProtocolVersion is the relay doctor protocol supported by this release.
+	ProtocolVersion = 1
 )
 
 // HandlerOptions make lease timing explicit and injectable for tests.
@@ -27,6 +60,7 @@ type HandlerOptions struct {
 	DeliveryLeaseTTL          time.Duration
 	Notifier                  *Notifier
 	SessionRevalidateInterval time.Duration
+	Metrics                   *Metrics
 }
 
 // NewHandler returns the authenticated relay API, including the wake-metadata
@@ -47,8 +81,14 @@ func NewHandler(store Backend, auth *Authenticator, options HandlerOptions) http
 	if options.SessionRevalidateInterval <= 0 || options.SessionRevalidateInterval > maximumSessionFenceAge/2 {
 		options.SessionRevalidateInterval = defaultSessionRevalidateInterval
 	}
-	h := &handler{store: store, auth: auth, notifier: options.Notifier, now: options.Now, endpointLeaseTTL: options.EndpointLeaseTTL, deliveryLeaseTTL: options.DeliveryLeaseTTL, sessionRevalidateInterval: options.SessionRevalidateInterval}
-	return http.HandlerFunc(h.serveHTTP)
+	if options.Metrics == nil {
+		options.Metrics = &Metrics{}
+	}
+	h := &handler{store: store, auth: auth, notifier: options.Notifier, now: options.Now, endpointLeaseTTL: options.EndpointLeaseTTL, deliveryLeaseTTL: options.DeliveryLeaseTTL, sessionRevalidateInterval: options.SessionRevalidateInterval, metrics: options.Metrics}
+	if setter, ok := store.(interface{ SetMetrics(*Metrics) }); ok {
+		setter.SetMetrics(options.Metrics)
+	}
+	return h
 }
 
 type handler struct {
@@ -59,6 +99,19 @@ type handler struct {
 	endpointLeaseTTL          time.Duration
 	deliveryLeaseTTL          time.Duration
 	sessionRevalidateInterval time.Duration
+	metrics                   *Metrics
+}
+
+func (h *handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	if nonce := responseNonce(r); nonce != "" {
+		w.Header().Set(ResponseNonceHeader, nonce)
+	}
+	h.serveHTTP(w, r)
+}
+
+// MetricsSnapshot returns content-free relay counters for the local health listener.
+func (h *handler) MetricsSnapshot() MetricsSnapshot {
+	return h.metrics.Snapshot()
 }
 
 func (h *handler) serveHTTP(w http.ResponseWriter, r *http.Request) {
@@ -71,6 +124,14 @@ func (h *handler) serveHTTP(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusRequestEntityTooLarge, "request body is too large")
 		return
 	}
+	if r.Method == http.MethodHead && r.URL.Path == DoctorPath {
+		h.doctor(w, r, body)
+		return
+	}
+	if r.Method == http.MethodGet && r.URL.Path == DoctorNotificationsPath {
+		h.doctorNotifications(w, r, body)
+		return
+	}
 	session, err := h.authenticate(r, body)
 	if err != nil {
 		if errors.Is(err, ErrMaintenance) {
@@ -80,6 +141,7 @@ func (h *handler) serveHTTP(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusUnauthorized, "authentication required")
 		return
 	}
+	w.Header().Set(ResponseNonceHeader, responseNonce(r))
 	machineID := session.MachineID
 	authority := PrincipalAuthority{PrincipalID: session.PrincipalID, CredentialLookupID: session.CredentialLookupID, CredentialGeneration: session.CredentialGeneration}
 	now := h.now().UTC()
@@ -92,6 +154,14 @@ func (h *handler) serveHTTP(w http.ResponseWriter, r *http.Request) {
 		h.advertiseEndpoints(w, body, machineID, authority, now)
 	case r.Method == http.MethodPost && r.URL.Path == "/v1/roles/bindings":
 		h.bindRole(w, body, machineID, now)
+	case r.Method == http.MethodPost && r.URL.Path == "/v1/roles/register":
+		h.registerRole(w, body, machineID, now, r.Header.Get("Idempotency-Key"))
+	case r.Method == http.MethodPost && r.URL.Path == "/v1/roles/list":
+		h.listRoles(w, body, now)
+	case r.Method == http.MethodPost && r.URL.Path == "/v1/roles/resolve":
+		h.resolveRole(w, body, now)
+	case r.Method == http.MethodPost && r.URL.Path == "/v1/direct-messages":
+		h.sendDirectMessage(w, body, machineID, now, r.Header.Get("Idempotency-Key"))
 	case r.Method == http.MethodPost && r.URL.Path == "/v1/conversations":
 		h.createConversation(w, body, machineID, authority, now, r.Header.Get("Idempotency-Key"))
 	case r.Method == http.MethodPost && strings.HasPrefix(r.URL.Path, "/v1/conversations/") && strings.HasSuffix(r.URL.Path, "/messages"):
@@ -129,6 +199,40 @@ func (h *handler) serveHTTP(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		h.controlAudit(w, body, machineID, conversationID, now)
+	case r.Method == http.MethodPost && strings.HasPrefix(r.URL.Path, "/v1/conversations/") && strings.HasSuffix(r.URL.Path, "/display-name"):
+		conversationID := strings.TrimSuffix(strings.TrimPrefix(r.URL.Path, "/v1/conversations/"), "/display-name")
+		if conversationID == "" || strings.Contains(conversationID, "/") {
+			writeError(w, http.StatusNotFound, "route not found")
+			return
+		}
+		h.setConversationDisplayName(w, body, machineID, conversationID, now, r.Header.Get("Idempotency-Key"))
+	case r.Method == http.MethodPost && strings.HasPrefix(r.URL.Path, "/v1/conversations/") && strings.HasSuffix(r.URL.Path, "/telegram-claim/complete"):
+		conversationID := strings.TrimSuffix(strings.TrimPrefix(r.URL.Path, "/v1/conversations/"), "/telegram-claim/complete")
+		if conversationID == "" || strings.Contains(conversationID, "/") {
+			writeError(w, http.StatusNotFound, "route not found")
+			return
+		}
+		h.completeTelegramClaim(w, body, machineID, conversationID, now)
+	case r.Method == http.MethodPost && strings.HasPrefix(r.URL.Path, "/v1/conversations/") && strings.HasSuffix(r.URL.Path, "/telegram-claim"):
+		conversationID := strings.TrimSuffix(strings.TrimPrefix(r.URL.Path, "/v1/conversations/"), "/telegram-claim")
+		if conversationID == "" || strings.Contains(conversationID, "/") {
+			writeError(w, http.StatusNotFound, "route not found")
+			return
+		}
+		h.reserveTelegramClaim(w, body, machineID, conversationID, now, r.Header.Get("Idempotency-Key"))
+	case r.Method == http.MethodPost && strings.HasPrefix(r.URL.Path, "/v1/conversations/") && strings.HasSuffix(r.URL.Path, "/telegram-inbound"):
+		conversationID := strings.TrimSuffix(strings.TrimPrefix(r.URL.Path, "/v1/conversations/"), "/telegram-inbound")
+		if conversationID == "" || strings.Contains(conversationID, "/") {
+			writeError(w, http.StatusNotFound, "route not found")
+			return
+		}
+		h.appendTelegramInbound(w, body, machineID, conversationID, now, r.Header.Get("Idempotency-Key"))
+	case r.Method == http.MethodPost && r.URL.Path == "/v1/telegram/claims/pending":
+		h.pendingTelegramClaims(w, body, machineID, now)
+	case r.Method == http.MethodGet && r.URL.Path == "/v1/telegram/unclaimed":
+		h.unclaimedTelegramTopics(w, machineID, now)
+	case r.Method == http.MethodPost && r.URL.Path == "/v1/sessions/topic":
+		h.sessionTopic(w, body, machineID, now)
 	case r.Method == http.MethodPost && r.URL.Path == "/v1/deliveries/lease":
 		h.leaseDeliveries(w, body, machineID, now)
 	case r.Method == http.MethodPost && r.URL.Path == "/v1/invocations/lease":
@@ -150,6 +254,205 @@ func (h *handler) serveHTTP(w http.ResponseWriter, r *http.Request) {
 	default:
 		writeError(w, http.StatusNotFound, "route not found")
 	}
+}
+
+func (h *handler) doctor(w http.ResponseWriter, r *http.Request, body []byte) {
+	if len(body) != 0 || r.URL.RawPath != "" || r.URL.EscapedPath() != r.URL.Path {
+		writeError(w, http.StatusBadRequest, "invalid doctor request")
+		return
+	}
+	session, err := h.auth.AuthenticateReadOnlyDoctor(r, body, h.now())
+	if err != nil {
+		writeError(w, http.StatusUnauthorized, "authentication required")
+		return
+	}
+	w.Header().Set("Cache-Control", "no-store")
+	w.Header().Set(ResponseNonceHeader, responseNonce(r))
+	w.Header().Set(ProtocolHeader, strconv.Itoa(ProtocolVersion))
+	if backend, ok := h.store.(AttachmentDoctorBackend); ok {
+		if snapshot, snapshotErr := backend.DoctorAttachments(session.MachineID, h.now().UTC()); snapshotErr == nil {
+			w.Header().Set(DoctorActiveEndpointsHeader, strconv.Itoa(snapshot.ActiveEndpoints))
+			w.Header().Set(DoctorExpiredEndpointsHeader, strconv.Itoa(snapshot.ExpiredEndpoints))
+			w.Header().Set(DoctorActiveRolesHeader, strconv.Itoa(snapshot.ActiveRoles))
+			w.Header().Set(DoctorExpiredRolesHeader, strconv.Itoa(snapshot.ExpiredRoles))
+		}
+	}
+	if endpoint := r.Header.Get(DoctorEndpointHeader); endpoint != "" {
+		attached := ValidEndpoint(endpoint) && h.auth.AllowsEndpoint(session.MachineID, endpoint) && h.store.AssertEndpointOwnership(session.MachineID, endpoint, h.now().UTC()) == nil
+		w.Header().Set(DoctorAttachmentHeader, strconv.FormatBool(attached))
+	}
+	w.WriteHeader(http.StatusNoContent)
+}
+
+func (h *handler) doctorNotifications(w http.ResponseWriter, r *http.Request, body []byte) {
+	if len(body) != 0 || r.URL.RawPath != "" || r.URL.EscapedPath() != r.URL.Path {
+		writeError(w, http.StatusBadRequest, "invalid doctor request")
+		return
+	}
+	if _, err := h.auth.AuthenticateReadOnlyDoctor(r, body, h.now()); err != nil {
+		writeError(w, http.StatusUnauthorized, "authentication required")
+		return
+	}
+	w.Header().Set("Cache-Control", "no-store")
+	w.Header().Set(ResponseNonceHeader, responseNonce(r))
+	w.Header().Set(ProtocolHeader, strconv.Itoa(ProtocolVersion))
+	connection, err := websocket.Accept(w, r, &websocket.AcceptOptions{CompressionMode: websocket.CompressionDisabled})
+	if err != nil {
+		return
+	}
+	_ = connection.Close(websocket.StatusNormalClosure, "")
+}
+
+func responseNonce(request *http.Request) string {
+	if request == nil {
+		return ""
+	}
+	if nonce := request.Header.Get("X-Punaro-Nonce"); nonce != "" {
+		return nonce
+	}
+	correlation := request.Header.Get(RequestCorrelationHeader)
+	if !ValidRequestToken(correlation) {
+		return ""
+	}
+	return correlation
+}
+
+func (h *handler) registerRole(w http.ResponseWriter, body []byte, machineID string, now time.Time, idempotencyKey string) {
+	if !ValidRequestToken(idempotencyKey) {
+		writeError(w, http.StatusBadRequest, "Idempotency-Key is required")
+		return
+	}
+	store, ok := h.store.(RoleProfileBackend)
+	if !ok {
+		writeError(w, http.StatusForbidden, "authorization denied")
+		return
+	}
+	var request struct {
+		Role              string  `json:"role"`
+		DisplayName       *string `json:"display_name"`
+		DirectAddressable *bool   `json:"direct_addressable"`
+	}
+	if err := decodeJSON(body, &request); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid role registration")
+		return
+	}
+	displayName := ""
+	if request.DisplayName != nil {
+		displayName = *request.DisplayName
+	}
+	directAddressable := false
+	if request.DirectAddressable != nil {
+		directAddressable = *request.DirectAddressable
+	}
+	profile, created, err := store.RegisterRoleProfile(RegisterRoleInput{
+		MachineID: machineID, Role: request.Role, DisplayName: displayName, DirectAddressable: directAddressable, IdempotencyKey: idempotencyKey, Now: now,
+	})
+	if err != nil {
+		writeStoreError(w, err)
+		return
+	}
+	status := http.StatusOK
+	if created {
+		status = http.StatusCreated
+	}
+	writeJSON(w, status, profile)
+}
+
+func (h *handler) listRoles(w http.ResponseWriter, body []byte, now time.Time) {
+	store, ok := h.store.(RoleProfileBackend)
+	if !ok {
+		writeError(w, http.StatusForbidden, "authorization denied")
+		return
+	}
+	var request struct {
+		Cursor string `json:"cursor"`
+		Limit  *int   `json:"limit"`
+	}
+	if err := decodeJSON(body, &request); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid role directory request")
+		return
+	}
+	limit := DefaultRoleListLimit
+	if request.Limit != nil {
+		limit = *request.Limit
+	}
+	page, err := store.ListAddressableRoles(RoleListInput{Cursor: request.Cursor, Limit: limit, Now: now})
+	if err != nil {
+		writeStoreError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, page)
+}
+
+func (h *handler) resolveRole(w http.ResponseWriter, body []byte, now time.Time) {
+	store, ok := h.store.(RoleProfileBackend)
+	if !ok {
+		writeError(w, http.StatusForbidden, "authorization denied")
+		return
+	}
+	var request struct {
+		Name string `json:"name"`
+	}
+	if err := decodeJSON(body, &request); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid role resolution request")
+		return
+	}
+	result, err := store.ResolveAddressableRole(RoleResolveInput{Name: request.Name, Now: now})
+	if err != nil {
+		writeStoreError(w, err)
+		return
+	}
+	switch result.Status {
+	case RoleResolveResolved:
+		writeJSON(w, http.StatusOK, result)
+	case RoleResolveAmbiguous:
+		writeJSON(w, http.StatusConflict, result)
+	default:
+		writeError(w, http.StatusNotFound, "role not found")
+	}
+}
+
+func (h *handler) sendDirectMessage(w http.ResponseWriter, body []byte, machineID string, now time.Time, idempotencyKey string) {
+	if !ValidRequestToken(idempotencyKey) {
+		writeError(w, http.StatusBadRequest, "Idempotency-Key is required")
+		return
+	}
+	store, ok := h.store.(DirectMessageBackend)
+	if !ok {
+		writeError(w, http.StatusForbidden, "authorization denied")
+		return
+	}
+	var request struct {
+		FromRole string `json:"from_role"`
+		ToRole   string `json:"to_role"`
+		Body     string `json:"body"`
+	}
+	if err := decodeJSON(body, &request); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid direct message request")
+		return
+	}
+	message, duplicate, err := store.SendDirectMessage(DirectMessageInput{
+		SenderMachineID: machineID, FromRole: request.FromRole, ToRole: request.ToRole, Body: request.Body, IdempotencyKey: idempotencyKey, Now: now,
+	})
+	if err != nil {
+		writeStoreError(w, err)
+		return
+	}
+	if !duplicate {
+		machines, err := h.store.RecipientMachines(message.ID, now)
+		if err != nil {
+			writeStoreError(w, err)
+			return
+		}
+		for _, recipientMachine := range machines {
+			h.notifier.Publish(recipientMachine, message.ConversationID, message.Sequence)
+		}
+	}
+	status := http.StatusCreated
+	if duplicate {
+		status = http.StatusOK
+	}
+	writeJSON(w, status, message)
 }
 
 func (h *handler) bindRole(w http.ResponseWriter, body []byte, machineID string, now time.Time) {
@@ -260,6 +563,233 @@ func (h *handler) validateSender(w http.ResponseWriter, body []byte, machineID, 
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"authorized": true})
+}
+
+func (h *handler) setConversationDisplayName(w http.ResponseWriter, body []byte, machineID, conversationID string, now time.Time, idempotencyKey string) {
+	if !ValidRequestToken(idempotencyKey) {
+		writeError(w, http.StatusBadRequest, "Idempotency-Key is required")
+		return
+	}
+	store, ok := h.store.(DisplayNameBackend)
+	if !ok {
+		writeError(w, http.StatusServiceUnavailable, "display name plane is unavailable")
+		return
+	}
+	var request struct {
+		ActorEndpoint string `json:"actor_endpoint"`
+		DisplayName   string `json:"display_name"`
+	}
+	if err := decodeJSON(body, &request); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid display name request")
+		return
+	}
+	if !h.auth.AllowsEndpoint(machineID, request.ActorEndpoint) {
+		writeError(w, http.StatusForbidden, "authorization denied")
+		return
+	}
+	conversation, duplicate, err := store.SetConversationDisplayName(SetDisplayNameInput{ConversationID: conversationID, ActorMachineID: machineID, ActorEndpoint: request.ActorEndpoint, DisplayName: request.DisplayName, IdempotencyKey: idempotencyKey, Now: now})
+	if err != nil {
+		writeStoreError(w, err)
+		return
+	}
+	status := http.StatusCreated
+	if duplicate {
+		status = http.StatusOK
+	}
+	writeJSON(w, status, conversation)
+}
+
+func (h *handler) telegramClaimStore() (TelegramClaimBackend, bool) {
+	store, ok := h.store.(TelegramClaimBackend)
+	return store, ok
+}
+
+func (h *handler) reserveTelegramClaim(w http.ResponseWriter, body []byte, machineID, conversationID string, now time.Time, idempotencyKey string) {
+	if !ValidRequestToken(idempotencyKey) {
+		writeError(w, http.StatusBadRequest, "Idempotency-Key is required")
+		return
+	}
+	store, ok := h.telegramClaimStore()
+	if !ok {
+		writeStoreError(w, ErrMaintenance)
+		return
+	}
+	var request struct {
+		Endpoint string `json:"endpoint"`
+	}
+	if err := decodeJSON(body, &request); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid telegram claim request")
+		return
+	}
+	if !h.auth.AllowsEndpoint(machineID, request.Endpoint) {
+		writeError(w, http.StatusForbidden, "authorization denied")
+		return
+	}
+	claim, duplicate, err := store.ReserveTelegramClaim(TelegramClaimInput{ConversationID: conversationID, MachineID: machineID, Endpoint: request.Endpoint, IdempotencyKey: idempotencyKey, Now: now})
+	if err != nil {
+		writeStoreError(w, err)
+		return
+	}
+	status := http.StatusCreated
+	if duplicate {
+		status = http.StatusOK
+	}
+	writeJSON(w, status, claim)
+}
+
+func (h *handler) completeTelegramClaim(w http.ResponseWriter, body []byte, machineID, conversationID string, now time.Time) {
+	store, ok := h.telegramClaimStore()
+	if !ok {
+		writeStoreError(w, ErrMaintenance)
+		return
+	}
+	var request struct{}
+	if err := decodeJSON(body, &request); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid telegram claim complete request")
+		return
+	}
+	if !h.auth.AllowsEndpoint(machineID, TelegramGatewayEndpoint) {
+		writeError(w, http.StatusForbidden, "authorization denied")
+		return
+	}
+	claim, duplicate, err := store.CompleteTelegramClaim(TelegramClaimCompleteInput{ConversationID: conversationID, MachineID: machineID, Now: now})
+	if err != nil {
+		writeStoreError(w, err)
+		return
+	}
+	status := http.StatusCreated
+	if duplicate {
+		status = http.StatusOK
+	}
+	writeJSON(w, status, claim)
+}
+
+func (h *handler) pendingTelegramClaims(w http.ResponseWriter, body []byte, machineID string, now time.Time) {
+	store, ok := h.telegramClaimStore()
+	if !ok {
+		writeStoreError(w, ErrMaintenance)
+		return
+	}
+	var request struct {
+		Limit int    `json:"limit"`
+		After string `json:"after"`
+	}
+	if err := decodeJSON(body, &request); err != nil || request.Limit < 1 || request.Limit > 100 {
+		writeError(w, http.StatusBadRequest, "invalid pending claim request")
+		return
+	}
+	if !h.auth.AllowsEndpoint(machineID, TelegramGatewayEndpoint) {
+		writeError(w, http.StatusForbidden, "authorization denied")
+		return
+	}
+	claims, err := store.PendingTelegramClaims(machineID, now, request.Limit, request.After)
+	if err != nil {
+		writeStoreError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"claims": claims})
+}
+
+func (h *handler) unclaimedTelegramTopics(w http.ResponseWriter, machineID string, now time.Time) {
+	store, ok := h.telegramClaimStore()
+	if !ok {
+		writeStoreError(w, ErrMaintenance)
+		return
+	}
+	if !h.auth.AllowsEndpoint(machineID, TelegramGatewayEndpoint) {
+		writeError(w, http.StatusForbidden, "authorization denied")
+		return
+	}
+	topics, err := store.UnclaimedNamedConversations(machineID, now, 10)
+	if err != nil {
+		writeStoreError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"topics": topics})
+}
+
+func (h *handler) sessionTopic(w http.ResponseWriter, body []byte, machineID string, now time.Time) {
+	store, ok := h.telegramClaimStore()
+	if !ok {
+		writeStoreError(w, ErrMaintenance)
+		return
+	}
+	var request struct {
+		Endpoint string `json:"endpoint"`
+	}
+	if err := decodeJSON(body, &request); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid session topic request")
+		return
+	}
+	if !h.auth.AllowsEndpoint(machineID, request.Endpoint) {
+		writeError(w, http.StatusForbidden, "authorization denied")
+		return
+	}
+	topic, err := store.SessionTopic(machineID, request.Endpoint, now)
+	if err != nil {
+		writeStoreError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, topic)
+}
+
+func (h *handler) appendTelegramInbound(w http.ResponseWriter, body []byte, machineID, conversationID string, now time.Time, idempotencyKey string) {
+	if !ValidRequestToken(idempotencyKey) {
+		writeError(w, http.StatusBadRequest, "Idempotency-Key is required")
+		return
+	}
+	store, ok := h.telegramClaimStore()
+	if !ok {
+		writeStoreError(w, ErrMaintenance)
+		return
+	}
+	var request struct {
+		FromEndpoint           string `json:"from_endpoint"`
+		FromParticipant        string `json:"from_participant"`
+		Body                   string `json:"body"`
+		InReplyToPunaroMessage string `json:"in_reply_to_punaro_message_id"`
+		InReplyToEndpoint      string `json:"in_reply_to_endpoint"`
+		TelegramThreadID       int64  `json:"telegram_thread_id"`
+	}
+	if err := decodeJSON(body, &request); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid telegram inbound request")
+		return
+	}
+	if !h.auth.AllowsEndpoint(machineID, TelegramGatewayEndpoint) {
+		writeError(w, http.StatusForbidden, "authorization denied")
+		return
+	}
+	message, duplicate, err := store.AppendTelegramInbound(TelegramInboundInput{
+		ConversationID:     conversationID,
+		SenderMachineID:    machineID,
+		FromEndpoint:       request.FromEndpoint,
+		FromParticipant:    request.FromParticipant,
+		Body:               request.Body,
+		InReplyToMessageID: request.InReplyToPunaroMessage,
+		InReplyToEndpoint:  request.InReplyToEndpoint,
+		TelegramThreadID:   request.TelegramThreadID,
+		IdempotencyKey:     idempotencyKey,
+		Now:                now,
+	})
+	if err != nil {
+		writeStoreError(w, err)
+		return
+	}
+	if !duplicate {
+		machines, err := h.store.RecipientMachines(message.ID, now)
+		if err != nil {
+			writeStoreError(w, err)
+			return
+		}
+		for _, recipientMachine := range machines {
+			h.notifier.Publish(recipientMachine, message.ConversationID, message.Sequence)
+		}
+	}
+	status := http.StatusCreated
+	if duplicate {
+		status = http.StatusOK
+	}
+	writeJSON(w, status, message)
 }
 
 func (h *handler) listConversations(w http.ResponseWriter, machineID string, now time.Time) {
@@ -390,6 +920,7 @@ func (h *handler) createConversation(w http.ResponseWriter, body []byte, machine
 	}
 	var request struct {
 		CreatorEndpoint string `json:"creator_endpoint"`
+		DisplayName     string `json:"display_name"`
 		ProjectID       string `json:"project_id"`
 		Members         []struct {
 			Endpoint      string   `json:"endpoint"`
@@ -429,7 +960,7 @@ func (h *handler) createConversation(w http.ResponseWriter, body []byte, machine
 		}
 		members = append(members, Member{Endpoint: member.Endpoint, Role: member.Role, RoleMachineID: member.RoleMachineID, Capabilities: capabilities})
 	}
-	conversation, err := h.store.CreateConversationIdempotent(CreateConversationInput{MachineID: machineID, PrincipalID: authority.PrincipalID, CredentialLookupID: authority.CredentialLookupID, CredentialGeneration: authority.CredentialGeneration, ProjectID: request.ProjectID, IdempotencyKey: idempotencyKey, CreatorEndpoint: request.CreatorEndpoint, Members: members, Now: now})
+	conversation, err := h.store.CreateConversationIdempotent(CreateConversationInput{MachineID: machineID, PrincipalID: authority.PrincipalID, CredentialLookupID: authority.CredentialLookupID, CredentialGeneration: authority.CredentialGeneration, ProjectID: request.ProjectID, IdempotencyKey: idempotencyKey, CreatorEndpoint: request.CreatorEndpoint, DisplayName: request.DisplayName, Members: members, Now: now})
 	if err != nil {
 		writeStoreError(w, err)
 		return
@@ -683,6 +1214,28 @@ func writeStoreError(w http.ResponseWriter, err error) {
 		writeError(w, http.StatusForbidden, "authorization denied")
 	case errors.Is(err, ErrConflict):
 		writeError(w, http.StatusConflict, "request conflicts with durable state")
+	case errors.Is(err, ErrRateLimited):
+		retryAfter := RateLimitRetryAfterMin
+		var limited *RateLimitedError
+		if errors.As(err, &limited) && limited.RetryAfterSeconds > retryAfter {
+			retryAfter = limited.RetryAfterSeconds
+		}
+		if retryAfter > RateLimitRetryAfterMaxBound {
+			retryAfter = RateLimitRetryAfterMaxBound
+		}
+		w.Header().Set("Retry-After", strconv.Itoa(retryAfter))
+		writeError(w, http.StatusTooManyRequests, "rate limited")
+	case errors.Is(err, ErrCapacityExceeded):
+		retryAfter := RateLimitRetryAfterMin
+		var limited *CapacityError
+		if errors.As(err, &limited) && limited.RetryAfterSeconds > retryAfter {
+			retryAfter = limited.RetryAfterSeconds
+		}
+		if retryAfter > RateLimitRetryAfterMaxBound {
+			retryAfter = RateLimitRetryAfterMaxBound
+		}
+		w.Header().Set("Retry-After", strconv.Itoa(retryAfter))
+		writeError(w, http.StatusTooManyRequests, "capacity exceeded")
 	case errors.Is(err, ErrMaintenance):
 		w.Header().Set("Retry-After", "5")
 		writeError(w, http.StatusServiceUnavailable, "relay maintenance in progress")

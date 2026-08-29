@@ -57,6 +57,43 @@ PUNARO_LISTEN_ADDR=127.0.0.1:8080
 PUNARO_DATA_DIR=/var/lib/punaro
 ```
 
+Distinct authorized messages are bounded by durable token buckets. Defaults are
+60 sender messages per minute with burst 60, and 120 conversation messages per
+minute with burst 120. Override with
+`PUNARO_RELAY_SENDER_RATE_BURST`, `PUNARO_RELAY_SENDER_RATE_REFILL_PER_MINUTE`,
+`PUNARO_RELAY_CONVERSATION_RATE_BURST`,
+`PUNARO_RELAY_CONVERSATION_RATE_REFILL_PER_MINUTE`, and
+`PUNARO_RELAY_RATE_RETRY_AFTER_MAX_SECONDS`. Invalid values fail startup. A
+rate-limited append is HTTP 429 with integer `Retry-After` and the content-free
+error `rate limited`. Exact committed retries never consume tokens. Pending
+deliveries are independently bounded per recipient identity and
+installation-wide by count and body bytes. Defaults are 10000 pending
+deliveries / 32 MiB per recipient and 100000 / 256 MiB installation-wide.
+Override with `PUNARO_RELAY_PENDING_RECIPIENT_COUNT`,
+`PUNARO_RELAY_PENDING_RECIPIENT_BYTES`,
+`PUNARO_RELAY_PENDING_INSTALLATION_COUNT`,
+`PUNARO_RELAY_PENDING_INSTALLATION_BYTES`, and
+`PUNARO_RELAY_PENDING_RETRY_AFTER_SECONDS`. Count values must be integers in
+1..10000000; byte values must be integers in 1..64GiB; Retry-After must be
+1..3600. Invalid values fail startup. A capacity-limited append is HTTP 429
+with integer `Retry-After` and the content-free error `capacity exceeded`,
+distinct from `rate limited`. Exact committed retries never reserve capacity
+again. Pending deliveries older than
+`PUNARO_RELAY_PENDING_MAX_AGE_SECONDS` (default 7 days) expire in bounded
+maintenance pages, release capacity once, and keep content-free terminal
+metadata for `PUNARO_RELAY_TERMINAL_RETENTION_SECONDS` (default 30 days).
+Override those values and `PUNARO_RELAY_DELIVERY_MAINTENANCE_BATCH` (default
+100, 1..1000). Age values must be integers in 1..31536000 seconds. Invalid
+values fail startup. Host-local `punaro relay list-terminals` and
+`punaro relay maintain-deliveries --yes` inspect and trigger that work; ordinary
+agent routes do not. The loopback health listener exposes `GET /metrics` with
+`relay_rate_limit_rejections`, `relay_capacity_rejections`,
+`relay_pending_deliveries`, `relay_pending_bytes`,
+`relay_pending_oldest_age_seconds`, `relay_terminal_transitions_acked`,
+`relay_terminal_transitions_expired`, `relay_terminal_transitions_revoked`,
+`relay_terminals_retained`, and `relay_lease_redeliveries` only; it has no body,
+endpoint, role, or conversation labels.
+
 For a Cloudflare-protected remote route, additionally set the Access issuer,
 application audience tag, and JWKS URL. Configure the tunnel origin to require
 the Access assertion. The process validates `Cf-Access-Jwt-Assertion` itself;
@@ -64,7 +101,7 @@ the tunnel and Access policy are not substitutes for the machine signature.
 
 ## Adapter configuration
 
-Create a local `agent-mailbox` group (for example `group/punaro-attached`),
+Create a local Waypost group (for example `group/punaro-attached`),
 bind machine-scoped aliases such as `agent/workstation-review/agent-a`, and add
 those aliases while their agents should be reachable. The adapter polls active
 members, renews their relay lease, injects inbound text locally, and only then
@@ -81,7 +118,8 @@ PUNARO_ADAPTER_POLL_INTERVAL=30s
 
 To enable offline-role invocation, additionally configure
 `PUNARO_INVOKER_COMMAND` with an absolute, protected executable owned by the
-local operator. Punaro invokes it only as:
+local operator. That command is provider- and operator-specific fenced runtime
+start, not ordinary message delivery. Punaro invokes it only as:
 
 ```text
 COMMAND invoke --invocation-id ID --conversation ID --endpoint ENDPOINT --fence FENCE
@@ -103,13 +141,15 @@ For a Linux agent machine that should keep its attachment active after logout,
 use the supplied user-level `deploy/systemd/user/punaro-adapter.service`
 profile. It deliberately runs as the same unprivileged account that owns the
 agent and its mailbox state; a privileged system service must never be pointed
-at an interactive user's mailbox database. Install the reviewed adapter as
-`~/.local/bin/punaro-adapter`, copy the non-secret example to
+at an interactive user's mailbox database. Install the reviewed bootstrap as
+`~/.local/bin/punaro-bootstrap` and seed a current slot under
+`~/.local/state/punaro-bootstrap`. Copy the non-secret example to
 `~/.config/punaro/adapter.env`, and set both that file and its machine-key file
 to mode `0600`. Add that machine's distinct Access client ID and secret only to
-the private environment file. The unit limits writable paths to its private
-adapter journal and the explicit `agent-mailbox` state path, then starts from
-the same session identity as the attached aliases. Install it under
+the private environment file. The unit launches `punaro-bootstrap run` and
+limits writable paths to its private adapter journal, bootstrap slots, and the
+explicit Waypost state path, then starts from the same session identity
+as the attached aliases. Install it under
 `~/.config/systemd/user/`, run `systemctl --user daemon-reload`, enable it, and
 start it with `systemctl --user enable --now punaro-adapter.service`. Use
 `loginctl enable-linger <user>` before logout only if the machine should
@@ -141,12 +181,12 @@ machines.
 1. Generate the enrollment record as shown above and add only its public JSON
    record to `PUNARO_RELAY_MACHINES_JSON` on the relay. Restart the relay and
    verify its readiness endpoint before continuing.
-2. On the machine, use the `agent-mailbox` MCP `mailbox_bind` operation to bind
+2. On the machine, use the Waypost MCP `waypost_bind` operation to bind
    the explicit alias (for example, `agent/workstation-review/agent-a`). Add it
    to that machine's `group/punaro-attached` group:
 
    ```sh
-   agent-mailbox group add-member \
+   waypost group add-member \
      --group group/punaro-attached \
      --person agent/workstation-review/agent-a
    ```
@@ -181,10 +221,12 @@ punaro-adapter send \
 
 The explicit idempotency key must be retained for retrying the same logical
 reply. The command emits only a message ID and sequence, not the message body.
-It automatically uses the installed adapter profile. A deliberately supplied
-non-empty adapter environment setting overrides its matching profile value;
-use `PUNARO_ADAPTER_PROFILE_FILE` only to select another absolute, owner-only
-profile.
+That output is append acceptance only. Punaro promises no sender receipt beyond
+append acceptance: not mailbox acknowledgement, not a read, and not an agent
+action. It automatically uses the installed adapter profile. A deliberately
+supplied non-empty adapter environment setting overrides its matching profile
+value; use `PUNARO_ADAPTER_PROFILE_FILE` only to select another absolute,
+owner-only profile.
 
 To address exactly one durable role, add `--target-role`. The relay derives
 the recipient from the conversation's role membership; it does not trust an
@@ -240,6 +282,48 @@ restart, advertise the new session and bind the role again. No membership edit
 is needed, but a stale session can neither send, receive, nor acknowledge as
 the role.
 
+To make a durable role a collision-safe public address, register a canonical
+handle owned by this machine. The slug must be lowercase ASCII
+`[a-z0-9][a-z0-9-]{0,62}`. Display names are labels only. Addressability
+defaults to off and does not by itself list or deliver messages:
+
+```sh
+punaro-adapter register-role \
+  --role role/workstation-review/reviewer \
+  --display-name "Plan Reviewer" \
+  --idempotency-key register-reviewer-1
+```
+
+Pass `--direct-addressable` when a later discovery slice should be allowed to
+name this role. Exact retries reuse the same idempotency key. Legacy names such
+as `role/plan-reviewer` remain conversation members until you register a
+canonical handle; registration does not rename them.
+
+List and resolve only those opted-in addresses. An unqualified slug succeeds
+only when exactly one visible role has it; otherwise use the qualified handle.
+Display names cannot resolve a role, and the directory never returns sessions
+or conversations:
+
+```sh
+punaro-adapter contacts list
+punaro-adapter contacts resolve reviewer
+punaro-adapter contacts resolve role/workstation-review/reviewer
+```
+
+Send after resolve with canonical handles. The destination may be unbound;
+delivery stays durable until that role binds later:
+
+```sh
+punaro-adapter send \
+  --to role/workstation-implement/implementer \
+  --from-role role/workstation-review/reviewer \
+  --body-file ./note.txt \
+  --idempotency-key dm-reviewer-1
+```
+
+Do not mix `--to` / `--from-role` with `--conversation` / `--from` /
+`--target-role`. The envelope names the source role, not the bound session.
+
 ## Retired v3 attachment evidence
 
 V2/v3 file transfer is separate from text onboarding and has no production
@@ -264,7 +348,9 @@ go test -tags=e2e ./cmd/punaro-adapter -run TestE2EPayloadFreeWake
 
 When the adapter receives its credentials from an external secret provider,
 run that provider's environment wrapper around the test command. A wake is a
-best-effort hint only; fetch/lease/ack polling is still authoritative.
+best-effort hint only; fetch/lease/ack polling is still authoritative. A
+WebSocket wake accelerates adapter polling only. It does not create a model
+turn, inject between tool calls, or resume an idle runtime.
 
 ## Disposable two-client lifecycle smoke test
 
@@ -317,7 +403,9 @@ fallback route for the main chat.
 
 - Topic routes are explicit operator state; no automatic picker or target
   discovery is implemented.
-- WebSocket hints are best-effort; polling remains correct when a machine
-  sleeps or reconnects.
+- WebSocket hints are best-effort and accelerate adapter polling only; polling
+  remains correct when a machine sleeps or reconnects.
+- `PUNARO_INVOKER_COMMAND` is optional, operator-specific start, not ordinary
+  message delivery. Punaro promises no sender receipt beyond append acceptance.
 - V2/v3 attachment settings are rejected and their routes are unmounted. Their
   source-level protocol evidence is retained but cannot authorize deployment.

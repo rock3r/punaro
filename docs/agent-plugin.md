@@ -7,26 +7,44 @@ Codex and Claude Code plugin. All forms expose the same three skills:
 - `punaro-reply` replies through the enrolled local Punaro adapter.
 - `punaro-attachment` handles one explicitly authorized trusted attachment.
 
-The plugin's package-relative POSIX and Windows launchers start the
-installer-owned `punaro-adapter mailbox-mcp` binary from its supported absolute
-location. The wrapper reads the same owner-only `adapter.env` profile as the
-adapter and launches `agent-mailbox mcp` with its configured binary and state
-directory. The plugin does not install Punaro, enroll a machine, provision
+The plugin's package-relative launchers start `punaro-adapter mailbox-mcp`
+from the bootstrap's selected signed slot. POSIX launchers resolve that slot
+directly; Windows launchers use the stable installer-owned dispatcher in
+`%LOCALAPPDATA%\Punaro\bin`, which performs the same closed selected-slot
+dispatch without starting PowerShell. The wrapper reads the same owner-only
+`adapter.env` profile as the adapter and launches `waypost mcp` with its
+configured binary and state directory. The same launcher remains compatible with a configured legacy
+`agent-mailbox` during a rolling migration. The plugin does not install Punaro, enroll a machine, provision
 credentials, select a relay, or change any local routing.
 
 ## Prerequisites
 
 Complete the supported [client installation](installation.md) first. The
-launchers use `~/.local/bin/punaro-adapter` on macOS and Linux and
+launchers resolve the selected adapter below the private bootstrap directory
+(`~/.local/state/punaro-bootstrap` or `%LOCALAPPDATA%\Punaro\bootstrap`),
+directly on POSIX and through
 `%LOCALAPPDATA%\Punaro\bin\punaro-adapter.exe` on Windows; they do not depend on
-the agent application's inherited `PATH`. The wrapper uses the `agent-mailbox`
-binary and mailbox state directory recorded by that installation. Trusted
+the agent application's inherited `PATH` or a stale fixed payload. The wrapper
+uses the Waypost binary and mailbox state directory recorded by that installation. Its MCP server must
+provide `waypost_status`, `waypost_recv`, and `waypost_ack`; doctor also accepts
+the complete legacy `mailbox_*` surface while that host awaits migration. Trusted
 attachment operations additionally require the operator-installed
 `punaro-trusted-attachment` client and its fixed local configuration.
 
 Do not put credentials, relay URLs, project IDs, or download paths in either
 plugin manifest. Those values remain in operator-controlled local
 configuration.
+
+Each skill runs the installed adapter's read-only doctor before first use when
+readiness is uncertain and after relevant local or relay failures. A skill may
+report stable failed check/remediation identifiers, but doctor does not grant
+repair, restart, enrollment, update, credential, routing, or Telegram-topic
+authority. Pass the installed plugin root to `punaro-adapter doctor` so
+portable/Codex/Claude registration, launcher, version, and skill-set digest
+parity are included. The launcher check is release-bound: it hashes both
+package-relative launchers and both MCP registration files, so replacing an
+executable launcher or changing its registered command fails doctor even when
+the skill trees are unchanged. See [the doctor guide](doctor.md).
 
 ## Load the portable plugin
 

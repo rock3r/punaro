@@ -19,19 +19,22 @@ jobs:
           go-version-file: go.mod
       - name: Validate agent plugin
         run: make plugin-validate
-      # The suite normally completes in well under a minute. A bounded timeout
-      # turns any platform-specific deadlock into a useful goroutine dump rather
-      # than leaving the runner opaque for Go's default ten-minute timeout.
-      - run: go test -race -covermode=atomic -timeout 2m ./...
+      # Bounded well below Go's default ten-minute timeout so a deadlock still
+      # dumps goroutines. internal/relay with -race is ~75s on a fast runner and
+      # can exceed 2m when the suite shares a contended hosted runner.
+      - run: go test -race -covermode=atomic -timeout 4m ./...
       - run: go vet ./...
       - uses: golangci/golangci-lint-action@db9de0fc1a667e1a49d2291a1a042dff081d78f6 # v9
         with:
           version: v2.11.1
+          # Do not fetch golangci-lint.run JSON schema; a timeout there fails the job
+          # after tests already passed. `golangci-lint run` remains the lint gate.
+          verify: false
       - run: go run golang.org/x/vuln/cmd/govulncheck@v1.1.4 ./...
       - run: CGO_ENABLED=0 go run github.com/securego/gosec/v2/cmd/gosec@v2.22.10 -exclude-generated ./...
       - run: go run github.com/zricethezav/gitleaks/v8@v8.27.2 detect --source . --no-git
       - run: make fuzz
-      - run: ./scripts/verify-release-gates.sh
+      - run: make release-gates
 
   postgres:
     name: PostgreSQL integration
@@ -97,7 +100,19 @@ jobs:
 
       - run: go test ./cmd/punaro-memory -run '^TestWindows'
 
+      - run: go test ./cmd/punaro-enroll -run '^TestWindows'
+
       - run: go test ./internal/memoryclient -run '^TestWindows'
+      - name: Build release artifacts on Windows
+        shell: bash
+        run: |
+          version=$(sed -n 's/.*"version": *"\([^"]*\)".*/\1/p' plugin.json)
+          ./scripts/build-release-artifacts.sh \
+            --output-dir "$RUNNER_TEMP/release-smoke" \
+            --release "v$version" \
+            --sequence 1 \
+            --catalog-sequence 1 \
+            --image "ghcr.io/rock3r/punaro@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
       - run: go vet ./...
       - run: go build ./...
       - shell: pwsh

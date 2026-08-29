@@ -3,11 +3,17 @@ package main
 import (
 	"bytes"
 	"context"
+	"crypto/ed25519"
+	"crypto/sha256"
 	"database/sql"
+	"encoding/base64"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -16,10 +22,13 @@ import (
 	"testing"
 	"time"
 
+	"github.com/rock3r/punaro/internal/adapter"
 	punarobackup "github.com/rock3r/punaro/internal/backup"
+	punarodiagnostic "github.com/rock3r/punaro/internal/diagnostic"
 	"github.com/rock3r/punaro/internal/ingress"
 	"github.com/rock3r/punaro/internal/operator"
 	punaropostgres "github.com/rock3r/punaro/internal/postgres"
+	"github.com/rock3r/punaro/internal/relay"
 )
 
 const cliTestImage = "registry.example/punaro@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
@@ -435,6 +444,9 @@ func preserveDependencies(t *testing.T) {
 	originalVerify := verifyInstallationPair
 	originalStart, originalProbe, originalIssue, originalListClients, originalRevokeClient := startServices, probe, issueEnrollment, listClients, revokeClient
 	originalBackup, originalListBackups, originalVerifyBackup, originalRestore := createOperatorBackup, listOperatorBackups, verifyOperatorBackup, restoreOperatorBackup
+	originalServerDoctorInspect, originalServerDoctorLoad := serverDoctorInspect, serverDoctorLoad
+	originalUpdateStageCheck := serverDoctorUpdateStageCheck
+	originalMailCutoverPreflight := inspectMailCutoverPreflight
 	t.Cleanup(func() {
 		inspectSchema, inspectOwner, migratePristinePair, maintenanceActive = originalInspect, originalOwner, originalMigrate, originalMaintenance
 		createOwner, recoverInstallationOwner = originalCreate, originalRecover
@@ -443,6 +455,10 @@ func preserveDependencies(t *testing.T) {
 		issueEnrollment = originalIssue
 		listClients, revokeClient = originalListClients, originalRevokeClient
 		createOperatorBackup, listOperatorBackups, verifyOperatorBackup, restoreOperatorBackup = originalBackup, originalListBackups, originalVerifyBackup, originalRestore
+		serverDoctorInspect = originalServerDoctorInspect
+		serverDoctorLoad = originalServerDoctorLoad
+		serverDoctorUpdateStageCheck = originalUpdateStageCheck
+		inspectMailCutoverPreflight = originalMailCutoverPreflight
 	})
 	inspectOwner = func(context.Context, string) (punaropostgres.Principal, error) {
 		return punaropostgres.Principal{ID: "11111111-1111-4111-8111-111111111111", DisplayName: "owner"}, nil
@@ -452,6 +468,332 @@ func preserveDependencies(t *testing.T) {
 		return punaropostgres.SchemaState{Classification: punaropostgres.Compatible, Version: 5}, nil
 	}
 	maintenanceActive = func(context.Context, string) (bool, error) { return false, nil }
+	serverDoctorInspect = func(context.Context, operator.Installation, string, bool, string) serverDoctorState {
+		return healthyServerDoctorState()
+	}
+	serverDoctorUpdateStageCheck = directServerDoctorUpdateStage
+}
+
+func TestServerDoctorDeadlineIncludesInstallationLoad(t *testing.T) {
+	preserveDependencies(t)
+	directory := testInstallation(t)
+	loadCalled := false
+	serverDoctorLoad = func(ctx context.Context, gotDirectory string) (operator.Installation, error) {
+		loadCalled = true
+		deadline, ok := ctx.Deadline()
+		if !ok || gotDirectory != directory || time.Until(deadline) <= 0 || time.Until(deadline) > 2*time.Second {
+			t.Fatalf("directory=%q deadline=%v ok=%v", gotDirectory, deadline, ok)
+		}
+		return operator.Installation{}, context.DeadlineExceeded
+	}
+	serverDoctorInspect = func(context.Context, operator.Installation, string, bool, string) serverDoctorState {
+		t.Fatal("doctor inspection ran after installation load failed")
+		return serverDoctorState{}
+	}
+	var stdout, stderr bytes.Buffer
+	if code := run([]string{"doctor", "--directory", directory, "--machine-id", "punaro-lxc", "--timeout", "1s"}, &stdout, &stderr); code != 1 || !loadCalled {
+		t.Fatalf("code=%d load_called=%v stdout=%q stderr=%q", code, loadCalled, stdout.String(), stderr.String())
+	}
+	report, err := punarodiagnostic.Decode(bytes.NewReader(stdout.Bytes()))
+	if err != nil || report.Component != punarodiagnostic.ComponentServer || report.Healthy {
+		t.Fatalf("report=%#v err=%v", report, err)
+	}
+}
+
+func healthyServerDoctorState() serverDoctorState {
+	return serverDoctorState{
+		MachineID: "punaro-lxc", Release: "v0.1.0-alpha.1", ReleaseSequence: 1, CatalogSequence: 1, Protocol: 1,
+		InstalledRelease: knownDoctorBool{Known: true, OK: true}, OperatorBinaryRelease: knownDoctorBool{Known: true, OK: true}, RunningImage: knownDoctorBool{Known: true, OK: true},
+		ComposeBinding: knownDoctorBool{Known: true, OK: true}, MigrationBinding: knownDoctorBool{Known: true, OK: true},
+		PostgresMajor: 18, ExpectedPostgresMajor: 18, PostgresKnown: true, Storage: knownDoctorBool{Known: true, OK: true},
+		BackupAvailable: knownDoctorBool{Known: true, OK: true}, BackupFresh: knownDoctorBool{Known: true, OK: true},
+		UpdateTransaction: knownDoctorBool{Known: true, OK: true}, RecoveryReceipt: knownDoctorBool{Known: true, OK: true}, UpdateRecovery: knownDoctorBool{Known: true, OK: true}, DatabasePrivate: knownDoctorBool{Known: true, OK: true},
+		HealthPrivate: knownDoctorBool{Known: true, OK: true}, AdminPrivate: knownDoctorBool{Known: true, OK: true},
+		BlobPrivate: knownDoctorBool{Known: true, OK: true}, TunnelRoute: knownDoctorBool{Known: true, OK: true},
+		TunnelOrigin: knownDoctorBool{Known: true, OK: true}, AccessAdmission: knownDoctorBool{Known: true, OK: true},
+		RelayEnrollment: knownDoctorBool{Known: true, OK: true}, RelayProtocol: knownDoctorBool{Known: true, OK: true}, GatewayInstalled: knownDoctorBool{Known: true, OK: true},
+		GatewayEnabled: knownDoctorBool{Known: true, OK: true}, GatewayRunning: knownDoctorBool{Known: true, OK: true}, GatewayExecutable: knownDoctorBool{Known: true, OK: true},
+		GatewayExitStatus: knownDoctorBool{Known: true, OK: true}, GatewayRestartState: knownDoctorBool{Known: true, OK: true}, GatewayRelease: knownDoctorBool{Known: true, OK: true},
+	}
+}
+
+func TestServerDoctorComposeBindingAcceptsGeneratedReleaseArtifact(t *testing.T) {
+	directory := testInstallation(t)
+	previous := serverDoctorFileDigest
+	serverDoctorFileDigest = directServerDoctorFileDigest
+	t.Cleanup(func() { serverDoctorFileDigest = previous })
+	binding := fileDigestMatches(t.Context(), operator.OverrideFile(directory), operator.ComposeManifestSHA256())
+	if !binding.Known || !binding.OK {
+		t.Fatalf("generated release Compose binding=%#v", binding)
+	}
+}
+
+func TestInstalledReleaseUsesTaggedRepositoryIdentityWhenDigestIsNotKnownAtBuildTime(t *testing.T) {
+	digest := strings.Repeat("a", 64)
+	installed := "ghcr.io/rock3r/punaro@sha256:" + digest
+	if !installedReleaseMatchesBuildIdentity("ghcr.io/rock3r/punaro:v0.1.0-alpha.1", installed, "v0.1.0-alpha.1") {
+		t.Fatal("release-tagged build identity did not accept the repository's digest-pinned installation")
+	}
+	if !installedReleaseMatchesBuildIdentity(installed, installed, "v0.1.0-alpha.1") {
+		t.Fatal("native exact-digest build identity did not match")
+	}
+	for _, expected := range []string{
+		"",
+		"ghcr.io/other/punaro:v0.1.0-alpha.1",
+		"ghcr.io/rock3r/punaro:v0.1.0-alpha.2",
+		"ghcr.io/rock3r/punaro:latest",
+	} {
+		if installedReleaseMatchesBuildIdentity(expected, installed, "v0.1.0-alpha.1") {
+			t.Fatalf("invalid build identity %q matched", expected)
+		}
+	}
+}
+
+func TestDoctorFileDigestCommandValidatesAndHashesRegularFile(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "compose.operator.yaml")
+	body := []byte("services: {}\n")
+	if err := os.WriteFile(path, body, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	var stdout bytes.Buffer
+	if code := runDoctorFileDigest([]string{"--path", path}, &stdout); code != 0 {
+		t.Fatalf("digest command code=%d", code)
+	}
+	want := sha256.Sum256(body)
+	var state serverDoctorFileDigestState
+	if json.Unmarshal(stdout.Bytes(), &state) != nil || !state.Known || state.Digest != hex.EncodeToString(want[:]) {
+		t.Fatalf("digest state=%#v want=%x", state, want)
+	}
+}
+
+func TestDoctorFileDigestDelegatesCompleteInspectionToIsolatedHelper(t *testing.T) {
+	previous := serverDoctorFileDigest
+	called := false
+	serverDoctorFileDigest = func(_ context.Context, path string) serverDoctorFileDigestState {
+		called = true
+		if path != "/stalled/compose.operator.yaml" {
+			t.Fatalf("digest path=%q", path)
+		}
+		return serverDoctorFileDigestState{}
+	}
+	t.Cleanup(func() { serverDoctorFileDigest = previous })
+	state := fileDigestMatches(t.Context(), "/stalled/compose.operator.yaml", strings.Repeat("a", 64))
+	if !called || state.Known {
+		t.Fatalf("isolated digest called=%t state=%#v", called, state)
+	}
+}
+
+func TestDoctorDSNReadCommandAndCredentialPreloadStayInsideDeadline(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "app.dsn")
+	if err := os.WriteFile(path, []byte("postgres://punaro_app@localhost/punaro?sslmode=disable\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	var stdout bytes.Buffer
+	if code := runDoctorDSNRead([]string{"--path", path}, &stdout); code != 0 || stdout.String() != "postgres://punaro_app@localhost/punaro?sslmode=disable" {
+		t.Fatalf("DSN helper code=%d output=%q", code, stdout.String())
+	}
+
+	previous := serverDoctorDSNRead
+	serverDoctorDSNRead = func(ctx context.Context, _ string) (string, bool) {
+		<-ctx.Done()
+		return "", false
+	}
+	t.Cleanup(func() { serverDoctorDSNRead = previous })
+	ctx, cancel := context.WithTimeout(t.Context(), 20*time.Millisecond)
+	defer cancel()
+	started := time.Now()
+	diagnostic := withServerDoctorCredentials(ctx, operator.Installation{AppDSNFile: "/stalled/app.dsn", OwnerDSNFile: "/stalled/owner.dsn"})
+	if _, marked, available := serverDoctorCredential(diagnostic, "/stalled/app.dsn"); !marked || available || time.Since(started) > time.Second {
+		t.Fatalf("deadline credential marked=%t available=%t elapsed=%s", marked, available, time.Since(started))
+	}
+}
+
+func TestDoctorPathCheckCommandAndIsolationStayInsideDeadline(t *testing.T) {
+	installation, err := operator.Load(testInstallation(t))
+	if err != nil {
+		t.Fatal(err)
+	}
+	request, ok := encodeServerDoctorPathRequest(installation)
+	if !ok {
+		t.Fatal("path-check request encoding failed")
+	}
+	var stdout bytes.Buffer
+	if code := runDoctorPathCheck([]string{"--request", request}, &stdout); code != 0 {
+		t.Fatalf("path-check helper code=%d", code)
+	}
+	var failures []string
+	if json.Unmarshal(stdout.Bytes(), &failures) != nil || len(failures) != 0 {
+		t.Fatalf("path-check failures=%#v output=%q", failures, stdout.String())
+	}
+
+	if runtime.GOOS == "windows" {
+		return
+	}
+	blocker := filepath.Join(t.TempDir(), "blocked-path-check")
+	if err := os.WriteFile(blocker, []byte("#!/bin/sh\nexec sleep 10\n"), 0o700); err != nil { // #nosec G306 -- private executable deadline fixture.
+		t.Fatal(err)
+	}
+	previous := serverDoctorPathExecutable
+	serverDoctorPathExecutable = func() (string, error) { return blocker, nil }
+	t.Cleanup(func() { serverDoctorPathExecutable = previous })
+	ctx, cancel := context.WithTimeout(t.Context(), 20*time.Millisecond)
+	defer cancel()
+	started := time.Now()
+	if _, known := isolatedServerDoctorPaths(ctx, installation); known || time.Since(started) > time.Second {
+		t.Fatalf("isolated path check known=%t elapsed=%s", known, time.Since(started))
+	}
+}
+
+func TestDoctorStorageCommandAndIsolationStayInsideDeadline(t *testing.T) {
+	if runtime.GOOS != "windows" {
+		var stdout bytes.Buffer
+		if code := runDoctorStorageCheck([]string{"--path", t.TempDir(), "--minimum", "1"}, &stdout); code != 0 {
+			t.Fatalf("storage helper code=%d", code)
+		}
+		var state knownDoctorBool
+		if json.Unmarshal(stdout.Bytes(), &state) != nil || !state.Known || !state.OK {
+			t.Fatalf("storage helper state=%#v output=%q", state, stdout.String())
+		}
+	}
+	if runtime.GOOS == "windows" {
+		return
+	}
+	blocker := filepath.Join(t.TempDir(), "blocked-storage-check")
+	if err := os.WriteFile(blocker, []byte("#!/bin/sh\nexec sleep 10\n"), 0o700); err != nil { // #nosec G306 -- private executable deadline fixture.
+		t.Fatal(err)
+	}
+	previous := serverDoctorStorageExecutable
+	serverDoctorStorageExecutable = func() (string, error) { return blocker, nil }
+	t.Cleanup(func() { serverDoctorStorageExecutable = previous })
+	ctx, cancel := context.WithTimeout(t.Context(), 20*time.Millisecond)
+	defer cancel()
+	started := time.Now()
+	if state := isolatedServerDoctorStorage(ctx, t.TempDir(), 1); state.Known || time.Since(started) > time.Second {
+		t.Fatalf("isolated storage state=%#v elapsed=%s", state, time.Since(started))
+	}
+}
+
+func TestDoctorUpdateStageIsolationStaysInsideDeadline(t *testing.T) {
+	var stdout bytes.Buffer
+	if code := runDoctorUpdateStageCheck([]string{"--directory", t.TempDir()}, &stdout); code != 0 {
+		t.Fatalf("update-stage helper exit=%d output=%q", code, stdout.String())
+	}
+	var clean knownDoctorBool
+	if json.NewDecoder(&stdout).Decode(&clean) != nil || !clean.Known || !clean.OK {
+		t.Fatalf("update-stage helper state=%#v", clean)
+	}
+	if runtime.GOOS == "windows" {
+		t.Skip("POSIX blocking executable fixture")
+	}
+	blocker := filepath.Join(t.TempDir(), "blocked-update-stage-check")
+	if err := os.WriteFile(blocker, []byte("#!/bin/sh\nexec sleep 10\n"), 0o700); err != nil { // #nosec G306 -- private executable deadline fixture.
+		t.Fatal(err)
+	}
+	previous := serverDoctorUpdateStageExecutable
+	serverDoctorUpdateStageExecutable = func() (string, error) { return blocker, nil }
+	t.Cleanup(func() { serverDoctorUpdateStageExecutable = previous })
+	ctx, cancel := context.WithTimeout(t.Context(), 20*time.Millisecond)
+	defer cancel()
+	started := time.Now()
+	if state := isolatedServerDoctorUpdateStage(ctx, t.TempDir()); state.Known || time.Since(started) > time.Second {
+		t.Fatalf("isolated update-stage state=%#v elapsed=%s", state, time.Since(started))
+	}
+}
+
+func TestDoctorRelayProfileCommandAndIsolationStayInsideDeadline(t *testing.T) {
+	root := t.TempDir()
+	if runtime.GOOS != "windows" {
+		if err := os.Chmod(root, 0o700); err != nil { // #nosec G302 -- private diagnostic fixture root.
+			t.Fatal(err)
+		}
+	}
+	privateKey := ed25519.NewKeyFromSeed(make([]byte, ed25519.SeedSize))
+	keyPath := filepath.Join(root, "doctor.key")
+	accessPath := filepath.Join(root, "access.env")
+	profilePath := filepath.Join(root, "doctor.env")
+	if err := os.WriteFile(keyPath, []byte(base64.RawURLEncoding.EncodeToString(privateKey)), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(accessPath, []byte("PUNARO_CF_ACCESS_CLIENT_ID=doctor-id\nPUNARO_CF_ACCESS_CLIENT_SECRET=doctor-secret\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(profilePath, []byte("PUNARO_SERVER_DOCTOR_RELAY_URL=https://punaro.example\nPUNARO_SERVER_DOCTOR_MACHINE_ID=server-doctor\nPUNARO_SERVER_DOCTOR_PRIVATE_KEY_FILE="+keyPath+"\nPUNARO_SERVER_DOCTOR_ACCESS_TOKEN_FILE="+accessPath+"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	var stdout bytes.Buffer
+	if code := runDoctorRelayProfileCheck([]string{"--path", profilePath}, &stdout); code != 0 {
+		t.Fatalf("relay-profile helper code=%d output=%q", code, stdout.String())
+	}
+	var payload serverDoctorProfilePayload
+	if json.Unmarshal(stdout.Bytes(), &payload) != nil || payload.RelayURL != "https://punaro.example" || payload.MachineID != "server-doctor" {
+		t.Fatalf("relay-profile helper payload=%#v", payload)
+	}
+	credential := "22222222-2222-4222-8222-222222222222." + strings.Repeat("A", 43)
+	credentialPath := filepath.Join(root, "device.credential")
+	deviceProfilePath := filepath.Join(root, "device-doctor.env")
+	if err := os.WriteFile(credentialPath, []byte(credential+"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(deviceProfilePath, []byte("PUNARO_SERVER_DOCTOR_RELAY_URL=https://punaro.example\nPUNARO_SERVER_DOCTOR_MACHINE_ID=server-doctor\nPUNARO_SERVER_DOCTOR_DEVICE_CREDENTIAL_FILE="+credentialPath+"\nPUNARO_SERVER_DOCTOR_ACCESS_TOKEN_FILE="+accessPath+"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	stdout.Reset()
+	if code := runDoctorRelayProfileCheck([]string{"--path", deviceProfilePath}, &stdout); code != 0 {
+		t.Fatalf("device relay-profile helper code=%d", code)
+	}
+	payload = serverDoctorProfilePayload{}
+	if json.Unmarshal(stdout.Bytes(), &payload) != nil || payload.DeviceCredential != credential || payload.SigningKey != "" {
+		t.Fatalf("device relay-profile helper payload is invalid")
+	}
+	if runtime.GOOS == "windows" {
+		return
+	}
+	blocker := filepath.Join(t.TempDir(), "blocked-relay-profile-check")
+	if err := os.WriteFile(blocker, []byte("#!/bin/sh\nexec sleep 10\n"), 0o700); err != nil { // #nosec G306 -- private executable deadline fixture.
+		t.Fatal(err)
+	}
+	previous := serverDoctorProfileExecutable
+	serverDoctorProfileExecutable = func() (string, error) { return blocker, nil }
+	t.Cleanup(func() { serverDoctorProfileExecutable = previous })
+	ctx, cancel := context.WithTimeout(t.Context(), 20*time.Millisecond)
+	defer cancel()
+	started := time.Now()
+	if _, err := isolatedServerDoctorProfile(ctx, profilePath); err == nil || time.Since(started) > time.Second {
+		t.Fatalf("isolated relay profile error=%v elapsed=%s", err, time.Since(started))
+	}
+}
+
+func TestDoctorRecoveryReceiptCommandAndIsolationStayInsideDeadline(t *testing.T) {
+	directory := t.TempDir()
+	request := serverDoctorRecoveryReceiptRequest{Directory: directory, ExpectAbsent: true}
+	encoded, ok := encodeServerDoctorRecoveryReceiptRequest(request)
+	if !ok {
+		t.Fatal("recovery-receipt request encoding failed")
+	}
+	var stdout bytes.Buffer
+	if code := runDoctorRecoveryReceiptCheck([]string{"--request", encoded}, &stdout); code != 0 {
+		t.Fatalf("recovery-receipt helper code=%d output=%q", code, stdout.String())
+	}
+	var state knownDoctorBool
+	if json.Unmarshal(stdout.Bytes(), &state) != nil || !state.Known || !state.OK {
+		t.Fatalf("recovery-receipt helper state=%#v", state)
+	}
+	if runtime.GOOS == "windows" {
+		return
+	}
+	blocker := filepath.Join(t.TempDir(), "blocked-recovery-receipt-check")
+	if err := os.WriteFile(blocker, []byte("#!/bin/sh\nexec sleep 10\n"), 0o700); err != nil { // #nosec G306 -- private executable deadline fixture.
+		t.Fatal(err)
+	}
+	previous := serverDoctorRecoveryReceiptExecutable
+	serverDoctorRecoveryReceiptExecutable = func() (string, error) { return blocker, nil }
+	t.Cleanup(func() { serverDoctorRecoveryReceiptExecutable = previous })
+	ctx, cancel := context.WithTimeout(t.Context(), 20*time.Millisecond)
+	defer cancel()
+	started := time.Now()
+	if state := isolatedServerDoctorRecoveryReceipt(ctx, request); state.Known || time.Since(started) > time.Second {
+		t.Fatalf("isolated recovery receipt=%#v elapsed=%s", state, time.Since(started))
+	}
 }
 
 func TestUpRefusesActiveUpdateBeforeStartingWriters(t *testing.T) {
@@ -540,6 +882,17 @@ func TestRunRoutesUpdateCommand(t *testing.T) {
 	}
 	if strings.Contains(stderr.String(), "unsupported operator command") {
 		t.Fatalf("update command was not routed: %q", stderr.String())
+	}
+}
+
+func TestServerDoctorCommandOutputIsBounded(t *testing.T) {
+	output := boundedServerDoctorOutput{maximum: serverDoctorOutputLimit}
+	if written, err := output.Write([]byte("healthy")); err != nil || written != len("healthy") || output.buffer.String() != "healthy" || output.overflow {
+		t.Fatalf("bounded output=%q overflow=%v written=%d err=%v", output.buffer.String(), output.overflow, written, err)
+	}
+	oversized := strings.Repeat("x", serverDoctorOutputLimit+1)
+	if written, err := output.Write([]byte(oversized)); err != nil || written != len(oversized) || output.buffer.Len() != serverDoctorOutputLimit || !output.overflow {
+		t.Fatalf("oversized length=%d overflow=%v written=%d err=%v", output.buffer.Len(), output.overflow, written, err)
 	}
 }
 
@@ -729,7 +1082,7 @@ func TestDoctorClassifiesOldSchemaBeforeRolePair(t *testing.T) {
 	verifyInstallationPair = func(context.Context, string, string) error { pairChecked = true; return errors.New("must not run") }
 	probe = func(context.Context, string) error { return nil }
 	var stdout, stderr bytes.Buffer
-	if code := run([]string{"doctor", "--directory", directory}, &stdout, &stderr); code != 1 || pairChecked || !strings.Contains(stdout.String(), "schema not compatible") || strings.Contains(stdout.String(), "database roles target different") {
+	if code := run([]string{"doctor", "--directory", directory, "--machine-id", "punaro-lxc"}, &stdout, &stderr); code != 1 || pairChecked || !strings.Contains(stdout.String(), `"code": "database_schema"`) || !strings.Contains(stdout.String(), `"code": "database_pair"`) || !strings.Contains(stdout.String(), `"status": "unavailable"`) {
 		t.Fatalf("code=%d pairChecked=%t stdout=%q stderr=%q", code, pairChecked, stdout.String(), stderr.String())
 	}
 }
@@ -810,8 +1163,668 @@ func TestDoctorFailsForConfigurationDriftAndRoleMismatch(t *testing.T) {
 	}
 	probe = func(context.Context, string) error { return nil }
 	var stdout, stderr bytes.Buffer
-	if code := run([]string{"doctor", "--directory", directory}, &stdout, &stderr); code != 1 || !strings.Contains(stdout.String(), `"healthy": false`) || !strings.Contains(stdout.String(), "database roles target different installations") || !strings.Contains(stdout.String(), "backup directory") {
+	if code := run([]string{"doctor", "--directory", directory, "--machine-id", "punaro-lxc"}, &stdout, &stderr); code != 1 || !strings.Contains(stdout.String(), `"healthy": false`) || !strings.Contains(stdout.String(), `"code": "database_pair"`) || !strings.Contains(stdout.String(), `"code": "backup_directory"`) {
 		t.Fatalf("code=%d stdout=%q stderr=%q", code, stdout.String(), stderr.String())
+	}
+}
+
+func TestDoctorEmitsStrictContentFreeServerReport(t *testing.T) {
+	preserveDependencies(t)
+	directory := testInstallation(t)
+	serverDoctorInspect = func(_ context.Context, _ operator.Installation, machineID string, gatewayColocated bool, relayProfile string) serverDoctorState {
+		if machineID != "punaro-lxc" || gatewayColocated {
+			t.Fatalf("doctor inputs machine=%q gateway_colocated=%t", machineID, gatewayColocated)
+		}
+		if relayProfile != "/run/punaro/server-doctor.env" {
+			t.Fatalf("relay profile=%q", relayProfile)
+		}
+		state := healthyServerDoctorState()
+		state.RelayEnrollment = knownDoctorBool{}
+		state.RelayProtocol = knownDoctorBool{}
+		return state
+	}
+	inspectSchema = func(context.Context, string) (punaropostgres.SchemaState, error) {
+		return punaropostgres.SchemaState{Classification: punaropostgres.Compatible, Version: 44}, nil
+	}
+	probe = func(context.Context, string) error { return nil }
+	var stdout, stderr bytes.Buffer
+	if code := run([]string{"doctor", "--directory", directory, "--machine-id", "punaro-lxc", "--relay-profile", "/run/punaro/server-doctor.env"}, &stdout, &stderr); code != 0 {
+		t.Fatalf("code=%d stdout=%q stderr=%q", code, stdout.String(), stderr.String())
+	}
+	report, err := punarodiagnostic.Decode(bytes.NewReader(stdout.Bytes()))
+	if err != nil || report.Component != punarodiagnostic.ComponentServer || !report.Healthy || report.Identity.MachineID != "punaro-lxc" || report.Identity.StorageSchema != 44 || report.Identity.ArtifactDigest != "sha256:"+strings.Repeat("a", 64) {
+		t.Fatalf("report=%#v err=%v stderr=%q", report, err, stderr.String())
+	}
+	for _, check := range report.Checks {
+		if strings.HasPrefix(check.Code, "gateway_") && (check.Required || check.Status != punarodiagnostic.StatusUnavailable || check.Remediation != "collect_gateway_report") {
+			t.Fatalf("split gateway check=%#v", check)
+		}
+		if (check.Code == "relay_enrollment" || check.Code == "relay_protocol") && (check.Required || check.Status != punarodiagnostic.StatusUnavailable || check.Remediation != "enable_relay_to_require_relay_checks") {
+			t.Fatalf("disabled relay check=%#v", check)
+		}
+	}
+	for _, forbidden := range []string{directory, "postgres://", "invalid", "127.0.0.1", "registry.example"} {
+		if strings.Contains(stdout.String(), forbidden) {
+			t.Fatalf("doctor leaked %q: %s", forbidden, stdout.String())
+		}
+	}
+}
+
+func TestServerDoctorUsesNonRelayPublicEdgeProbeWhenRelayDisabled(t *testing.T) {
+	for _, accessProtected := range []bool{true, false} {
+		t.Run(map[bool]string{true: "protected", false: "open"}[accessProtected], func(t *testing.T) {
+			server := httptest.NewTLSServer(http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {
+				if request.Method != http.MethodHead || request.URL.Path != "/" {
+					t.Fatalf("request=%s %s", request.Method, request.URL.Path)
+				}
+				if request.Header.Get("CF-Access-Client-Id") == "" && accessProtected {
+					response.WriteHeader(http.StatusForbidden)
+					return
+				}
+				response.Header().Set("Cache-Control", "no-store")
+				response.Header().Set("X-Content-Type-Options", "nosniff")
+				response.Header().Set("X-Frame-Options", "DENY")
+				http.NotFound(response, request)
+			}))
+			defer server.Close()
+			profile := serverDoctorProfile{RelayURL: server.URL, AccessToken: adapter.AccessServiceToken{ClientID: "access-id", ClientSecret: "access-secret"}}
+			route, origin, access := inspectServerPublicEdge(t.Context(), server.URL, profile, server.Client())
+			if !route.Known || !route.OK || !origin.Known || !origin.OK || !access.Known || access.OK != accessProtected {
+				t.Fatalf("route=%#v origin=%#v access=%#v", route, origin, access)
+			}
+		})
+	}
+}
+
+func TestServerDoctorRequiresPreflightBeforeMailCutoverPublication(t *testing.T) {
+	preserveDependencies(t)
+	directory := testInstallation(t)
+	installation, err := operator.Load(directory)
+	if err != nil {
+		t.Fatal(err)
+	}
+	installation.RelayMachinesJSON = "configured"
+	if installation.MailCutover != nil {
+		t.Fatal("test requires a pre-publication installation")
+	}
+	inspectSchema = func(context.Context, string) (punaropostgres.SchemaState, error) {
+		return punaropostgres.SchemaState{Classification: punaropostgres.Compatible, Version: 44}, nil
+	}
+	probe = func(context.Context, string) error { return nil }
+	preflightCalls := 0
+	inspectMailCutoverPreflight = func(context.Context, string) (punaropostgres.MailCutoverPreflight, error) {
+		preflightCalls++
+		return punaropostgres.MailCutoverPreflight{LegacyPending: 1, TargetRows: 1}, nil
+	}
+	report, err := diagnoseServer(t.Context(), installation, "punaro-lxc", false, "")
+	if err != nil || preflightCalls != 1 || report.Healthy {
+		t.Fatalf("preflight_calls=%d healthy=%t err=%v", preflightCalls, report.Healthy, err)
+	}
+	want := map[string]punarodiagnostic.Status{
+		"mail_cutover_legacy_inventory": punarodiagnostic.StatusFail,
+		"mail_cutover_recovery":         punarodiagnostic.StatusPass,
+		"mail_cutover_target":           punarodiagnostic.StatusFail,
+	}
+	for _, check := range report.Checks {
+		if status, ok := want[check.Code]; ok {
+			if !check.Required || check.Status != status {
+				t.Fatalf("check=%#v want_status=%s", check, status)
+			}
+			delete(want, check.Code)
+		}
+	}
+	if len(want) != 0 {
+		t.Fatalf("missing preflight checks: %v", want)
+	}
+}
+
+func TestServerDoctorDoesNotSynthesizeEnabledLANRelayHealth(t *testing.T) {
+	installation := operator.Installation{Ingress: ingress.Policy{Mode: ingress.LAN}, RelayEnabled: true}
+	route, origin, access, enrollment, protocol := inspectServerRelay(t.Context(), installation, "")
+	if !route.Known || !route.OK || !origin.Known || !origin.OK || !access.Known || !access.OK {
+		t.Fatalf("route=%#v origin=%#v access=%#v", route, origin, access)
+	}
+	if enrollment.Known || protocol.Known {
+		t.Fatalf("enrollment=%#v protocol=%#v", enrollment, protocol)
+	}
+}
+
+func TestServerDoctorBindsEnabledRelayProbeToInstalledPublicURL(t *testing.T) {
+	root := t.TempDir()
+	if runtime.GOOS != "windows" {
+		if err := os.Chmod(root, 0o700); err != nil { // #nosec G302 -- private diagnostic fixture root.
+			t.Fatal(err)
+		}
+	}
+	privateKey := ed25519.NewKeyFromSeed(make([]byte, ed25519.SeedSize))
+	keyPath := filepath.Join(root, "doctor.key")
+	accessPath := filepath.Join(root, "access.env")
+	profilePath := filepath.Join(root, "doctor.env")
+	if err := os.WriteFile(keyPath, []byte(base64.RawURLEncoding.EncodeToString(privateKey)), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(accessPath, []byte("PUNARO_CF_ACCESS_CLIENT_ID=doctor-id\nPUNARO_CF_ACCESS_CLIENT_SECRET=doctor-secret\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	profile := "PUNARO_SERVER_DOCTOR_RELAY_URL=https://stale.example\nPUNARO_SERVER_DOCTOR_MACHINE_ID=server-doctor\nPUNARO_SERVER_DOCTOR_PRIVATE_KEY_FILE=" + keyPath + "\nPUNARO_SERVER_DOCTOR_ACCESS_TOKEN_FILE=" + accessPath + "\n"
+	if err := os.WriteFile(profilePath, []byte(profile), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	installation := operator.Installation{Ingress: ingress.Policy{Mode: ingress.Internet, PublicURL: "https://installed.example"}, RelayEnabled: true}
+	route, origin, access, enrollment, protocol := inspectServerRelay(t.Context(), installation, profilePath)
+	for name, check := range map[string]knownDoctorBool{"route": route, "origin": origin, "access": access} {
+		if !check.Known || check.OK {
+			t.Fatalf("%s=%#v", name, check)
+		}
+	}
+	if enrollment.Known || protocol.Known {
+		t.Fatalf("enrollment=%#v protocol=%#v", enrollment, protocol)
+	}
+}
+
+func TestServerDoctorUsesMigratedDeviceCredentialAfterCutover(t *testing.T) {
+	credential := "22222222-2222-4222-8222-222222222222." + strings.Repeat("A", 43)
+	server := httptest.NewServer(http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {
+		correlation := request.Header.Get(relay.RequestCorrelationHeader)
+		if request.Method != http.MethodHead || request.URL.Path != relay.DoctorPath || request.Header.Get("Authorization") != "Bearer "+credential || !relay.ValidRequestToken(correlation) {
+			t.Fatalf("invalid bearer doctor request")
+		}
+		response.Header().Set(relay.ResponseNonceHeader, correlation)
+		response.Header().Set(relay.ProtocolHeader, "1")
+		response.WriteHeader(http.StatusNoContent)
+	}))
+	defer server.Close()
+	previous := serverDoctorProfileLoad
+	serverDoctorProfileLoad = func(context.Context, string) (serverDoctorProfile, error) {
+		return serverDoctorProfile{RelayURL: server.URL, MachineID: "server-doctor", DeviceCredential: credential}, nil
+	}
+	t.Cleanup(func() { serverDoctorProfileLoad = previous })
+	installation := operator.Installation{Ingress: ingress.Policy{Mode: ingress.Internet, PublicURL: server.URL}, RelayEnabled: true}
+	route, origin, access, enrollment, protocol := inspectServerRelay(t.Context(), installation, "/protected/server-doctor.env")
+	for name, check := range map[string]knownDoctorBool{"route": route, "origin": origin, "access": access, "enrollment": enrollment, "protocol": protocol} {
+		if !check.Known || !check.OK {
+			t.Fatalf("%s=%#v", name, check)
+		}
+	}
+}
+
+func TestDoctorRequiresExplicitValidServerMachineIdentity(t *testing.T) {
+	directory := testInstallation(t)
+	for _, args := range [][]string{
+		{"doctor", "--directory", directory},
+		{"doctor", "--directory", directory, "--machine-id", "bad/id"},
+	} {
+		if code := run(args, io.Discard, io.Discard); code != 2 {
+			t.Fatalf("args=%v code=%d", args, code)
+		}
+	}
+}
+
+func TestDoctorClassifiesEveryExtendedServerDependency(t *testing.T) {
+	preserveDependencies(t)
+	directory := testInstallation(t)
+	relayMachines := filepath.Join(t.TempDir(), "relay-machines.json")
+	if err := os.WriteFile(relayMachines, []byte(`[{"id":"machine-a","public_key":"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA","endpoint_prefixes":["agent/a/"],"endpoints":[],"attachment_device_id":""}]`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := operator.ConfigureRelayMachines(directory, relayMachines); err != nil {
+		t.Fatal(err)
+	}
+	inspectSchema = func(context.Context, string) (punaropostgres.SchemaState, error) {
+		return punaropostgres.SchemaState{Classification: punaropostgres.Compatible, Version: 44}, nil
+	}
+	probe = func(context.Context, string) error { return nil }
+	state := healthyServerDoctorState()
+	state.Release = "v0.1.0-alpha.2"
+	state.ReleaseSequence = 2
+	state.CatalogSequence = 4
+	state.InstalledRelease.OK = false
+	state.OperatorBinaryRelease.OK = false
+	state.RunningImage.OK = false
+	state.ComposeBinding.OK = false
+	state.MigrationBinding.Known = false
+	state.PostgresKnown = false
+	state.Storage.OK = false
+	state.BackupAvailable.OK = false
+	state.BackupFresh.Known = false
+	state.UpdateTransaction.OK = false
+	state.RecoveryReceipt.Known = false
+	state.UpdateRecovery.OK = false
+	state.DatabasePrivate.OK = false
+	state.HealthPrivate.OK = false
+	state.AdminPrivate.OK = false
+	state.BlobPrivate.OK = false
+	state.TunnelRoute.OK = false
+	state.TunnelOrigin.OK = false
+	state.AccessAdmission.Known = false
+	state.RelayEnrollment.OK = false
+	state.RelayProtocol.Known = false
+	state.GatewayInstalled.OK = false
+	state.GatewayEnabled.OK = false
+	state.GatewayRunning.Known = false
+	state.GatewayExecutable.OK = false
+	state.GatewayExitStatus.Known = false
+	state.GatewayRestartState.OK = false
+	state.GatewayRelease.OK = false
+	serverDoctorInspect = func(context.Context, operator.Installation, string, bool, string) serverDoctorState { return state }
+
+	var stdout, stderr bytes.Buffer
+	if code := run([]string{"doctor", "--directory", directory, "--machine-id", "punaro-lxc", "--gateway-co-located"}, &stdout, &stderr); code != 1 {
+		t.Fatalf("code=%d stdout=%q stderr=%q", code, stdout.String(), stderr.String())
+	}
+	report, err := punarodiagnostic.Decode(bytes.NewReader(stdout.Bytes()))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if report.Identity.Release != state.Release || report.Identity.ReleaseSequence != state.ReleaseSequence || report.Identity.CatalogSequence != state.CatalogSequence || report.Identity.Platform == "" {
+		t.Fatalf("identity=%#v", report.Identity)
+	}
+	want := map[string]punarodiagnostic.Status{
+		"installed_release": "fail", "operator_binary_release": "fail", "running_image": "fail", "compose_manifest_binding": "fail",
+		"migration_manifest_binding": "unavailable", "postgres_major": "unavailable", "storage_capacity": "fail",
+		"verified_backup": "fail", "backup_freshness": "unavailable", "update_transaction": "fail", "recovery_receipt": "unavailable", "update_recovery": "fail",
+		"database_listener_private": "fail", "health_listener_private": "fail", "administration_listener_private": "fail",
+		"blob_storage_private": "fail", "tunnel_route": "fail", "access_admission": "unavailable",
+		"tunnel_origin": "fail", "relay_enrollment": "fail", "relay_protocol": "unavailable",
+		"gateway_service_installed": "fail", "gateway_service_running": "unavailable", "gateway_release": "fail",
+		"gateway_service_enabled": "fail", "gateway_service_executable": "fail", "gateway_service_last_exit": "unavailable", "gateway_service_restart_state": "fail",
+	}
+	for _, check := range report.Checks {
+		if status, ok := want[check.Code]; ok {
+			if check.Status != status {
+				t.Fatalf("check %s=%s want %s", check.Code, check.Status, status)
+			}
+			delete(want, check.Code)
+		}
+	}
+	if len(want) != 0 {
+		t.Fatalf("missing checks: %v", want)
+	}
+}
+
+func TestServerDoctorBackupInspectionHonorsCanceledContext(t *testing.T) {
+	root := t.TempDir()
+	ctx, cancel := context.WithCancel(t.Context())
+	cancel()
+	available, fresh := inspectServerBackups(ctx, root, time.Now().UTC())
+	if available.Known || fresh.Known {
+		t.Fatalf("canceled backup inspection reported known results: available=%#v fresh=%#v", available, fresh)
+	}
+}
+
+func TestServerDoctorBackupInspectionBoundsRootEntries(t *testing.T) {
+	root := t.TempDir()
+	for index := 0; index <= 128; index++ {
+		if err := os.Mkdir(filepath.Join(root, fmt.Sprintf("entry-%03d", index)), 0o700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	available, fresh := inspectServerBackups(t.Context(), root, time.Now().UTC())
+	if available.Known || fresh.Known {
+		t.Fatalf("oversized backup root reported known results: available=%#v fresh=%#v", available, fresh)
+	}
+}
+
+func TestDoctorBackupCommandAndIsolationStayInsideDeadline(t *testing.T) {
+	root := t.TempDir()
+	if err := os.Chmod(root, 0o700); err != nil { // #nosec G302 -- private backup diagnostic fixture.
+		t.Fatal(err)
+	}
+	directAvailable, directFresh := inspectServerBackups(t.Context(), root, time.Now().UTC())
+	if !directAvailable.Known || directAvailable.OK || !directFresh.Known || directFresh.OK {
+		t.Fatalf("direct backup state root=%q available=%#v fresh=%#v", root, directAvailable, directFresh)
+	}
+	var stdout bytes.Buffer
+	if code := runDoctorBackupCheck([]string{"--root", root, "--now", time.Now().UTC().Format(time.RFC3339Nano)}, &stdout); code != 0 {
+		t.Fatalf("backup helper code=%d", code)
+	}
+	var state serverDoctorBackupState
+	if json.Unmarshal(stdout.Bytes(), &state) != nil || !state.Available.Known || state.Available.OK || !state.Fresh.Known || state.Fresh.OK {
+		t.Fatalf("backup helper state=%#v output=%q", state, stdout.String())
+	}
+	if runtime.GOOS == "windows" {
+		return
+	}
+	blocker := filepath.Join(t.TempDir(), "blocked-backup-check")
+	if err := os.WriteFile(blocker, []byte("#!/bin/sh\nexec sleep 10\n"), 0o700); err != nil { // #nosec G306 -- private executable deadline fixture.
+		t.Fatal(err)
+	}
+	previous := serverDoctorBackupExecutable
+	serverDoctorBackupExecutable = func() (string, error) { return blocker, nil }
+	t.Cleanup(func() { serverDoctorBackupExecutable = previous })
+	ctx, cancel := context.WithTimeout(t.Context(), 20*time.Millisecond)
+	defer cancel()
+	started := time.Now()
+	available, fresh := isolatedServerDoctorBackups(ctx, root, time.Now().UTC())
+	if available.Known || fresh.Known || time.Since(started) > time.Second {
+		t.Fatalf("isolated backup available=%#v fresh=%#v elapsed=%s", available, fresh, time.Since(started))
+	}
+}
+
+func TestServerGatewayServiceDefinitionReadIsBoundedAndContextAware(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "punaro-telegram.service")
+	valid := []byte("[Service]\nExecStart=/usr/local/bin/punaro-telegram\n")
+	if err := os.WriteFile(path, valid, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if !serverGatewayServiceFileBound(t.Context(), path) {
+		t.Fatal("valid gateway service definition rejected")
+	}
+	if err := os.WriteFile(path, make([]byte, (64<<10)+1), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if serverGatewayServiceFileBound(t.Context(), path) {
+		t.Fatal("oversized gateway service definition accepted")
+	}
+	ctx, cancel := context.WithCancel(t.Context())
+	cancel()
+	if serverGatewayServiceFileBound(ctx, path) {
+		t.Fatal("canceled gateway service definition read continued")
+	}
+}
+
+func TestServerGatewayServiceInspectionDelegatesToIsolatedHelper(t *testing.T) {
+	previous := serverDoctorGatewayServiceCheck
+	called := false
+	serverDoctorGatewayServiceCheck = func(_ context.Context, expectedRelease string) serverDoctorGatewayState {
+		called = true
+		if expectedRelease != "v0.1.0-alpha.1" {
+			t.Fatalf("expected release=%q", expectedRelease)
+		}
+		return serverDoctorGatewayState{Installed: known(true, true)}
+	}
+	t.Cleanup(func() { serverDoctorGatewayServiceCheck = previous })
+	installed, enabled, running, executable, exitStatus, restartState, release := inspectGatewayService(t.Context(), "v0.1.0-alpha.1")
+	if !called || !installed.Known || !installed.OK || enabled.Known || running.Known || executable.Known || exitStatus.Known || restartState.Known || release.Known {
+		t.Fatalf("delegated=%t states=%#v %#v %#v %#v %#v %#v %#v", called, installed, enabled, running, executable, exitStatus, restartState, release)
+	}
+}
+
+func TestServerGatewayServiceInspectionHonorsDeadline(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("POSIX blocking executable fixture")
+	}
+	blocker := filepath.Join(t.TempDir(), "blocked-server-gateway-doctor")
+	if err := os.WriteFile(blocker, []byte("#!/bin/sh\nexec sleep 10\n"), 0o700); err != nil { // #nosec G306 -- private executable deadline fixture.
+		t.Fatal(err)
+	}
+	previous := serverDoctorGatewayExecutable
+	serverDoctorGatewayExecutable = func() (string, error) { return blocker, nil }
+	t.Cleanup(func() { serverDoctorGatewayExecutable = previous })
+	ctx, cancel := context.WithTimeout(t.Context(), 20*time.Millisecond)
+	defer cancel()
+	started := time.Now()
+	state := isolatedServerDoctorGatewayService(ctx, "v0.1.0-alpha.1")
+	if state != (serverDoctorGatewayState{}) || time.Since(started) > time.Second {
+		t.Fatalf("isolated gateway state=%#v elapsed=%s", state, time.Since(started))
+	}
+}
+
+func TestServerGatewaySystemdExecStartRequiresExactEffectiveExecutable(t *testing.T) {
+	valid := "{ path=/usr/local/bin/punaro-telegram ; argv[]=/usr/local/bin/punaro-telegram ; ignore_errors=no ; start_time=[n/a] ; stop_time=[n/a] ; pid=0 ; code=(null) ; status=0/0 }\n"
+	if !serverGatewaySystemdExecStartBound(valid) {
+		t.Fatal("valid effective gateway ExecStart rejected")
+	}
+	for _, stale := range []string{
+		strings.Replace(valid, "/usr/local/bin/punaro-telegram", "/tmp/punaro-telegram", 1),
+		strings.Replace(valid, "argv[]=/usr/local/bin/punaro-telegram", "argv[]=/usr/local/bin/punaro-telegram doctor", 1),
+		valid + valid,
+		"",
+	} {
+		if serverGatewaySystemdExecStartBound(stale) {
+			t.Fatalf("stale effective gateway ExecStart accepted: %q", stale)
+		}
+	}
+}
+
+func TestServerDoctorRequiresReleasePostgreSQLMajor(t *testing.T) {
+	preserveDependencies(t)
+	directory := testInstallation(t)
+	inspectSchema = func(context.Context, string) (punaropostgres.SchemaState, error) {
+		return punaropostgres.SchemaState{Classification: punaropostgres.Compatible, Version: 44}, nil
+	}
+	probe = func(context.Context, string) error { return nil }
+	for _, actual := range []int{17, 19} {
+		t.Run(fmt.Sprintf("major-%d", actual), func(t *testing.T) {
+			state := healthyServerDoctorState()
+			state.PostgresMajor = actual
+			serverDoctorInspect = func(context.Context, operator.Installation, string, bool, string) serverDoctorState { return state }
+			var stdout, stderr bytes.Buffer
+			if code := run([]string{"doctor", "--directory", directory, "--machine-id", "punaro-lxc"}, &stdout, &stderr); code != 1 {
+				t.Fatalf("code=%d stdout=%q stderr=%q", code, stdout.String(), stderr.String())
+			}
+			report, err := punarodiagnostic.Decode(bytes.NewReader(stdout.Bytes()))
+			if err != nil {
+				t.Fatal(err)
+			}
+			for _, check := range report.Checks {
+				if check.Code == "postgres_major" {
+					if check.Status != punarodiagnostic.StatusFail || check.Remediation != "install_release_postgres_major" {
+						t.Fatalf("postgres major check=%#v", check)
+					}
+					return
+				}
+			}
+			t.Fatal("postgres_major check missing")
+		})
+	}
+}
+
+func TestServerDoctorInspectsRunningImageFromInstallationDirectory(t *testing.T) {
+	directory := t.TempDir()
+	original := serverDoctorRunningImageCommand
+	t.Cleanup(func() { serverDoctorRunningImageCommand = original })
+	var calls int
+	serverDoctorRunningImageCommand = func(_ context.Context, actualDirectory, executable string, arguments ...string) (string, bool) {
+		calls++
+		if actualDirectory != directory || executable != "docker" {
+			t.Fatalf("directory=%q executable=%q", actualDirectory, executable)
+		}
+		switch arguments[0] {
+		case "compose":
+			return "punaro-container\n", true
+		case "inspect":
+			return cliTestImage + "\n", true
+		default:
+			t.Fatalf("arguments=%q", arguments)
+			return "", false
+		}
+	}
+	state := inspectRunningImage(t.Context(), operator.Installation{
+		Directory:        directory,
+		Image:            cliTestImage,
+		OwnerPrincipalID: "11111111-1111-4111-8111-111111111111",
+	})
+	if !state.Known || !state.OK || calls != 2 {
+		t.Fatalf("running image state=%#v calls=%d", state, calls)
+	}
+}
+
+func TestServerDoctorRunningImageDistinguishesMismatchAndUnavailable(t *testing.T) {
+	original := serverDoctorRunningImageCommand
+	t.Cleanup(func() { serverDoctorRunningImageCommand = original })
+	installation := operator.Installation{
+		Directory:        t.TempDir(),
+		Image:            cliTestImage,
+		OwnerPrincipalID: "11111111-1111-4111-8111-111111111111",
+	}
+	serverDoctorRunningImageCommand = func(_ context.Context, _ string, _ string, arguments ...string) (string, bool) {
+		if arguments[0] == "compose" {
+			return "punaro-container\n", true
+		}
+		return "ghcr.io/rock3r/punaro@sha256:" + strings.Repeat("b", 64) + "\n", true
+	}
+	if state := inspectRunningImage(t.Context(), installation); !state.Known || state.OK {
+		t.Fatalf("mismatched running image state=%#v", state)
+	}
+	serverDoctorRunningImageCommand = func(context.Context, string, string, ...string) (string, bool) {
+		return "", false
+	}
+	if state := inspectRunningImage(t.Context(), installation); state.Known || state.OK {
+		t.Fatalf("unavailable running image state=%#v", state)
+	}
+}
+
+func TestOperatorBinaryReleaseFollowsDurableUpdateOutcome(t *testing.T) {
+	transaction := punaropostgres.UpdateTransaction{UpdateRequest: punaropostgres.UpdateRequest{SourceRelease: "v0.1.0-alpha.7", TargetRelease: "v0.1.0-alpha.8"}, Phase: punaropostgres.UpdateCommitted}
+	if state := operatorBinaryReleaseState("v0.1.0-alpha.7", transaction, true); !state.Known || state.OK {
+		t.Fatalf("stale committed operator state=%#v", state)
+	}
+	if state := operatorBinaryReleaseState("v0.1.0-alpha.8", transaction, true); !state.Known || !state.OK {
+		t.Fatalf("updated committed operator state=%#v", state)
+	}
+	transaction.Phase = punaropostgres.UpdateRecovered
+	if state := operatorBinaryReleaseState("v0.1.0-alpha.7", transaction, true); !state.Known || !state.OK {
+		t.Fatalf("recovered source operator state=%#v", state)
+	}
+	if state := operatorBinaryReleaseState("", punaropostgres.UpdateTransaction{}, false); state.Known || state.OK {
+		t.Fatalf("unidentified fresh operator state=%#v", state)
+	}
+	if state := operatorBinaryReleaseState("v0.1.0-alpha.8", punaropostgres.UpdateTransaction{}, false); !state.Known || !state.OK {
+		t.Fatalf("fresh identified operator state=%#v", state)
+	}
+}
+
+func TestServerDoctorCommandUsesRequestedWorkingDirectory(t *testing.T) {
+	directory := t.TempDir()
+	command := newServerDoctorCommand(t.Context(), directory, "docker", "version")
+	if command.Dir != directory {
+		t.Fatalf("command directory=%q want=%q", command.Dir, directory)
+	}
+}
+
+func TestServerDoctorProfileLoadsOnlyProtectedLeastPrivilegeInputs(t *testing.T) {
+	root := t.TempDir()
+	if runtime.GOOS != "windows" {
+		if err := os.Chmod(root, 0o700); err != nil { // #nosec G302 -- directory must be owner-only executable.
+			t.Fatal(err)
+		}
+	}
+	write := func(name, body string, mode os.FileMode) string {
+		path := filepath.Join(root, name)
+		if err := os.WriteFile(path, []byte(body), mode); err != nil {
+			t.Fatal(err)
+		}
+		return path
+	}
+	privateKey := ed25519.NewKeyFromSeed(make([]byte, ed25519.SeedSize))
+	keyPath := write("doctor.key", base64.RawURLEncoding.EncodeToString(privateKey), 0o600)
+	accessPath := write("access.env", "PUNARO_CF_ACCESS_CLIENT_ID=doctor-id\nPUNARO_CF_ACCESS_CLIENT_SECRET=doctor-secret\n", 0o600)
+	profilePath := write("doctor.env", "PUNARO_SERVER_DOCTOR_RELAY_URL=https://punaro.example\nPUNARO_SERVER_DOCTOR_MACHINE_ID=server-doctor\nPUNARO_SERVER_DOCTOR_PRIVATE_KEY_FILE="+keyPath+"\nPUNARO_SERVER_DOCTOR_ACCESS_TOKEN_FILE="+accessPath+"\n", 0o600)
+	profile, err := loadServerDoctorProfile(t.Context(), profilePath)
+	if err != nil || profile.RelayURL != "https://punaro.example" || profile.MachineID != "server-doctor" || len(profile.PrivateKey) != ed25519.PrivateKeySize || profile.AccessToken.ClientID != "doctor-id" || profile.AccessToken.ClientSecret != "doctor-secret" {
+		t.Fatalf("protected server doctor profile did not load: %v", err)
+	}
+	credential := "22222222-2222-4222-8222-222222222222." + strings.Repeat("A", 43)
+	credentialPath := write("device.credential", credential+"\n", 0o600)
+	deviceProfilePath := write("device-doctor.env", "PUNARO_SERVER_DOCTOR_RELAY_URL=https://punaro.example\nPUNARO_SERVER_DOCTOR_MACHINE_ID=server-doctor\nPUNARO_SERVER_DOCTOR_DEVICE_CREDENTIAL_FILE="+credentialPath+"\nPUNARO_SERVER_DOCTOR_ACCESS_TOKEN_FILE="+accessPath+"\n", 0o600)
+	deviceProfile, err := loadServerDoctorProfile(t.Context(), deviceProfilePath)
+	if err != nil || len(deviceProfile.PrivateKey) != 0 || deviceProfile.DeviceCredential != credential || deviceProfile.AccessToken.ClientID != "doctor-id" {
+		t.Fatalf("protected device server doctor profile did not load: %v", err)
+	}
+	bothProfilePath := write("ambiguous-doctor.env", "PUNARO_SERVER_DOCTOR_RELAY_URL=https://punaro.example\nPUNARO_SERVER_DOCTOR_MACHINE_ID=server-doctor\nPUNARO_SERVER_DOCTOR_PRIVATE_KEY_FILE="+keyPath+"\nPUNARO_SERVER_DOCTOR_DEVICE_CREDENTIAL_FILE="+credentialPath+"\nPUNARO_SERVER_DOCTOR_ACCESS_TOKEN_FILE="+accessPath+"\n", 0o600)
+	if _, err := loadServerDoctorProfile(t.Context(), bothProfilePath); err == nil || strings.Contains(err.Error(), credential) {
+		t.Fatalf("ambiguous profile error=%q", err)
+	}
+
+	if runtime.GOOS != "windows" {
+		if err := os.Chmod(accessPath, 0o644); err != nil { // #nosec G302 -- deliberate insecure-permission diagnostic fixture.
+			t.Fatal(err)
+		}
+		if _, err := loadServerDoctorProfile(t.Context(), profilePath); err == nil || strings.Contains(err.Error(), "doctor-secret") || strings.Contains(err.Error(), accessPath) {
+			t.Fatalf("unsafe profile error=%q", err)
+		}
+	}
+}
+
+func TestServerDoctorProfileWriterCreatesProtectedReusableProfile(t *testing.T) {
+	root := t.TempDir()
+	if runtime.GOOS != "windows" {
+		if err := os.Chmod(root, 0o700); err != nil { // #nosec G302 -- directory must be owner-only executable.
+			t.Fatal(err)
+		}
+	}
+	privateKey := ed25519.NewKeyFromSeed(make([]byte, ed25519.SeedSize))
+	keyPath := filepath.Join(root, "doctor.key")
+	accessPath := filepath.Join(root, "access.env")
+	profilePath := filepath.Join(root, "doctor.env")
+	if err := os.WriteFile(keyPath, []byte(base64.RawURLEncoding.EncodeToString(privateKey)), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(accessPath, []byte("PUNARO_CF_ACCESS_CLIENT_ID=doctor-id\nPUNARO_CF_ACCESS_CLIENT_SECRET=doctor-secret\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	args := []string{"doctor-profile", "write", "--out", profilePath, "--relay-url", "https://punaro.example", "--machine-id", "server-doctor", "--private-key-file", keyPath, "--access-token-file", accessPath}
+	var stdout, stderr bytes.Buffer
+	if code := run(args, &stdout, &stderr); code != 0 {
+		t.Fatalf("code=%d stdout=%q stderr=%q", code, stdout.String(), stderr.String())
+	}
+	if strings.Contains(stdout.String()+stderr.String(), "doctor-secret") || strings.Contains(stdout.String()+stderr.String(), "doctor-id") {
+		t.Fatalf("profile writer leaked credentials: stdout=%q stderr=%q", stdout.String(), stderr.String())
+	}
+	info, err := os.Stat(profilePath)
+	if err != nil || runtime.GOOS != "windows" && info.Mode().Perm() != 0o600 {
+		t.Fatalf("profile mode=%v err=%v", info.Mode(), err)
+	}
+	profile, err := loadServerDoctorProfile(t.Context(), profilePath)
+	if err != nil || profile.RelayURL != "https://punaro.example" || profile.MachineID != "server-doctor" {
+		t.Fatalf("written profile=%#v err=%v", profile, err)
+	}
+	if code := run(args, io.Discard, io.Discard); code != 1 {
+		t.Fatalf("existing profile overwrite code=%d", code)
+	}
+	credential := "22222222-2222-4222-8222-222222222222." + strings.Repeat("A", 43)
+	credentialPath := filepath.Join(root, "device.credential")
+	if err := os.WriteFile(credentialPath, []byte(credential+"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	deviceProfilePath := filepath.Join(root, "device-doctor.env")
+	deviceArgs := []string{"doctor-profile", "write", "--out", deviceProfilePath, "--relay-url", "https://punaro.example", "--machine-id", "server-doctor", "--device-credential-file", credentialPath, "--access-token-file", accessPath}
+	stdout.Reset()
+	stderr.Reset()
+	if code := run(deviceArgs, &stdout, &stderr); code != 0 || strings.Contains(stdout.String()+stderr.String(), credential) {
+		t.Fatalf("device profile code=%d stdout=%q stderr=%q", code, stdout.String(), stderr.String())
+	}
+	deviceProfile, err := loadServerDoctorProfile(t.Context(), deviceProfilePath)
+	if err != nil || deviceProfile.DeviceCredential != credential || len(deviceProfile.PrivateKey) != 0 {
+		t.Fatalf("written device profile=%#v err=%v", deviceProfile, err)
+	}
+	ambiguousPath := filepath.Join(root, "ambiguous-doctor.env")
+	ambiguousArgs := []string{"doctor-profile", "write", "--out", ambiguousPath, "--relay-url", "https://punaro.example", "--machine-id", "server-doctor", "--private-key-file", keyPath, "--device-credential-file", credentialPath, "--access-token-file", accessPath}
+	if code := run(ambiguousArgs, io.Discard, io.Discard); code != 1 {
+		t.Fatalf("ambiguous profile code=%d", code)
+	}
+	if _, err := os.Lstat(ambiguousPath); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("ambiguous profile exists: %v", err)
+	}
+}
+
+func TestServerDoctorProfileReadHonorsCanceledContext(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "doctor.env")
+	if err := os.WriteFile(path, []byte("ignored"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(t.Context())
+	cancel()
+	if _, err := loadServerDoctorProfile(ctx, path); err == nil {
+		t.Fatal("canceled server doctor profile read continued")
+	}
+}
+
+func TestServerDoctorRequiresRecoveryReceiptAtIrreversibleUpdateBoundary(t *testing.T) {
+	for _, phase := range []punaropostgres.UpdatePhase{
+		punaropostgres.UpdateBackupVerified, punaropostgres.UpdateMigrationStarted, punaropostgres.UpdateMigrated,
+		punaropostgres.UpdateCandidateReady, punaropostgres.UpdateDoctorPassed, punaropostgres.UpdateConfigPublished,
+		punaropostgres.UpdateRecoveryRequired, punaropostgres.UpdateRecoveryReady, punaropostgres.UpdateRecoveryDoctor, punaropostgres.UpdateRecoveryConfig,
+	} {
+		if !updatePhaseRequiresRecoveryReceipt(phase) {
+			t.Fatalf("phase %s did not require recovery receipt", phase)
+		}
+	}
+	for _, phase := range []punaropostgres.UpdatePhase{punaropostgres.UpdateFenced, punaropostgres.UpdateWritersStopped, punaropostgres.UpdateCommitted, punaropostgres.UpdateRecovered, punaropostgres.UpdateAborted} {
+		if updatePhaseRequiresRecoveryReceipt(phase) {
+			t.Fatalf("phase %s unexpectedly required recovery receipt", phase)
+		}
 	}
 }
 

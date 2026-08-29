@@ -6,6 +6,15 @@
 !Dockerfile
 !.dockerignore
 !docker-compose.memory-onboarding-e2e.yml
+!plugin.json
+!.mcp.json
+!mcp.json
+!.codex-plugin/
+!.codex-plugin/plugin.json
+!.claude-plugin/
+!.claude-plugin/plugin.json
+!skills/
+!skills/**
 !cmd/
 !cmd/**
 !internal/
@@ -13,6 +22,8 @@
 !scripts/
 !scripts/install-client.sh
 !scripts/install-adapter.sh
+!scripts/punaro-plugin-mcp
+!scripts/punaro-plugin-mcp.cmd
 !scripts/verify-deployment-files.sh
 !deploy/
 !deploy/systemd/

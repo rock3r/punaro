@@ -21,22 +21,29 @@ import (
 
 	"github.com/rock3r/punaro/internal/adapter"
 	"github.com/rock3r/punaro/internal/clienttransport"
+	"github.com/rock3r/punaro/internal/memoryclient"
+	"github.com/rock3r/punaro/internal/relay"
 	"github.com/rock3r/punaro/internal/telegram"
 )
 
 const defaultTelegramAPIURL = "https://api.telegram.org"
 
 type config struct {
-	relayURL        string
-	machineID       string
-	privateKey      ed25519.PrivateKey
-	botToken        string
-	allowedUserID   int64
-	endpoint        string
-	stateDir        string
-	apiURL          string
-	accessToken     adapter.AccessServiceToken
-	transportPolicy clienttransport.Policy
+	relayURL             string
+	machineID            string
+	privateKey           ed25519.PrivateKey
+	deviceCredential     string
+	botToken             string
+	allowedUserID        int64
+	endpoint             string
+	stateDir             string
+	apiURL               string
+	accessToken          adapter.AccessServiceToken
+	transportPolicy      clienttransport.Policy
+	privateKeyFile       string
+	deviceCredentialFile string
+	botTokenFile         string
+	accessTokenFile      string
 }
 
 type routeRequest struct {
@@ -46,6 +53,22 @@ type routeRequest struct {
 }
 
 func main() {
+	if len(os.Args) > 1 && os.Args[1] == "version" {
+		if len(os.Args) != 2 || telegramBuildRelease == "" {
+			os.Exit(1)
+		}
+		fmt.Println(telegramBuildRelease)
+		return
+	}
+	if len(os.Args) > 1 && os.Args[1] == "doctor" {
+		os.Exit(runTelegramDoctor(os.Args[2:], os.Stdout, os.Stderr))
+	}
+	if len(os.Args) > 1 && os.Args[1] == "doctor-state-inspect" {
+		os.Exit(runTelegramStateInspect(os.Args[2:], os.Stdout))
+	}
+	if len(os.Args) > 1 && os.Args[1] == "doctor-service-inspect" {
+		os.Exit(runTelegramServiceInspect(os.Args[2:], os.Stdout))
+	}
 	if len(os.Args) > 1 && os.Args[1] == "route" {
 		if err := runRoute(os.Args[2:]); err != nil {
 			log.Printf("punaro-telegram stopped: %v", err)
@@ -53,13 +76,27 @@ func main() {
 		}
 		return
 	}
+	if len(os.Args) > 1 && os.Args[1] == "adopt" {
+		if err := runAdopt(os.Args[2:]); err != nil {
+			log.Printf("punaro-telegram stopped: %v", err)
+			os.Exit(1)
+		}
+		return
+	}
 	if len(os.Args) > 1 {
-		log.Print("punaro-telegram stopped: unknown command (supported: route)")
+		log.Print("punaro-telegram stopped: unknown command (supported: doctor, route, adopt, version)")
 		os.Exit(1)
 	}
 	if err := run(); err != nil {
 		log.Printf("punaro-telegram stopped: %v", err)
 		os.Exit(1)
+	}
+}
+
+func registerOperatorCommands(ctx context.Context, register func(context.Context, []telegram.BotCommand) error) {
+	if err := register(ctx, telegram.DefaultBotCommands()); err != nil {
+		// Menu registration is operator UX, not a prerequisite for poll/lease.
+		log.Printf("telegram event class=telegram_command cmd=setMyCommands err=register_failed")
 	}
 }
 
@@ -74,6 +111,17 @@ func parseRoute(args []string) (routeRequest, error) {
 		return routeRequest{}, fmt.Errorf("--chat-id, --thread-id, and --conversation are required")
 	}
 	return request, nil
+}
+
+func parseAdopt(args []string) (string, error) {
+	flags := flag.NewFlagSet("punaro-telegram adopt", flag.ContinueOnError)
+	flags.SetOutput(io.Discard)
+	var conversation string
+	flags.StringVar(&conversation, "conversation", "", "Punaro conversation ID")
+	if err := flags.Parse(args); err != nil || flags.NArg() != 0 || strings.TrimSpace(conversation) == "" {
+		return "", fmt.Errorf("--conversation is required")
+	}
+	return conversation, nil
 }
 
 func runRoute(args []string) error {
@@ -93,6 +141,27 @@ func runRoute(args []string) error {
 	return state.SetRoute(request.chatID, request.threadID, request.conversation)
 }
 
+func runAdopt(args []string) error {
+	conversation, err := parseAdopt(args)
+	if err != nil {
+		return err
+	}
+	cfg, err := loadConfig()
+	if err != nil {
+		return fmt.Errorf("configuration: %w", err)
+	}
+	state, err := telegram.Open(filepath.Join(cfg.stateDir, "telegram.db"))
+	if err != nil {
+		return err
+	}
+	defer func() { _ = state.Close() }()
+	relayClient, err := newTelegramRelayClient(cfg)
+	if err != nil {
+		return err
+	}
+	return telegram.Adopt(context.Background(), state, relayClient, conversation, cfg.allowedUserID, nil)
+}
+
 func run() error {
 	cfg, err := loadConfig()
 	if err != nil {
@@ -103,7 +172,7 @@ func run() error {
 		return err
 	}
 	defer func() { _ = state.Close() }()
-	relayClient, err := adapter.NewHTTPRelayClientWithPolicy(cfg.relayURL, cfg.machineID, cfg.privateKey, nil, cfg.accessToken, cfg.transportPolicy)
+	relayClient, err := newTelegramRelayClient(cfg)
 	if err != nil {
 		return err
 	}
@@ -111,22 +180,49 @@ func run() error {
 	if err != nil {
 		return err
 	}
+	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
+	defer stop()
+	registerOperatorCommands(ctx, botClient.SetMyCommands)
+	claims := &telegram.ClaimExecutor{
+		State:         state,
+		Relay:         relayClient,
+		Topics:        botClient,
+		AllowedUserID: cfg.allowedUserID,
+	}
 	bridge := telegram.Bridge{
 		Relay:    relayClient,
 		Endpoint: cfg.endpoint,
 		State:    state,
 		Poller:   botClient,
-		Gateway:  telegram.Gateway{AllowedUserID: cfg.allowedUserID, State: state, Submit: telegram.SubmitToRelay(relayClient, cfg.endpoint)},
-		Sender:   botClient,
+		Gateway: telegram.Gateway{
+			AllowedUserID: cfg.allowedUserID,
+			State:         state,
+			Submit:        telegram.SubmitToRelay(relayClient, cfg.endpoint, state, nil),
+			ListUnclaimed: relayClient.ListUnclaimed,
+			Notify:        botClient,
+			Claims:        claims,
+		},
+		Sender: botClient,
+		Claims: claims,
 	}
-	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
-	defer stop()
 	var offset int64
 	for ctx.Err() == nil {
 		next, err := bridge.SyncOnce(ctx, offset)
 		if err == nil {
-			offset = next
-			continue
+			if recordErr := state.RecordGatewayCycle(telegram.GatewayCycleRecord{At: time.Now().UTC(), Offset: next, PollOK: true, RelayOK: true, TelegramOK: true}); recordErr != nil {
+				err = recordErr
+			} else {
+				offset = next
+				continue
+			}
+		} else {
+			record := failedGatewayCycleRecord(time.Now().UTC(), next, err)
+			if recordErr := state.RecordGatewayCycle(record); recordErr != nil {
+				log.Print("telegram event class=gateway_health err=state_unavailable")
+			} else if isNonFatalGatewayCycle(err) {
+				offset = next
+				continue
+			}
 		}
 		if errors.Is(err, context.Canceled) || ctx.Err() != nil {
 			return nil
@@ -142,6 +238,38 @@ func run() error {
 		}
 	}
 	return nil
+}
+
+func failedGatewayCycleRecord(at time.Time, offset int64, err error) telegram.GatewayCycleRecord {
+	record := telegram.GatewayCycleRecord{At: at, Offset: offset, Failure: telegram.ClassifyGatewayCycleFailure(err)}
+	var cycleErr *telegram.GatewayCycleError
+	if errors.As(err, &cycleErr) {
+		record.TerminalInbound = cycleErr.TerminalInbound
+		record.TerminalOutbound = cycleErr.TerminalOutbound
+		record.InboundTargetEvents = cycleErr.InboundTargetEvents
+		record.OutboundTargetEvents = cycleErr.OutboundTargetEvents
+		record.OutboundBlocked = cycleErr.OutboundBlocked
+		record.OutboundProgress = cycleErr.OutboundProgress
+		if cycleErr.NonFatal {
+			record.PollOK, record.RelayOK = true, true
+			record.TelegramOK = cycleErr.TerminalOutbound == 0
+			return record
+		}
+		switch cycleErr.Phase {
+		case telegram.GatewayPhaseInbound, telegram.GatewayPhaseLease:
+			record.PollOK = true
+		case telegram.GatewayPhaseSend:
+			record.PollOK, record.RelayOK = true, true
+		case telegram.GatewayPhaseAck:
+			record.PollOK, record.RelayOK, record.TelegramOK = true, true, true
+		}
+	}
+	return record
+}
+
+func isNonFatalGatewayCycle(err error) bool {
+	var cycleErr *telegram.GatewayCycleError
+	return errors.As(err, &cycleErr) && cycleErr.NonFatal
 }
 
 func loadConfig() (config, error) {
@@ -161,6 +289,7 @@ func loadConfig() (config, error) {
 		cfg.apiURL = defaultTelegramAPIURL
 	}
 	botTokenFile := strings.TrimSpace(os.Getenv("PUNARO_TELEGRAM_BOT_TOKEN_FILE"))
+	cfg.botTokenFile = botTokenFile
 	if (cfg.botToken == "") == (botTokenFile == "") {
 		return config{}, fmt.Errorf("exactly one of PUNARO_TELEGRAM_BOT_TOKEN or PUNARO_TELEGRAM_BOT_TOKEN_FILE is required")
 	}
@@ -177,7 +306,11 @@ func loadConfig() (config, error) {
 	if cfg.relayURL == "" || cfg.machineID == "" || cfg.botToken == "" || cfg.endpoint == "" || cfg.stateDir == "" {
 		return config{}, fmt.Errorf("PUNARO_ADAPTER_RELAY_URL, PUNARO_MACHINE_ID, Telegram bot token source, PUNARO_TELEGRAM_GATEWAY_ENDPOINT, and PUNARO_TELEGRAM_STATE_DIR are required")
 	}
+	if cfg.endpoint != relay.TelegramGatewayEndpoint {
+		return config{}, fmt.Errorf("PUNARO_TELEGRAM_GATEWAY_ENDPOINT must be %s", relay.TelegramGatewayEndpoint)
+	}
 	accessTokenFile := strings.TrimSpace(os.Getenv("PUNARO_TELEGRAM_ACCESS_TOKEN_FILE"))
+	cfg.accessTokenFile = accessTokenFile
 	if accessTokenFile != "" {
 		if cfg.accessToken.ClientID != "" || cfg.accessToken.ClientSecret != "" {
 			return config{}, fmt.Errorf("PUNARO_TELEGRAM_ACCESS_TOKEN_FILE cannot be combined with Access environment credentials")
@@ -205,20 +338,37 @@ func loadConfig() (config, error) {
 	}
 	cfg.allowedUserID = allowedUserID
 	keyFile := strings.TrimSpace(os.Getenv("PUNARO_MACHINE_PRIVATE_KEY_FILE"))
-	if keyFile == "" {
-		return config{}, fmt.Errorf("PUNARO_MACHINE_PRIVATE_KEY_FILE is required")
+	credentialFile := strings.TrimSpace(os.Getenv("PUNARO_DEVICE_CREDENTIAL_FILE"))
+	if (keyFile == "") == (credentialFile == "") {
+		return config{}, fmt.Errorf("exactly one of PUNARO_MACHINE_PRIVATE_KEY_FILE or PUNARO_DEVICE_CREDENTIAL_FILE is required")
 	}
-	privateKey, err := loadPrivateKey(keyFile)
+	cfg.privateKeyFile = keyFile
+	cfg.deviceCredentialFile = credentialFile
+	var privateKey ed25519.PrivateKey
+	var credential string
+	if keyFile != "" {
+		privateKey, err = loadPrivateKey(keyFile)
+	} else {
+		credential, err = memoryclient.LoadCredential(credentialFile)
+	}
 	if err != nil {
-		return config{}, err
+		return config{}, fmt.Errorf("machine credential file is invalid")
 	}
 	cfg.privateKey = privateKey
+	cfg.deviceCredential = credential
 	absolute, err := filepath.Abs(cfg.stateDir)
 	if err != nil {
 		return config{}, fmt.Errorf("resolve telegram state directory: %w", err)
 	}
 	cfg.stateDir = absolute
 	return cfg, nil
+}
+
+func newTelegramRelayClient(cfg config) (*adapter.HTTPRelayClient, error) {
+	if cfg.deviceCredential != "" {
+		return adapter.NewDeviceHTTPRelayClientWithPolicy(cfg.relayURL, cfg.machineID, cfg.deviceCredential, nil, cfg.accessToken, cfg.transportPolicy)
+	}
+	return adapter.NewHTTPRelayClientWithPolicy(cfg.relayURL, cfg.machineID, cfg.privateKey, nil, cfg.accessToken, cfg.transportPolicy)
 }
 
 func parseLANHTTP(raw string) (bool, error) {

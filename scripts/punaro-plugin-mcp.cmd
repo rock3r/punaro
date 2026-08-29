@@ -6,7 +6,7 @@ if "%LOCALAPPDATA%"=="" (
 )
 set "PUNARO_PLUGIN_ADAPTER=%LOCALAPPDATA%\Punaro\bin\punaro-adapter.exe"
 if not exist "%PUNARO_PLUGIN_ADAPTER%" (
-  echo punaro plugin: installed adapter is unavailable at "%PUNARO_PLUGIN_ADAPTER%"; run the Punaro client installer first 1>&2
+  echo punaro plugin: selected adapter is unavailable; run the Punaro client installer or bootstrap doctor 1>&2
   exit /b 1
 )
 "%PUNARO_PLUGIN_ADAPTER%" mailbox-mcp

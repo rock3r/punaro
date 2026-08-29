@@ -1,0 +1,9 @@
+# Release-bound plugin text must retain the exact Git blob bytes on Windows.
+/plugin.json text eol=lf
+/mcp.json text eol=lf
+/.mcp.json text eol=lf
+/.codex-plugin/*.json text eol=lf
+/.claude-plugin/*.json text eol=lf
+/scripts/punaro-plugin-mcp text eol=lf
+/scripts/punaro-plugin-mcp.cmd text eol=lf
+/skills/** text eol=lf

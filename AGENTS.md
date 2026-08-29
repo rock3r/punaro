@@ -68,33 +68,31 @@ without explaining why and obtaining explicit approval.
 State: behavior covered, tests added first, exact quality commands and results,
 and any residual risk. Do not include sensitive values in the handoff.
 
-## Cursor Cloud specific instructions
+## Worktree policy
 
-This is a pure Go module (`go.mod` pins `toolchain go1.26.6`). Dependencies are
-refreshed by the startup update script (`go mod download`). The quality gate,
-build, and run commands are all in the `Makefile` and `README.md`; use those
-rather than re-deriving them.
+Before writing tracked files from a clean `main` checkout, check whether isolation
+already exists. If you are already inside a linked worktree (`git rev-parse --git-dir`
+prints a path under `.git/worktrees/`) or already on a non-main branch, keep working
+there; the primary checkout itself does not count as isolation. Otherwise, prefer asking whether to create a worktree before
+starting feature work. Prefer a worktree for implementation-heavy tasks, not for tiny
+doc-only edits.
 
-Non-obvious caveats:
+Create worktrees under `.worktrees/` at the repo root, one per descriptive branch name:
 
-- The base `go` binary on PATH must itself be 1.26.x, not just a 1.22 stub that
-  auto-downloads a newer toolchain. `make staticcheck` and the `deployment-lint`
-  helper scripts (e.g. `scripts/test-install-adapter.sh`) pin
-  `GOTOOLCHAIN=local`, so an older base binary fails with "file requires newer
-  Go version go1.26" or "requires at least go1.26.0". `go version` must report
-  `go1.26.x` and `go env GOTOOLCHAIN` should stay `auto`.
-- Docker is not installed. The Docker-dependent targets cannot run without first
-  installing Docker: `make test-postgres`, `make complete-product-e2e`
-  (a.k.a. `memory-onboarding-e2e`), `make dockerfile-lint`, `make workflow-lint`,
-  and the container/`configuration` CI job. `make lint` still passes because its
-  `deployment-lint` step skips Docker Compose validation when Docker is absent.
-- `punarod` never auto-loads `.env`; pass `--env-file` or set `PUNARO_ENV_FILE`.
-  It also deliberately mounts no relay routes unless `PUNARO_RELAY_ENABLED=true`
-  with public machine enrollment records in `PUNARO_RELAY_MACHINES_JSON`.
-- To run the relay locally and exercise a real durable message round trip:
-  generate an enrolled machine key with `go run ./cmd/punaro-keygen --id <id>
-  --endpoint-prefix agent/<id>/ --private-key-file <path>`, collect the printed
-  public record into `PUNARO_RELAY_MACHINES_JSON`, then start
-  `PUNARO_RELAY_ENABLED=true PUNARO_RELAY_MACHINES_JSON=... go run ./cmd/punarod`.
-  Health/readiness are on the separate `PUNARO_HEALTH_LISTEN_ADDR` (default
-  `127.0.0.1:8081`): `curl http://127.0.0.1:8081/healthz` and `/readyz`.
+```sh
+git worktree add .worktrees/<branch-name> -b <branch-name> origin/main
+```
+
+Plans belong in `.plans/` at the repo root, kept in the root checkout rather than
+inside a worktree. Both directories stay gitignored; never commit their contents, and
+verify they are ignored before creating them elsewhere. Remove a worktree
+(`git worktree remove`) once its branch is merged or abandoned.
+
+Use the local `using-git-worktree` skill when setting up an isolated workspace.
+
+## Local skills
+
+Before reinventing a workflow, check `.agents/skills/`. Current Punaro-local skills:
+
+- `using-git-worktree` — isolated workspaces under `.worktrees/`
+- `babysit-pr` — watch a PR's CI, review bots, and mergeability until it lands

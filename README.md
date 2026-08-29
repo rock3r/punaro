@@ -6,16 +6,27 @@ Punaro is a self-hosted relay for durable conversations between coding agents
 across multiple computers, with an optional Telegram gateway for a human
 operator.
 
+Punaro now also contains the first end-to-end MVP of **Canopi** (provisional
+name), its “what are my agents doing?” surface: normalized lifecycle events,
+multi-machine current state, an 800x480 monochrome renderer, Claude Code,
+Codex/ChatGPT, Pi, and Grok Build adapters, a simulator, and XIAO e-paper
+firmware path. Canopi is independently deployable and its event protocol does
+not depend on Punaro transport. See the [Canopi guide](docs/canopi.md).
+
+![Canopi MVP e-paper dashboard](artifacts/canopi-implementation.png)
+
 The current alpha is not a remote MCP server and never shares a local agent
 mailbox database over the network. A local adapter on each machine communicates
 with its own mailbox implementation and with the central Punaro relay. The
 accepted target later adds an independently optional OAuth-scoped remote MCP
 adapter over Punaro's own API.
 
-> Status: alpha implementation under an accepted PostgreSQL/trusted-relay/Big
-> Brain migration plan. Enrolled adapters can exchange durable
+> Status: signed prerelease `v0.1.0-alpha.11` is deployed across the personal
+> four-machine fleet under the accepted PostgreSQL/trusted-relay/Big Brain
+> migration plan. Enrolled adapters can exchange durable
 > text through the loopback relay, with signed requests, payload-free wake
-> hints, local `agent-mailbox` handoff, and a separately enrolled Telegram
+> hints, local Waypost handoff (with rolling legacy `agent-mailbox`
+> compatibility), and a separately enrolled Telegram
 > gateway process. Authenticated attachments use the separately gated trusted
 > relay and native client. Attachment v2/v3 production settings, routes, and
 > binaries are retired; their code, tests, RFCs, and vectors remain evidence.
@@ -33,11 +44,13 @@ wake-up hints containing an opaque conversation ID and sequence only.
 
 Read the [accepted platform and Big Brain plan](docs/big-brain-plan.md),
 [architecture and security design](DESIGN.md),
+[Canopi coding-agent dashboard guide](docs/canopi.md),
 [platform compatibility contracts](docs/platform-contracts.md),
 [proposed client lifecycle, compatibility, and recovery RFC](docs/client-lifecycle-compatibility-recovery-rfc.md),
 [GitHub Releases origin](docs/github-releases.md),
 [user guide](docs/user-guide.md), [operator guide](docs/operator-guide.md),
 [installation guide](docs/installation.md),
+[doctor and fleet-readiness guide](docs/doctor.md),
 [agent plugin guide](docs/agent-plugin.md),
 [trusted-LAN deployment guide](docs/trusted-lan-deployment.md),
 [alpha text-relay onboarding](docs/alpha-text-relay.md),
@@ -90,7 +103,7 @@ read-only secret files. `punarod` is a non-default reference profile; the
 supported daemon lifecycle is the host-local `punaro` workflow.
 
 The separate PostgreSQL Compose file is integration-test infrastructure only;
-it does not change the SQLite relay or the alpha deployment:
+it does not change any running relay or deployed environment:
 
 ```sh
 make test-postgres
@@ -101,7 +114,7 @@ PostgreSQL substrate and dark control-plane contract tests inside the isolated
 network, and removes the database volume afterward. The tests cover migration
 compatibility, explicit project scopes, operation-bound idempotency, closed
 audit records, queue ceilings, and fenced job leases. It requires Docker
-Compose v2 and does not switch the active SQLite relay.
+Compose v2 and does not switch any running relay.
 
 ## Configuration and secrets
 
@@ -125,7 +138,7 @@ precedence over dotenv values.
 | `PUNARO_REMOTE_MCP_METADATA_ENABLED` | `false` | Mounts the remote MCP OAuth protected-resource metadata document and an unauthenticated `/mcp` discovery challenge. Requires authenticated proxy/Internet ingress, `PUNARO_REMOTE_MCP_RESOURCE_URL` exactly equal to `PUNARO_PUBLIC_URL/mcp`, and one or more HTTPS authorization-server origins. The challenge advertises only `memory.search`, `memory.read`, and `memory.propose`; it accepts no token and exposes no MCP transport or tools. It remains reachable for the OAuth discovery flow even when optional Access admission is configured. |
 | `PUNARO_REMOTE_MCP_TOKEN_VALIDATION_ENABLED` | `false` | Enables strict JWT validation for remote MCP bearer tokens. Requires the enabled metadata gate, an issuer listed in `PUNARO_REMOTE_MCP_AUTHORIZATION_SERVERS`, `PUNARO_REMOTE_MCP_JWKS_URL` over HTTPS, and subject bindings. Tokens must be signed, unexpired, audience-bound to the canonical MCP resource, and carry at least one advertised default scope (`memory.search`, `memory.read`, or `memory.propose`). A verified, bound, scoped token still reaches no MCP transport or tools in this slice. |
 | `PUNARO_REMOTE_MCP_SUBJECT_BINDINGS_JSON` | unset | Required when remote MCP token validation is enabled: a bounded JSON array of unique `{"subject":"...","principal_id":"existing-enabled-principal-uuid"}` entries. It binds an OAuth subject to an existing enabled Punaro principal; it does not accept a client-supplied project claim or grant any project capability. A later transport must enforce both the token scope and the authoritative server-side project grant for that bound principal. |
-| `PUNARO_CREDENTIAL_TRANSITION_ENABLED` | `false` | Dormant M-9 bridge. Requires device auth and the PostgreSQL relay. Legacy Ed25519 requests must pass the durable global gate; a migrated device bearer resolves through its proof-bound exchange to the exact static machine enrollment and inherits no additional endpoint authority. |
+| `PUNARO_CREDENTIAL_TRANSITION_ENABLED` | `false` | Dormant M-9 relay bridge. Proof-bound exchange uses device auth and registered PostgreSQL legacy inventory before cutover; bearer relay use additionally requires the PostgreSQL relay. Legacy Ed25519 requests must pass the durable global gate, and a migrated bearer resolves to the exact static machine enrollment with no additional endpoint authority. |
 | `PUNARO_INGRESS_MODE` | unset | Required with device auth: `lan`, `proxy`, or `internet`. Proxy and Internet origins bind loopback and require `PUNARO_PUBLIC_URL=https://...`. |
 | `PUNARO_PUBLIC_URL` | unset | Canonical HTTPS public URL for proxy/Internet mode. It does not make forwarded headers trustworthy. |
 | `PUNARO_TRUSTED_LAN_CIDR` | unset | Private/link-local CIDR containing the concrete LAN bind. Valid only in LAN mode. |
@@ -183,6 +196,11 @@ make ci
 
 The Makefile also exposes individual `test`, `test-race`, `test-postgres`, `staticcheck`,
 `security`, `dockerfile-lint`, and `workflow-lint` targets.
+
+Release and deployment readiness is checked with the strict, read-only doctor
+commands for the server, adapter, bootstrap, Telegram gateway, and collected
+fleet. See [the doctor guide](docs/doctor.md) for the JSON/exit contract and
+complete stable check-code registry.
 
 ## License
 

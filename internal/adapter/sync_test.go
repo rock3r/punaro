@@ -26,11 +26,29 @@ func TestSyncOnceAdvertisesAttachmentsForwardsThenAcknowledges(t *testing.T) {
 	if len(relayClient.advertised) != 1 || relayClient.advertised[0] != "agent/reviewer" {
 		t.Fatalf("advertised = %#v", relayClient.advertised)
 	}
-	if len(mailbox.sent) != 1 || mailbox.sent[0].PunaroMessageID != "message-1" || mailbox.sent[0].RecipientRole != "role/reviewer" || mailbox.sent[0].Body != "ship it" {
+	if len(mailbox.sent) != 1 || mailbox.sent[0].PunaroMessageID != "message-1" || mailbox.sent[0].RecipientRole != "role/reviewer" || mailbox.sent[0].FromEndpoint != "agent/sender" || mailbox.sent[0].FromParticipant != "" || mailbox.sent[0].Body != "ship it" {
 		t.Fatalf("mailbox sent = %#v", mailbox.sent)
 	}
 	if len(relayClient.acknowledged) != 1 || relayClient.acknowledged[0] != "delivery-1" {
 		t.Fatalf("acks = %#v", relayClient.acknowledged)
+	}
+}
+
+func TestSyncOncePreservesDirectRoleSenderWithoutSessionIdentity(t *testing.T) {
+	t.Parallel()
+	journal, err := OpenJournal(filepath.Join(t.TempDir(), "adapter.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = journal.Close() })
+	mailbox := &fakeMailbox{attached: []string{"agent/implementer"}}
+	relayClient := &fakeRelay{deliveries: map[string][]relay.Delivery{"agent/implementer": {{ID: "delivery-1", RecipientRole: "role/machine-b/implementer", Message: relay.Message{ID: "message-1", ConversationID: "conversation-1", Sequence: 1, FromRole: "role/machine-a/reviewer", Body: "please review"}, LeaseToken: "lease", LeaseGeneration: 1}}}}
+	sync := Syncer{Mailbox: mailbox, Relay: relayClient, Journal: journal, Now: func() time.Time { return time.Date(2026, 8, 18, 18, 0, 0, 0, time.UTC) }}
+	if err := sync.SyncOnce(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if len(mailbox.sent) != 1 || mailbox.sent[0].FromRole != "role/machine-a/reviewer" || mailbox.sent[0].FromEndpoint != "" || mailbox.sent[0].RecipientRole != "role/machine-b/implementer" {
+		t.Fatalf("mailbox sent = %#v", mailbox.sent)
 	}
 }
 
@@ -55,6 +73,83 @@ func TestSyncOnceRetriesAckWithoutSendingForwardedMessageAgain(t *testing.T) {
 	}
 	if len(relayClient.acknowledged) != 1 {
 		t.Fatalf("acknowledged = %#v", relayClient.acknowledged)
+	}
+}
+
+func TestSyncOnceCopiesTelegramInboundMetadataAndRewritesFromEndpoint(t *testing.T) {
+	t.Parallel()
+	journal, err := OpenJournal(filepath.Join(t.TempDir(), "adapter.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = journal.Close() })
+	mailbox := &fakeMailbox{attached: []string{"agent/reviewer"}}
+	createdAt := time.Date(2026, 8, 16, 12, 0, 0, 0, time.UTC)
+	relayClient := &fakeRelay{deliveries: map[string][]relay.Delivery{"agent/reviewer": {{
+		ID: "delivery-1",
+		Message: relay.Message{
+			ID:                       "message-1",
+			ConversationID:           "conversation-1",
+			Sequence:                 3,
+			FromEndpoint:             relay.TelegramGatewayEndpoint,
+			FromParticipant:          relay.TelegramUserParticipant,
+			InReplyToPunaroMessageID: "message-0",
+			InReplyToEndpoint:        "agent/sender",
+			TelegramThreadID:         700001,
+			Body:                     "ship it",
+			CreatedAt:                createdAt,
+		},
+		LeaseToken:      "lease",
+		LeaseGeneration: 1,
+	}}}}
+	sync := Syncer{Mailbox: mailbox, Relay: relayClient, Journal: journal, Now: func() time.Time { return createdAt }}
+	if err := sync.SyncOnce(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if len(mailbox.sent) != 1 {
+		t.Fatalf("mailbox sent = %#v", mailbox.sent)
+	}
+	got := mailbox.sent[0]
+	if got.PunaroMessageID != "message-1" || got.ConversationID != "conversation-1" || got.Sequence != 3 {
+		t.Fatalf("ids = %#v", got)
+	}
+	if got.FromEndpoint != relay.TelegramUserParticipant || got.FromParticipant != relay.TelegramUserParticipant {
+		t.Fatalf("from = %#v", got)
+	}
+	if got.InReplyToPunaroMessageID != "message-0" || got.InReplyToEndpoint != "agent/sender" || got.TelegramThreadID != 700001 {
+		t.Fatalf("reply metadata = %#v", got)
+	}
+	if got.Body != "ship it" || !got.CreatedAt.Equal(createdAt) {
+		t.Fatalf("body = %#v", got)
+	}
+}
+
+func TestSyncOnceDoesNotRewriteFromEndpointForUnknownParticipant(t *testing.T) {
+	t.Parallel()
+	journal, err := OpenJournal(filepath.Join(t.TempDir(), "adapter.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = journal.Close() })
+	mailbox := &fakeMailbox{attached: []string{"agent/reviewer"}}
+	relayClient := &fakeRelay{deliveries: map[string][]relay.Delivery{"agent/reviewer": {{
+		ID: "delivery-1",
+		Message: relay.Message{
+			ID:              "message-1",
+			ConversationID:  "conversation-1",
+			FromEndpoint:    "agent/sender",
+			FromParticipant: "not-a-participant",
+			Body:            "ship it",
+		},
+		LeaseToken:      "lease",
+		LeaseGeneration: 1,
+	}}}}
+	sync := Syncer{Mailbox: mailbox, Relay: relayClient, Journal: journal}
+	if err := sync.SyncOnce(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if len(mailbox.sent) != 1 || mailbox.sent[0].FromEndpoint != "agent/sender" || mailbox.sent[0].FromParticipant != "not-a-participant" {
+		t.Fatalf("mailbox sent = %#v", mailbox.sent)
 	}
 }
 

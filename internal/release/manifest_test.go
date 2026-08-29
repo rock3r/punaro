@@ -42,6 +42,19 @@ func validReleaseManifestJSON() string {
 }`
 }
 
+func TestValidProductReleaseNameDefinesSharedIdentityContract(t *testing.T) {
+	for _, name := range []string{"v0.1.0-alpha.1", "v1.2.3", "v1.2.3-rc.1+darwin.arm64"} {
+		if !ValidProductReleaseName(name) {
+			t.Fatalf("valid release name rejected: %q", name)
+		}
+	}
+	for _, name := range []string{"", "latest", CatalogReleaseName, LocalCheckoutRelease, "release/name", "release secret", "v1..2.3", "v1.2.3junk", "v01.2.3", "v1.2.3-01", "plugin+alpha"} {
+		if ValidProductReleaseName(name) {
+			t.Fatalf("invalid release name accepted: %q", name)
+		}
+	}
+}
+
 func TestParseReleaseManifestBindsExactPublicReleaseContract(t *testing.T) {
 	manifest, err := ParseReleaseManifest([]byte(validReleaseManifestJSON()))
 	if err != nil {
@@ -97,6 +110,7 @@ func TestParseReleaseManifestRejectsMalformedAndNonCanonicalDocuments(t *testing
 		"duplicate release":        strings.Replace(valid, `"release": "v0.1.0",`, `"release": "v0.1.0", "release": "v0.2.0",`, 1),
 		"schema 2":                 strings.Replace(valid, `"schema": 1`, `"schema": 2`, 1),
 		"zero sequence":            strings.Replace(valid, `"sequence": 1`, `"sequence": 0`, 1),
+		"local checkout release":   strings.Replace(valid, `"release": "v0.1.0"`, `"release": "v0.0.0-local"`, 1),
 		"noncanonical time":        strings.Replace(valid, "2026-08-16T12:00:00Z", "2026-08-16T12:00:00+00:00", 1),
 		"path with scheme":         strings.Replace(valid, "v0.1.0/punaro-adapter-darwin-arm64", "https://example/punaro-adapter", 1),
 		"path with parent":         strings.Replace(valid, "v0.1.0/punaro-adapter-darwin-arm64", "v0.1.0/../punaro-adapter", 1),

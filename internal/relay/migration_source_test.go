@@ -2,6 +2,7 @@ package relay
 
 import (
 	"context"
+	"database/sql"
 	"encoding/json"
 	"errors"
 	"os"
@@ -63,10 +64,10 @@ func TestMigrationSourceManifestAndBarrier(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if first != second || first.Version != 3 || first.SourceID == "" || first.Phase != MigrationSourceActive || first.Fingerprint == "" {
+	if first != second || first.Version != 8 || first.SourceID == "" || first.Phase != MigrationSourceActive || first.Fingerprint == "" {
 		t.Fatalf("unstable manifest first=%#v second=%#v", first, second)
 	}
-	if first.Counts.Endpoints != 2 || first.Counts.Conversations != 1 || first.Counts.Roles != 1 || first.Counts.RoleMemberships != 1 || first.Counts.RoleBindings != 1 || first.Counts.Messages != 1 || first.Counts.Deliveries != 1 || first.Counts.MessageIdempotency != 1 || first.Counts.ConversationIdempotency != 1 {
+	if first.Counts.Endpoints != 2 || first.Counts.Conversations != 1 || first.Counts.Roles != 1 || first.Counts.RoleMemberships != 1 || first.Counts.RoleBindings != 1 || first.Counts.Messages != 1 || first.Counts.Deliveries != 1 || first.Counts.MessageIdempotency != 1 || first.Counts.ConversationIdempotency != 1 || first.Counts.RateBuckets != 2 {
 		t.Fatalf("manifest counts=%#v", first.Counts)
 	}
 	if got := migrationSourcePhase(t, store); got != beforePhase {
@@ -374,6 +375,13 @@ func TestCheckMigrationSourceEnrollmentCoverage(t *testing.T) {
 	if err := CheckMigrationSourceEnrollmentCoverage(ctx, path, reassigned); err == nil {
 		t.Fatal("another machine's authority was accepted for the persisted endpoint owner")
 	}
+	retiredEndpoint := "agent/retired"
+	if _, err := store.db.ExecContext(ctx, `INSERT INTO endpoints(endpoint,machine_id,lease_until,ownership_generation,consumer_id,consumer_generation,consumer_lease_until) VALUES(?,?,0,1,NULL,0,NULL)`, retiredEndpoint, retiredMigrationMachineID(retiredEndpoint)); err != nil {
+		t.Fatal(err)
+	}
+	if err := CheckMigrationSourceEnrollmentCoverage(ctx, path, covered); err == nil {
+		t.Fatal("current source accepted an uncovered endpoint with a fabricated retired migration owner")
+	}
 }
 
 func TestMigrationSourceRefusesOutOfRangeRoleCapabilities(t *testing.T) {
@@ -518,10 +526,11 @@ func TestPreparedV1MigrationSourceRemainsRecoverable(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := db.ExecContext(ctx, `DROP TABLE conversation_control_idempotency; DROP TABLE conversation_controls; DROP TABLE role_bindings; DROP TABLE role_memberships; DROP TABLE roles`); err != nil {
+	if _, err := db.ExecContext(ctx, `DROP TABLE direct_message_idempotency; DROP TABLE message_from_roles; DROP TABLE direct_conversations; DROP TABLE rate_buckets; DROP TABLE role_profile_idempotency; DROP TABLE role_profiles; DROP TABLE conversation_control_idempotency; DROP TABLE conversation_controls; DROP TABLE role_bindings; DROP TABLE role_memberships; DROP TABLE roles`); err != nil {
 		_ = db.Close()
 		t.Fatal(err)
 	}
+	stripV7OnlyMigrationSchema(t, db)
 	if err := db.Close(); err != nil {
 		t.Fatal(err)
 	}
@@ -619,10 +628,11 @@ func TestPreparedParentV3RoleOnlyMigrationSourcePreservesManifestIdentity(t *tes
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := db.ExecContext(ctx, `DROP TABLE conversation_control_idempotency; DROP TABLE conversation_controls`); err != nil {
+	if _, err := db.ExecContext(ctx, `DROP TABLE direct_message_idempotency; DROP TABLE message_from_roles; DROP TABLE direct_conversations; DROP TABLE rate_buckets; DROP TABLE role_profile_idempotency; DROP TABLE role_profiles; DROP TABLE conversation_control_idempotency; DROP TABLE conversation_controls`); err != nil {
 		_ = db.Close()
 		t.Fatal(err)
 	}
+	stripV7OnlyMigrationSchema(t, db)
 	if err := db.Close(); err != nil {
 		t.Fatal(err)
 	}
@@ -895,6 +905,868 @@ func TestInspectMigrationSourceRefusesMissingAndSymlink(t *testing.T) {
 	}
 	if _, err := InspectMigrationSource(ctx, special); err != nil {
 		t.Fatalf("literal special-character source path: %v", err)
+	}
+}
+
+func TestInspectMigrationSourceAcceptsPreparedParentWithoutRateBuckets(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	now := time.Date(2026, time.August, 18, 18, 0, 0, 0, time.UTC)
+	path := filepath.Join(t.TempDir(), "relay.db")
+	store, err := Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.AdvertiseEndpoints("machine-a", []string{"agent/a"}, now, time.Hour); err != nil {
+		_ = store.Close()
+		t.Fatal(err)
+	}
+	if err := store.Close(); err != nil {
+		t.Fatal(err)
+	}
+	db, err := openMigrationSourceDatabase(path, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.ExecContext(ctx, `DROP TABLE direct_message_idempotency; DROP TABLE message_from_roles; DROP TABLE direct_conversations; DROP TABLE rate_buckets`); err != nil {
+		_ = db.Close()
+		t.Fatal(err)
+	}
+	stripV7OnlyMigrationSchema(t, db)
+	if err := db.Close(); err != nil {
+		t.Fatal(err)
+	}
+	inspected, err := InspectMigrationSource(ctx, path)
+	if err != nil || inspected.Version != 4 || inspected.Phase != MigrationSourceActive {
+		t.Fatalf("parent without rate_buckets inspect=%#v err=%v", inspected, err)
+	}
+	prepared, err := PrepareMigrationSource(ctx, path, uuid.NewString(), strings.Repeat("c", 64), inspected.Fingerprint, now.Add(time.Minute))
+	if err != nil || prepared.Phase != MigrationSourcePrepared || prepared.Version != 4 {
+		t.Fatalf("parent prepare=%#v err=%v", prepared, err)
+	}
+	if reopened, err := Open(path); !errors.Is(err, ErrMigrationSourcePrepared) {
+		if reopened != nil {
+			_ = reopened.Close()
+		}
+		t.Fatalf("opening prepared parent source err=%v", err)
+	}
+	afterOpen, err := InspectMigrationSource(ctx, path)
+	if err != nil || afterOpen.Fingerprint != prepared.Fingerprint || afterOpen.Phase != MigrationSourcePrepared || afterOpen.Version != 4 {
+		t.Fatalf("prepared parent changed after Open: %#v err=%v", afterOpen, err)
+	}
+	batch, err := ReadMigrationSourceBatch(ctx, path, "mail_rate_buckets", "", 10)
+	if err != nil || len(batch.Rows) != 0 || !batch.Done {
+		t.Fatalf("parent rate-bucket batch=%#v err=%v", batch, err)
+	}
+}
+
+func TestInspectMigrationSourceAcceptsPreparedParentV6WithoutTelegramTables(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	now := time.Date(2026, time.August, 19, 16, 0, 0, 0, time.UTC)
+	path := filepath.Join(t.TempDir(), "relay.db")
+	store, err := Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.AdvertiseEndpoints("machine-a", []string{"agent/a"}, now, time.Hour); err != nil {
+		_ = store.Close()
+		t.Fatal(err)
+	}
+	if err := store.Close(); err != nil {
+		t.Fatal(err)
+	}
+	db, err := openMigrationSourceDatabase(path, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	stripV7OnlyMigrationSchema(t, db)
+	if err := db.Close(); err != nil {
+		t.Fatal(err)
+	}
+	inspected, err := InspectMigrationSource(ctx, path)
+	if err != nil || inspected.Version != 6 || inspected.Phase != MigrationSourceActive {
+		t.Fatalf("parent v6 inspect=%#v err=%v", inspected, err)
+	}
+	prepared, err := PrepareMigrationSource(ctx, path, uuid.NewString(), strings.Repeat("c", 64), inspected.Fingerprint, now.Add(time.Minute))
+	if err != nil || prepared.Phase != MigrationSourcePrepared || prepared.Version != 6 {
+		t.Fatalf("parent v6 prepare=%#v err=%v", prepared, err)
+	}
+	if reopened, err := Open(path); !errors.Is(err, ErrMigrationSourcePrepared) {
+		if reopened != nil {
+			_ = reopened.Close()
+		}
+		t.Fatalf("opening prepared parent v6 source err=%v", err)
+	}
+	afterOpen, err := InspectMigrationSource(ctx, path)
+	if err != nil || afterOpen.Fingerprint != prepared.Fingerprint || afterOpen.Phase != MigrationSourcePrepared || afterOpen.Version != 6 {
+		t.Fatalf("prepared parent v6 changed after Open: %#v err=%v", afterOpen, err)
+	}
+	batch, err := ReadMigrationSourceBatch(ctx, path, "mail_telegram_claims", "", 10)
+	if err != nil || len(batch.Rows) != 0 || !batch.Done {
+		t.Fatalf("parent v6 telegram batch=%#v err=%v", batch, err)
+	}
+	conversations, err := ReadMigrationSourceBatch(ctx, path, "mail_conversations", "", 10)
+	if err != nil || !conversations.Done {
+		t.Fatalf("parent v6 conversation batch=%#v err=%v", conversations, err)
+	}
+	hasher, err := NewMigrationTableHasher("mail_conversations")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, row := range conversations.Rows {
+		if err := hasher.Add(row); err != nil {
+			t.Fatalf("parent v6 conversation row=%v err=%v", row, err)
+		}
+	}
+	count, digest := hasher.Evidence()
+	if count != prepared.Counts.Conversations || digest != prepared.TableSHA256.Conversations {
+		t.Fatalf("parent v6 conversation evidence count=%d digest=%s manifest=%#v", count, digest, prepared)
+	}
+}
+
+func TestInspectMigrationSourceAcceptsLegacyTelegramBranchSchemaAndBackfillsClaimReplayBoundary(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	now := time.Date(2026, time.August, 25, 15, 0, 0, 0, time.UTC)
+	path := filepath.Join(t.TempDir(), "relay.db")
+	store, err := Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.AdvertiseEndpoints("machine-a", []string{"agent/a"}, now, time.Hour); err != nil {
+		_ = store.Close()
+		t.Fatal(err)
+	}
+	if err := store.AdvertiseEndpoints("machine-telegram", []string{TelegramGatewayEndpoint}, now, time.Hour); err != nil {
+		_ = store.Close()
+		t.Fatal(err)
+	}
+	if err := store.Close(); err != nil {
+		t.Fatal(err)
+	}
+	db, err := openMigrationSourceDatabase(path, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	conversationID := "11111111-1111-4111-8111-111111111111"
+	otherConversationID := "22222222-2222-4222-8222-222222222222"
+	requestHash := telegramClaimRequestHash(conversationID)
+	for _, statement := range []string{
+		`DROP INDEX telegram_claims_machine_key`,
+		`DROP TABLE telegram_claim_idempotency`,
+		`DROP TABLE conversation_display_name_idempotency`,
+		`DROP TABLE direct_message_idempotency`,
+		`DROP TABLE message_from_roles`,
+		`DROP TABLE direct_conversations`,
+		`DROP TABLE rate_buckets`,
+		`DROP TABLE role_profile_idempotency`,
+		`DROP TABLE role_profiles`,
+		`ALTER TABLE messages ADD COLUMN to_role TEXT`,
+		`INSERT INTO conversations(id,next_sequence,created_at,display_name) VALUES('` + conversationID + `',0,1,'legacy')`,
+		`INSERT INTO telegram_claims(conversation_id,status,requested_by_machine,requested_by_endpoint,idempotency_key,request_hash,created_at) VALUES('` + conversationID + `','pending','machine-telegram','` + TelegramGatewayEndpoint + `','legacy-claim-key','` + requestHash + `',1)`,
+	} {
+		if _, err := db.ExecContext(ctx, statement); err != nil {
+			_ = db.Close()
+			t.Fatal(err)
+		}
+	}
+	if err := db.Close(); err != nil {
+		t.Fatal(err)
+	}
+	inspected, err := InspectMigrationSource(ctx, path)
+	if err != nil || inspected.Version != 7 || inspected.Phase != MigrationSourceActive || inspected.Counts.TelegramClaims != 1 || inspected.Counts.TelegramClaimIdempotency != 1 || inspected.TableSHA256.TelegramClaimIdempotency == "" || inspected.TableSHA256.DirectConversations != "" || inspected.TableSHA256.DisplayNameIdempotency != "" {
+		t.Fatalf("legacy Telegram branch inspect=%#v err=%v", inspected, err)
+	}
+	prepared, err := PrepareMigrationSource(ctx, path, uuid.NewString(), strings.Repeat("d", 64), inspected.Fingerprint, now.Add(time.Minute))
+	if err != nil || prepared.Phase != MigrationSourcePrepared || prepared.Version != 7 {
+		t.Fatalf("legacy Telegram branch prepare=%#v err=%v", prepared, err)
+	}
+	for _, table := range []string{"mail_role_profiles", "mail_rate_buckets", "mail_direct_conversations", "mail_conversation_display_name_idempotency"} {
+		batch, err := ReadMigrationSourceBatch(ctx, path, table, "", 10)
+		if err != nil || len(batch.Rows) != 0 || !batch.Done {
+			t.Fatalf("legacy Telegram branch absent table %s batch=%#v err=%v", table, batch, err)
+		}
+	}
+	telegram, err := ReadMigrationSourceBatch(ctx, path, "mail_telegram_claims", "", 10)
+	if err != nil || len(telegram.Rows) != 1 || !telegram.Done {
+		t.Fatalf("legacy Telegram branch claim batch=%#v err=%v", telegram, err)
+	}
+	derived, err := ReadMigrationSourceBatch(ctx, path, "mail_telegram_claim_idempotency", "", 10)
+	if err != nil || len(derived.Rows) != 1 || !derived.Done {
+		t.Fatalf("legacy Telegram branch derived claim retry batch=%#v err=%v", derived, err)
+	}
+	var payload map[string]any
+	if err := json.Unmarshal(derived.Rows[0].Payload, &payload); err != nil {
+		t.Fatal(err)
+	}
+	if payload["machine_id"] != "machine-telegram" || payload["key"] != "legacy-claim-key" || payload["conversation_id"] != conversationID || payload["request_hash"] != requestHash || payload["request_hash"] == telegramClaimRequestHash(otherConversationID) {
+		t.Fatalf("derived claim retry lost cross-conversation boundary: %#v", payload)
+	}
+	hasher, err := NewMigrationTableHasher("mail_telegram_claim_idempotency")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := hasher.Add(derived.Rows[0]); err != nil {
+		t.Fatal(err)
+	}
+	count, digest := hasher.Evidence()
+	if count != prepared.Counts.TelegramClaimIdempotency || digest != prepared.TableSHA256.TelegramClaimIdempotency {
+		t.Fatalf("derived claim retry evidence count=%d digest=%s manifest=%#v", count, digest, prepared)
+	}
+}
+
+func TestInspectMigrationSourceRejectsPopulatedRetiredToRoleColumn(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	now := time.Date(2026, time.August, 25, 15, 0, 0, 0, time.UTC)
+	path := filepath.Join(t.TempDir(), "relay.db")
+	store, err := Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.AdvertiseEndpoints("machine-a", []string{"agent/a"}, now, time.Hour); err != nil {
+		_ = store.Close()
+		t.Fatal(err)
+	}
+	if err := store.Close(); err != nil {
+		t.Fatal(err)
+	}
+	db, err := openMigrationSourceDatabase(path, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, statement := range []string{
+		`DROP INDEX telegram_claims_machine_key`,
+		`DROP TABLE telegram_claim_idempotency`, `DROP TABLE conversation_display_name_idempotency`,
+		`DROP TABLE direct_message_idempotency`, `DROP TABLE message_from_roles`, `DROP TABLE direct_conversations`,
+		`DROP TABLE rate_buckets`, `DROP TABLE role_profile_idempotency`, `DROP TABLE role_profiles`,
+		`ALTER TABLE messages ADD COLUMN to_role TEXT`,
+		`INSERT INTO conversations(id,next_sequence,created_at) VALUES('11111111-1111-4111-8111-111111111111',1,1)`,
+		`INSERT INTO messages(id,conversation_id,sequence,from_endpoint,body,created_at,to_role) VALUES('22222222-2222-4222-8222-222222222222','11111111-1111-4111-8111-111111111111',1,'agent/a','body',1,'role/machine-a/legacy')`,
+	} {
+		if _, err := db.ExecContext(ctx, statement); err != nil {
+			_ = db.Close()
+			t.Fatal(err)
+		}
+	}
+	if err := db.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := InspectMigrationSource(ctx, path); err == nil {
+		t.Fatal("populated retired messages.to_role was accepted")
+	}
+}
+
+func TestPrepareLegacyTelegramBranchRepairsDerivedOperationalState(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	now := time.Date(2026, time.August, 25, 15, 30, 0, 0, time.UTC)
+	path := filepath.Join(t.TempDir(), "relay.db")
+	store, err := Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.AdvertiseEndpoints("machine-a", []string{"agent/a"}, now, time.Hour); err != nil {
+		_ = store.Close()
+		t.Fatal(err)
+	}
+	if err := store.Close(); err != nil {
+		t.Fatal(err)
+	}
+	db, err := openMigrationSourceDatabase(path, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	conversationID := "11111111-1111-4111-8111-111111111111"
+	messageID := "22222222-2222-4222-8222-222222222222"
+	deliveryID := "33333333-3333-4333-8333-333333333333"
+	controlID := "44444444-4444-4444-8444-444444444444"
+	controlActor := "legacy/control-actor"
+	controlMember := "legacy/control-member"
+	controlHash := ControlRequestHash(ControlInput{ConversationID: conversationID, ActorEndpoint: controlActor, Operation: ControlRemoveMember, Member: Member{Endpoint: controlMember}})
+	for _, statement := range []string{
+		`DROP INDEX telegram_claims_machine_key`, `DROP TABLE telegram_claim_idempotency`, `DROP TABLE conversation_display_name_idempotency`,
+		`DROP TABLE direct_message_idempotency`, `DROP TABLE message_from_roles`, `DROP TABLE direct_conversations`,
+		`DROP TABLE rate_buckets`, `DROP TABLE role_profile_idempotency`, `DROP TABLE role_profiles`,
+		`ALTER TABLE messages ADD COLUMN to_role TEXT`,
+		`INSERT INTO conversations(id,next_sequence,created_at,display_name) VALUES('` + conversationID + `',1,1,'legacy')`,
+		`INSERT INTO memberships(conversation_id,endpoint,capabilities) VALUES('` + conversationID + `','legacy/member',3)`,
+		`INSERT INTO messages(id,conversation_id,sequence,from_endpoint,body,created_at) VALUES('` + messageID + `','` + conversationID + `',1,'legacy/sender','body',1)`,
+		`INSERT INTO idempotency(machine_id,key,request_hash,message_id,created_at) VALUES('machine-a','legacy-message','` + strings.Repeat("a", 64) + `','` + messageID + `',1)`,
+		`INSERT INTO deliveries(id,message_id,recipient_endpoint,lease_machine_id,lease_token,lease_generation,ownership_generation,consumer_generation,lease_until,acked_at) VALUES('` + deliveryID + `','` + messageID + `','legacy/member','machine-a','` + strings.Repeat("b", 64) + `',2,NULL,NULL,2,3)`,
+		`INSERT INTO recipient_cursors(recipient_endpoint,conversation_id,sequence) VALUES('legacy/member','` + conversationID + `',1)`,
+		`INSERT INTO roles(role,machine_id) VALUES('role/machine-a/reviewer','machine-a')`,
+		`INSERT INTO role_bindings(role,session_endpoint,machine_id,ownership_generation,lease_until) VALUES('role/machine-a/reviewer','legacy/binding','machine-a',99,2)`,
+		`INSERT INTO conversation_controls(id,conversation_id,actor_endpoint,operation,member_endpoint,member_capabilities,created_at) VALUES('` + controlID + `','` + conversationID + `','` + controlActor + `','remove_member','` + controlMember + `',0,1)`,
+		`INSERT INTO conversation_control_idempotency(machine_id,key,request_hash,control_id,created_at) VALUES('machine-a','legacy-control','` + controlHash + `','` + controlID + `',1)`,
+	} {
+		if _, err := db.ExecContext(ctx, statement); err != nil {
+			_ = db.Close()
+			t.Fatal(err)
+		}
+	}
+	if err := db.Close(); err != nil {
+		t.Fatal(err)
+	}
+	inspected, err := InspectMigrationSource(ctx, path)
+	if err != nil || !IsLegacyTelegramMigrationSource(inspected) {
+		t.Fatalf("inspect repairable legacy source=%#v err=%v", inspected, err)
+	}
+	prepared, err := PrepareMigrationSource(ctx, path, uuid.NewString(), strings.Repeat("e", 64), inspected.Fingerprint, now.Add(time.Minute))
+	if err != nil || prepared.Phase != MigrationSourcePrepared || prepared.Counts.Endpoints != inspected.Counts.Endpoints+5 {
+		t.Fatalf("prepare repairable legacy source=%#v err=%v", prepared, err)
+	}
+	db, err = openMigrationSourceDatabase(path, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, endpoint := range []string{"legacy/member", "legacy/sender", controlActor, controlMember} {
+		var machineID string
+		if err := db.QueryRowContext(ctx, `SELECT machine_id FROM endpoints WHERE endpoint=?`, endpoint).Scan(&machineID); err != nil || machineID != retiredMigrationMachineID(endpoint) {
+			_ = db.Close()
+			t.Fatalf("retired endpoint %s machine=%q err=%v", endpoint, machineID, err)
+		}
+	}
+	var bindingMachine string
+	if err := db.QueryRowContext(ctx, `SELECT machine_id FROM endpoints WHERE endpoint='legacy/binding'`).Scan(&bindingMachine); err != nil || bindingMachine != "machine-a" {
+		_ = db.Close()
+		t.Fatalf("binding repair machine=%q err=%v", bindingMachine, err)
+	}
+	var leased, mismatched int
+	if err := db.QueryRowContext(ctx, `SELECT count(*) FROM deliveries WHERE lease_machine_id IS NOT NULL OR lease_token IS NOT NULL OR ownership_generation IS NOT NULL OR consumer_generation IS NOT NULL OR lease_until IS NOT NULL`).Scan(&leased); err != nil {
+		_ = db.Close()
+		t.Fatal(err)
+	}
+	if err := db.QueryRowContext(ctx, `SELECT count(*) FROM role_bindings b JOIN endpoints e ON e.endpoint=b.session_endpoint WHERE b.ownership_generation<>e.ownership_generation`).Scan(&mismatched); err != nil {
+		_ = db.Close()
+		t.Fatal(err)
+	}
+	if err := db.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if leased != 0 || mismatched != 0 {
+		t.Fatalf("prepared repair left leased=%d mismatched=%d", leased, mismatched)
+	}
+	enrollment := `[{"id":"machine-a","public_key":"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA","endpoints":["agent/a","legacy/binding"]}]`
+	if err := CheckMigrationSourceEnrollmentCoverage(ctx, path, enrollment); err != nil {
+		t.Fatalf("retired tombstones failed enrollment coverage: %v", err)
+	}
+	uncoveredBinding := `[{"id":"machine-a","public_key":"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA","endpoints":["agent/a"]}]`
+	if err := CheckMigrationSourceEnrollmentCoverage(ctx, path, uncoveredBinding); err == nil {
+		t.Fatal("repaired binding endpoint bypassed enrollment authority")
+	}
+	aborted, err := AbortPreparedMigrationSource(ctx, path, prepared.EpochID, prepared.TargetIdentity, prepared.Fingerprint)
+	if err != nil || aborted.Phase != MigrationSourceActive {
+		t.Fatalf("abort repaired legacy source=%#v err=%v", aborted, err)
+	}
+	reopened, err := Open(path)
+	if err != nil {
+		t.Fatalf("reopen aborted legacy source: %v", err)
+	}
+	if err := reopened.ConsumeRequestNonce("machine-a", "post-abort-write", now, now.Add(time.Hour)); err != nil {
+		_ = reopened.Close()
+		t.Fatal(err)
+	}
+	if err := reopened.Close(); err != nil {
+		t.Fatal(err)
+	}
+	active, err := InspectMigrationSource(ctx, path)
+	if err != nil || active.Version != 8 || active.Phase != MigrationSourceActive || active.Fingerprint == aborted.Fingerprint || !active.legacyTelegramRepairLineage {
+		t.Fatalf("inspect written aborted legacy source=%#v err=%v", active, err)
+	}
+	if err := CheckMigrationSourceEnrollmentCoverage(ctx, path, enrollment); err != nil {
+		t.Fatalf("durable repair provenance failed enrollment after abort: %v", err)
+	}
+	retried, err := PrepareMigrationSource(ctx, path, uuid.NewString(), prepared.TargetIdentity, active.Fingerprint, now.Add(2*time.Minute))
+	if err != nil || retried.Phase != MigrationSourcePrepared {
+		t.Fatalf("retry repaired legacy source=%#v err=%v", retried, err)
+	}
+	reopenedPrepared, err := InspectMigrationSource(ctx, path)
+	if err != nil || reopenedPrepared.Version != 8 || reopenedPrepared.Phase != MigrationSourcePrepared || reopenedPrepared.Fingerprint != retried.Fingerprint || !reopenedPrepared.legacyTelegramRepairLineage {
+		t.Fatalf("inspect retried reopened legacy source=%#v err=%v", reopenedPrepared, err)
+	}
+}
+
+func TestPrepareLegacyTelegramBranchRejectsPreexistingRetiredOwner(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	now := time.Date(2026, time.August, 25, 15, 45, 0, 0, time.UTC)
+	path := filepath.Join(t.TempDir(), "relay.db")
+	store, err := Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.AdvertiseEndpoints("machine-a", []string{"agent/a"}, now, time.Hour); err != nil {
+		_ = store.Close()
+		t.Fatal(err)
+	}
+	if err := store.Close(); err != nil {
+		t.Fatal(err)
+	}
+	db, err := openMigrationSourceDatabase(path, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, statement := range []string{
+		`DROP INDEX telegram_claims_machine_key`, `DROP TABLE telegram_claim_idempotency`, `DROP TABLE conversation_display_name_idempotency`,
+		`DROP TABLE direct_message_idempotency`, `DROP TABLE message_from_roles`, `DROP TABLE direct_conversations`,
+		`DROP TABLE rate_buckets`, `DROP TABLE role_profile_idempotency`, `DROP TABLE role_profiles`,
+		`ALTER TABLE messages ADD COLUMN to_role TEXT`,
+	} {
+		if _, err := db.ExecContext(ctx, statement); err != nil {
+			_ = db.Close()
+			t.Fatal(err)
+		}
+	}
+	fabricatedEndpoint := "legacy/fabricated"
+	if _, err := db.ExecContext(ctx, `INSERT INTO endpoints(endpoint,machine_id,lease_until,ownership_generation,consumer_id,consumer_generation,consumer_lease_until) VALUES(?,?,0,1,NULL,0,NULL)`, fabricatedEndpoint, retiredMigrationMachineID(fabricatedEndpoint)); err != nil {
+		_ = db.Close()
+		t.Fatal(err)
+	}
+	if err := db.Close(); err != nil {
+		t.Fatal(err)
+	}
+	inspected, err := InspectMigrationSource(ctx, path)
+	if err != nil || !IsLegacyTelegramMigrationSource(inspected) {
+		t.Fatalf("inspect fabricated legacy source=%#v err=%v", inspected, err)
+	}
+	if _, err := PrepareMigrationSource(ctx, path, uuid.NewString(), strings.Repeat("f", 64), inspected.Fingerprint, now.Add(time.Minute)); err == nil {
+		t.Fatal("legacy source accepted a pre-existing deterministic retired owner")
+	}
+}
+
+func TestInspectMigrationSourceRejectsLegacyTelegramDuplicateClaimRetries(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	now := time.Date(2026, time.August, 25, 16, 0, 0, 0, time.UTC)
+	path := filepath.Join(t.TempDir(), "relay.db")
+	store, err := Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.AdvertiseEndpoints("machine-telegram", []string{TelegramGatewayEndpoint}, now, time.Hour); err != nil {
+		_ = store.Close()
+		t.Fatal(err)
+	}
+	if err := store.Close(); err != nil {
+		t.Fatal(err)
+	}
+	db, err := openMigrationSourceDatabase(path, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, statement := range []string{
+		`DROP INDEX telegram_claims_machine_key`, `DROP TABLE telegram_claim_idempotency`, `DROP TABLE conversation_display_name_idempotency`,
+		`DROP TABLE direct_message_idempotency`, `DROP TABLE message_from_roles`, `DROP TABLE direct_conversations`,
+		`DROP TABLE rate_buckets`, `DROP TABLE role_profile_idempotency`, `DROP TABLE role_profiles`,
+		`ALTER TABLE messages ADD COLUMN to_role TEXT`,
+		`INSERT INTO conversations(id,next_sequence,created_at) VALUES('11111111-1111-4111-8111-111111111111',0,1),('22222222-2222-4222-8222-222222222222',0,2)`,
+		`INSERT INTO telegram_claims(conversation_id,status,requested_by_machine,requested_by_endpoint,idempotency_key,request_hash,created_at) VALUES
+			('11111111-1111-4111-8111-111111111111','pending','machine-telegram','telegram/primary','duplicate-key','` + strings.Repeat("a", 64) + `',1),
+			('22222222-2222-4222-8222-222222222222','pending','machine-telegram','telegram/primary','duplicate-key','` + strings.Repeat("b", 64) + `',2)`,
+	} {
+		if _, err := db.ExecContext(ctx, statement); err != nil {
+			_ = db.Close()
+			t.Fatal(err)
+		}
+	}
+	if err := db.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := InspectMigrationSource(ctx, path); err == nil {
+		t.Fatal("legacy Telegram source with duplicate claim retry keys was accepted")
+	}
+}
+
+func TestInspectMigrationSourceAcceptsPreparedParentWithoutDirectMessages(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	now := time.Date(2026, time.August, 18, 18, 0, 0, 0, time.UTC)
+	path := filepath.Join(t.TempDir(), "relay.db")
+	store, err := Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.AdvertiseEndpoints("machine-a", []string{"agent/a"}, now, time.Hour); err != nil {
+		_ = store.Close()
+		t.Fatal(err)
+	}
+	if err := store.Close(); err != nil {
+		t.Fatal(err)
+	}
+	db, err := openMigrationSourceDatabase(path, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.ExecContext(ctx, `DROP TABLE direct_message_idempotency; DROP TABLE message_from_roles; DROP TABLE direct_conversations`); err != nil {
+		_ = db.Close()
+		t.Fatal(err)
+	}
+	stripV7OnlyMigrationSchema(t, db)
+	if err := db.Close(); err != nil {
+		t.Fatal(err)
+	}
+	inspected, err := InspectMigrationSource(ctx, path)
+	if err != nil || inspected.Version != 5 || inspected.Phase != MigrationSourceActive {
+		t.Fatalf("parent without direct messages inspect=%#v err=%v", inspected, err)
+	}
+	prepared, err := PrepareMigrationSource(ctx, path, uuid.NewString(), strings.Repeat("e", 64), inspected.Fingerprint, now.Add(time.Minute))
+	if err != nil || prepared.Phase != MigrationSourcePrepared || prepared.Version != 5 {
+		t.Fatalf("parent prepare=%#v err=%v", prepared, err)
+	}
+	if reopened, err := Open(path); !errors.Is(err, ErrMigrationSourcePrepared) {
+		if reopened != nil {
+			_ = reopened.Close()
+		}
+		t.Fatalf("opening prepared parent source err=%v", err)
+	}
+	afterOpen, err := InspectMigrationSource(ctx, path)
+	if err != nil || afterOpen.Fingerprint != prepared.Fingerprint || afterOpen.Phase != MigrationSourcePrepared || afterOpen.Version != 5 {
+		t.Fatalf("prepared parent changed after Open: %#v err=%v", afterOpen, err)
+	}
+	batch, err := ReadMigrationSourceBatch(ctx, path, "mail_direct_conversations", "", 10)
+	if err != nil || len(batch.Rows) != 0 || !batch.Done {
+		t.Fatalf("parent direct-conversation batch=%#v err=%v", batch, err)
+	}
+}
+
+func TestInspectMigrationSourceCarriesRateBucketsThroughCurrentCutoverSurface(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	now := time.Date(2026, time.August, 18, 18, 30, 0, 0, time.UTC)
+	path := filepath.Join(t.TempDir(), "relay.db")
+	store, err := Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+	if err := store.SetRateLimits(tightRateLimits()); err != nil {
+		t.Fatal(err)
+	}
+	conversation := createRateTestConversation(t, store, now, "machine-a", "machine-b", "agent/a", "agent/b")
+	if _, _, err := store.AppendMessage(rateAppend(conversation, "machine-a", "agent/a", "one", "one", now)); err != nil {
+		t.Fatal(err)
+	}
+	inspected, err := InspectMigrationSource(ctx, path)
+	if err != nil || inspected.Version != 8 || inspected.Counts.RateBuckets != 2 {
+		t.Fatalf("current inspect=%#v err=%v", inspected, err)
+	}
+	hasher, err := NewMigrationTableHasher("mail_rate_buckets")
+	if err != nil {
+		t.Fatal(err)
+	}
+	prepared, err := PrepareMigrationSource(ctx, path, uuid.NewString(), strings.Repeat("d", 64), inspected.Fingerprint, now.Add(time.Minute))
+	if err != nil || prepared.Version != 8 {
+		t.Fatalf("current prepare=%#v err=%v", prepared, err)
+	}
+	batch, err := ReadMigrationSourceBatch(ctx, path, "mail_rate_buckets", "", 10)
+	if err != nil || len(batch.Rows) != 2 || !batch.Done {
+		t.Fatalf("current rate-bucket batch=%#v err=%v", batch, err)
+	}
+	for _, row := range batch.Rows {
+		if err := hasher.Add(row); err != nil {
+			t.Fatal(err)
+		}
+	}
+	count, digest := hasher.Evidence()
+	if count != inspected.Counts.RateBuckets || digest != inspected.TableSHA256.RateBuckets {
+		t.Fatalf("rate-bucket evidence count=%d digest=%s want count=%d digest=%s", count, digest, inspected.Counts.RateBuckets, inspected.TableSHA256.RateBuckets)
+	}
+}
+
+func TestInspectMigrationSourceV7HashesIncludeDisplayNameAndInboundMetadata(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	now := time.Date(2026, time.August, 19, 20, 0, 0, 0, time.UTC)
+	path := filepath.Join(t.TempDir(), "relay.db")
+	store, err := Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.AdvertiseEndpoints("machine-a", []string{"agent/a"}, now, time.Hour); err != nil {
+		_ = store.Close()
+		t.Fatal(err)
+	}
+	if err := store.AdvertiseEndpoints("machine-telegram", []string{TelegramGatewayEndpoint}, now, time.Hour); err != nil {
+		_ = store.Close()
+		t.Fatal(err)
+	}
+	conversation, err := store.CreateConversationIdempotent(CreateConversationInput{
+		MachineID: "machine-a", IdempotencyKey: "named-v7-hash", CreatorEndpoint: "agent/a",
+		DisplayName: "V7 room", Members: []Member{{Endpoint: "agent/a", Capabilities: CapSend | CapReceive | CapAdmin}}, Now: now,
+	})
+	if err != nil {
+		_ = store.Close()
+		t.Fatal(err)
+	}
+	if _, _, err := store.ReserveTelegramClaim(TelegramClaimInput{
+		ConversationID: conversation.ID, MachineID: "machine-a", Endpoint: "agent/a",
+		IdempotencyKey: "claim-v7-hash", Now: now,
+	}); err != nil {
+		_ = store.Close()
+		t.Fatal(err)
+	}
+	if _, _, err := store.CompleteTelegramClaim(TelegramClaimCompleteInput{ConversationID: conversation.ID, MachineID: "machine-telegram", Now: now}); err != nil {
+		_ = store.Close()
+		t.Fatal(err)
+	}
+	inbound, duplicate, err := store.AppendTelegramInbound(TelegramInboundInput{
+		ConversationID: conversation.ID, SenderMachineID: "machine-telegram", FromEndpoint: TelegramGatewayEndpoint,
+		FromParticipant: TelegramUserParticipant, Body: "v7 inbound", InReplyToMessageID: "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee",
+		InReplyToEndpoint: "agent/a", TelegramThreadID: 700001, IdempotencyKey: "telegram-update:v7", Now: now,
+	})
+	if err != nil || duplicate || inbound.FromParticipant != TelegramUserParticipant {
+		_ = store.Close()
+		t.Fatalf("inbound=%#v duplicate=%t err=%v", inbound, duplicate, err)
+	}
+	if err := store.Close(); err != nil {
+		t.Fatal(err)
+	}
+	db, err := openMigrationSourceDatabase(path, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.ExecContext(ctx, `DROP TABLE IF EXISTS telegram_claim_idempotency`); err != nil {
+		_ = db.Close()
+		t.Fatal(err)
+	}
+	if err := db.Close(); err != nil {
+		t.Fatal(err)
+	}
+	inspected, err := InspectMigrationSource(ctx, path)
+	if err != nil || inspected.Version != 7 || inspected.Phase != MigrationSourceActive {
+		t.Fatalf("v7 inspect=%#v err=%v", inspected, err)
+	}
+	prepared, err := PrepareMigrationSource(ctx, path, uuid.NewString(), strings.Repeat("f", 64), inspected.Fingerprint, now.Add(time.Minute))
+	if err != nil || prepared.Version != 7 {
+		t.Fatalf("v7 prepare=%#v err=%v", prepared, err)
+	}
+	for _, table := range []string{"mail_conversations", "mail_messages"} {
+		batch, err := ReadMigrationSourceBatch(ctx, path, table, "", 10)
+		if err != nil || len(batch.Rows) == 0 || !batch.Done {
+			t.Fatalf("v7 table=%s batch=%#v err=%v", table, batch, err)
+		}
+		hasher, err := NewMigrationTableHasher(table)
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, row := range batch.Rows {
+			if err := hasher.Add(row); err != nil {
+				t.Fatalf("v7 table=%s row=%v err=%v", table, row, err)
+			}
+		}
+		count, digest := hasher.Evidence()
+		var expectedCount int64
+		var expectedDigest string
+		switch table {
+		case "mail_conversations":
+			expectedCount, expectedDigest = prepared.Counts.Conversations, prepared.TableSHA256.Conversations
+		case "mail_messages":
+			expectedCount, expectedDigest = prepared.Counts.Messages, prepared.TableSHA256.Messages
+		}
+		if count != expectedCount || digest != expectedDigest {
+			t.Fatalf("v7 table=%s evidence count=%d digest=%s want count=%d digest=%s", table, count, digest, expectedCount, expectedDigest)
+		}
+	}
+}
+
+func TestInspectMigrationSourceExportsTelegramClaimsAndInboundMetadata(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	now := time.Date(2026, time.August, 19, 12, 0, 0, 0, time.UTC)
+	path := filepath.Join(t.TempDir(), "relay.db")
+	store, err := Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+	conversation := createClaimedTelegramConversation(t, store, now)
+	inbound, duplicate, err := store.AppendTelegramInbound(TelegramInboundInput{
+		ConversationID: conversation.ID, SenderMachineID: "machine-telegram", FromEndpoint: TelegramGatewayEndpoint,
+		FromParticipant: TelegramUserParticipant, Body: "ship it", InReplyToMessageID: "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee",
+		InReplyToEndpoint: "agent/a", TelegramThreadID: 700001, IdempotencyKey: "telegram-update:7", Now: now,
+	})
+	if err != nil || duplicate || inbound.FromParticipant != TelegramUserParticipant || inbound.TelegramThreadID != 700001 {
+		t.Fatalf("inbound=%#v duplicate=%t err=%v", inbound, duplicate, err)
+	}
+	inspected, err := InspectMigrationSource(ctx, path)
+	if err != nil || inspected.Version != 8 || inspected.Counts.TelegramClaims != 1 || inspected.Counts.TelegramParticipants != 1 || inspected.Counts.TelegramClaimEvents != 1 || inspected.Counts.TelegramClaimIdempotency != 1 {
+		t.Fatalf("inspect=%#v err=%v", inspected, err)
+	}
+	prepared, err := PrepareMigrationSource(ctx, path, uuid.NewString(), strings.Repeat("e", 64), inspected.Fingerprint, now.Add(time.Minute))
+	if err != nil || prepared.Version != 8 || prepared.Counts.TelegramClaims != 1 || prepared.Counts.TelegramClaimIdempotency != 1 {
+		t.Fatalf("prepare=%#v err=%v", prepared, err)
+	}
+	for _, table := range []string{"mail_telegram_claims", "mail_telegram_participants", "mail_telegram_claim_events", "mail_telegram_claim_idempotency"} {
+		batch, err := ReadMigrationSourceBatch(ctx, path, table, "", 10)
+		if err != nil || len(batch.Rows) != 1 || !batch.Done {
+			t.Fatalf("table=%s batch=%#v err=%v", table, batch, err)
+		}
+		hasher, err := NewMigrationTableHasher(table)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := hasher.Add(batch.Rows[0]); err != nil {
+			t.Fatal(err)
+		}
+		count, digest := hasher.Evidence()
+		var expectedCount int64
+		var expectedDigest string
+		switch table {
+		case "mail_telegram_claims":
+			expectedCount, expectedDigest = prepared.Counts.TelegramClaims, prepared.TableSHA256.TelegramClaims
+		case "mail_telegram_participants":
+			expectedCount, expectedDigest = prepared.Counts.TelegramParticipants, prepared.TableSHA256.TelegramParticipants
+		case "mail_telegram_claim_events":
+			expectedCount, expectedDigest = prepared.Counts.TelegramClaimEvents, prepared.TableSHA256.TelegramClaimEvents
+		case "mail_telegram_claim_idempotency":
+			expectedCount, expectedDigest = prepared.Counts.TelegramClaimIdempotency, prepared.TableSHA256.TelegramClaimIdempotency
+		}
+		if count != expectedCount || digest != expectedDigest {
+			t.Fatalf("table=%s evidence count=%d digest=%s want count=%d digest=%s", table, count, digest, expectedCount, expectedDigest)
+		}
+		var payload map[string]any
+		if err := json.Unmarshal(batch.Rows[0].Payload, &payload); err != nil {
+			t.Fatal(err)
+		}
+		if payload["conversation_id"] != conversation.ID {
+			t.Fatalf("table=%s conversation_id=%v", table, payload["conversation_id"])
+		}
+	}
+	messages, err := ReadMigrationSourceBatch(ctx, path, "mail_messages", "", 10)
+	if err != nil || len(messages.Rows) != 1 {
+		t.Fatalf("messages batch=%#v err=%v", messages, err)
+	}
+	var message map[string]any
+	if err := json.Unmarshal(messages.Rows[0].Payload, &message); err != nil {
+		t.Fatal(err)
+	}
+	if message["from_participant"] != TelegramUserParticipant || message["in_reply_to_message_id"] != "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee" || message["in_reply_to_endpoint"] != "agent/a" || message["telegram_thread_id"] != float64(700001) {
+		t.Fatalf("message metadata=%#v", message)
+	}
+}
+
+func TestInspectMigrationSourceAcceptsTokenReplyIDs(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	now := time.Date(2026, time.August, 19, 14, 0, 0, 0, time.UTC)
+	path := filepath.Join(t.TempDir(), "relay.db")
+	store, err := Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+	conversation := createClaimedTelegramConversation(t, store, now)
+	const replyID = "legacy-reply-token-1"
+	if !ValidRequestToken(replyID) {
+		t.Fatalf("fixture reply id %q is not a valid request token", replyID)
+	}
+	inbound, duplicate, err := store.AppendTelegramInbound(TelegramInboundInput{
+		ConversationID: conversation.ID, SenderMachineID: "machine-telegram", FromEndpoint: TelegramGatewayEndpoint,
+		FromParticipant: TelegramUserParticipant, Body: "reply", InReplyToMessageID: replyID,
+		InReplyToEndpoint: "agent/a", TelegramThreadID: 11, IdempotencyKey: "telegram-update:token-reply", Now: now,
+	})
+	if err != nil || duplicate || inbound.InReplyToPunaroMessageID != replyID {
+		t.Fatalf("inbound=%#v duplicate=%t err=%v", inbound, duplicate, err)
+	}
+	inspected, err := InspectMigrationSource(ctx, path)
+	if err != nil || inspected.Counts.Messages != 1 {
+		t.Fatalf("inspect token reply id=%#v err=%v", inspected, err)
+	}
+	prepared, err := PrepareMigrationSource(ctx, path, uuid.NewString(), strings.Repeat("a", 64), inspected.Fingerprint, now.Add(time.Minute))
+	if err != nil || prepared.Counts.Messages != 1 {
+		t.Fatalf("prepare token reply id=%#v err=%v", prepared, err)
+	}
+	batch, err := ReadMigrationSourceBatch(ctx, path, "mail_messages", "", 10)
+	if err != nil || len(batch.Rows) != 1 {
+		t.Fatalf("messages batch=%#v err=%v", batch, err)
+	}
+	var message map[string]any
+	if err := json.Unmarshal(batch.Rows[0].Payload, &message); err != nil {
+		t.Fatal(err)
+	}
+	if message["in_reply_to_message_id"] != replyID {
+		t.Fatalf("exported reply id=%v", message["in_reply_to_message_id"])
+	}
+}
+
+func TestInspectMigrationSourceExportsDisplayNameIdempotency(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	now := time.Date(2026, time.August, 19, 15, 0, 0, 0, time.UTC)
+	path := filepath.Join(t.TempDir(), "relay.db")
+	store, err := Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+	if err := store.AdvertiseEndpoints("machine-a", []string{"agent/a"}, now, time.Hour); err != nil {
+		t.Fatal(err)
+	}
+	conversation, err := store.CreateConversationIdempotent(CreateConversationInput{
+		MachineID: "machine-a", IdempotencyKey: "create-cutover-rename", CreatorEndpoint: "agent/a",
+		Members: []Member{{Endpoint: "agent/a", Capabilities: CapSend | CapReceive | CapAdmin}}, Now: now,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, duplicate, err := store.SetConversationDisplayName(SetDisplayNameInput{
+		ConversationID: conversation.ID, ActorMachineID: "machine-a", ActorEndpoint: "agent/a",
+		DisplayName: "Alpha", IdempotencyKey: "rename-cutover-a", Now: now,
+	}); err != nil || duplicate {
+		t.Fatalf("rename err=%v duplicate=%v", err, duplicate)
+	}
+	inspected, err := InspectMigrationSource(ctx, path)
+	if err != nil || inspected.Counts.DisplayNameIdempotency != 1 {
+		t.Fatalf("inspect=%#v err=%v", inspected, err)
+	}
+	prepared, err := PrepareMigrationSource(ctx, path, uuid.NewString(), strings.Repeat("b", 64), inspected.Fingerprint, now.Add(time.Minute))
+	if err != nil || prepared.Counts.DisplayNameIdempotency != 1 {
+		t.Fatalf("prepare=%#v err=%v", prepared, err)
+	}
+	batch, err := ReadMigrationSourceBatch(ctx, path, "mail_conversation_display_name_idempotency", "", 10)
+	if err != nil || len(batch.Rows) != 1 || !batch.Done {
+		t.Fatalf("rename idempotency batch=%#v err=%v", batch, err)
+	}
+	hasher, err := NewMigrationTableHasher("mail_conversation_display_name_idempotency")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := hasher.Add(batch.Rows[0]); err != nil {
+		t.Fatal(err)
+	}
+	count, digest := hasher.Evidence()
+	if count != prepared.Counts.DisplayNameIdempotency || digest != prepared.TableSHA256.DisplayNameIdempotency {
+		t.Fatalf("evidence count=%d digest=%s want count=%d digest=%s", count, digest, prepared.Counts.DisplayNameIdempotency, prepared.TableSHA256.DisplayNameIdempotency)
+	}
+	var payload map[string]any
+	if err := json.Unmarshal(batch.Rows[0].Payload, &payload); err != nil {
+		t.Fatal(err)
+	}
+	if payload["key"] != "rename-cutover-a" || payload["conversation_id"] != conversation.ID {
+		t.Fatalf("payload=%#v", payload)
+	}
+}
+
+func stripV7OnlyMigrationSchema(t *testing.T, db *sql.DB) {
+	t.Helper()
+	ctx := context.Background()
+	for _, statement := range []string{
+		`DROP TABLE IF EXISTS telegram_claim_idempotency`,
+		`DROP TABLE IF EXISTS telegram_claim_events`,
+		`DROP TABLE IF EXISTS telegram_participants`,
+		`DROP TABLE IF EXISTS telegram_claims`,
+		`DROP TABLE IF EXISTS conversation_display_name_idempotency`,
+		`ALTER TABLE conversations DROP COLUMN display_name`,
+		`ALTER TABLE messages DROP COLUMN from_participant`,
+		`ALTER TABLE messages DROP COLUMN in_reply_to_message_id`,
+		`ALTER TABLE messages DROP COLUMN in_reply_to_endpoint`,
+		`ALTER TABLE messages DROP COLUMN telegram_thread_id`,
+	} {
+		if _, err := db.ExecContext(ctx, statement); err != nil {
+			t.Fatal(err)
+		}
 	}
 }
 

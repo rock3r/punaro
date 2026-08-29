@@ -12,9 +12,11 @@ import (
 	"errors"
 	"sort"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/rock3r/punaro/internal/legacyexchange"
 )
 
 var (
@@ -45,6 +47,16 @@ func OpenAdministration(ctx context.Context, cfg Config) (*Administration, error
 	dsn, err := ReadDSNFile(cfg.DSNFile)
 	if err != nil {
 		return nil, err
+	}
+	return OpenAdministrationDSN(ctx, dsn)
+}
+
+// OpenAdministrationDSN opens the host-local owner connection from an already
+// protected and validated in-memory DSN. Diagnostic callers use this after a
+// deadline-isolated credential read.
+func OpenAdministrationDSN(ctx context.Context, dsn string) (*Administration, error) {
+	if strings.TrimSpace(dsn) == "" {
+		return nil, errors.New("PostgreSQL connection configuration is invalid")
 	}
 	db, err := open(ctx, dsn)
 	if err != nil {
@@ -295,7 +307,22 @@ func (a *Administration) CreateEnrollment(ctx context.Context, actorPrincipalID 
 	if err := a.requireClientLifecycleSchema(ctx); err != nil {
 		return PendingEnrollment{}, err
 	}
-	grants, previewHash, err := PreviewTrustedAgentEnrollment(request.ProjectIDs, request.AllProjects)
+	var grants []GrantSpec
+	var previewHash string
+	var err error
+	if request.ServiceOnly {
+		if request.LegacyPrincipalID != "" {
+			grants, previewHash, err = PreviewServiceEnrollmentForLegacy(request.LegacyPrincipalID)
+		} else {
+			grants, previewHash, err = PreviewServiceEnrollment()
+		}
+	} else {
+		if request.LegacyPrincipalID != "" {
+			grants, previewHash, err = PreviewTrustedAgentEnrollmentForLegacy(request.ProjectIDs, request.AllProjects, request.LegacyPrincipalID)
+		} else {
+			grants, previewHash, err = PreviewTrustedAgentEnrollment(request.ProjectIDs, request.AllProjects)
+		}
+	}
 	if err != nil || subtle.ConstantTimeCompare([]byte(previewHash), []byte(confirmedPreviewHash)) != 1 {
 		return PendingEnrollment{}, errors.New("enrollment preview was not confirmed")
 	}
@@ -355,6 +382,10 @@ OR EXISTS (SELECT 1 FROM auth.pending_enrollments WHERE machine_id = $1 AND rede
 	if request.LegacyPrincipalID != "" {
 		if err := lockLegacyMutations(ctx, tx); err != nil {
 			return PendingEnrollment{}, err
+		}
+		var legacyEnrollmentExists bool
+		if err := tx.QueryRowContext(ctx, `SELECT EXISTS (SELECT 1 FROM auth.pending_enrollments WHERE legacy_principal_id = $1 AND redeemed_at IS NULL AND invalidated_at IS NULL AND expires_at > statement_timestamp())`, request.LegacyPrincipalID).Scan(&legacyEnrollmentExists); err != nil || legacyEnrollmentExists {
+			return PendingEnrollment{}, errors.New("legacy machine already has a pending enrollment")
 		}
 		var pendingLegacy bool
 		if err := tx.QueryRowContext(ctx, `SELECT EXISTS (SELECT 1 FROM auth.legacy_machines WHERE principal_id = $1 AND state = 'pending')`, request.LegacyPrincipalID).Scan(&pendingLegacy); err != nil || !pendingLegacy {
@@ -443,7 +474,7 @@ FROM auth.pending_enrollments WHERE id = $1 FOR UPDATE`, redeem.EnrollmentID).Sc
 		var registeredPublicKey []byte
 		var legacyState string
 		var migratedLookupID sql.NullString
-		if err := tx.QueryRowContext(ctx, `SELECT public_key, state, migrated_credential_lookup_id::text FROM auth.legacy_machines WHERE principal_id = $1`, requiredLegacy.String).Scan(&registeredPublicKey, &legacyState, &migratedLookupID); err != nil || subtle.ConstantTimeCompare(registeredPublicKey, legacyProof.PublicKey) != 1 || !ed25519.Verify(legacyProof.PublicKey, legacyExchangeTranscript(redeem, codeDigest), legacyProof.Signature) {
+		if err := tx.QueryRowContext(ctx, `SELECT public_key, state, migrated_credential_lookup_id::text FROM auth.legacy_machines WHERE principal_id = $1`, requiredLegacy.String).Scan(&registeredPublicKey, &legacyState, &migratedLookupID); err != nil || subtle.ConstantTimeCompare(registeredPublicKey, legacyProof.PublicKey) != 1 || !ed25519.Verify(legacyProof.PublicKey, legacyexchange.Transcript(redeem.EnrollmentID, redeem.ClientBinding, redeem.IdempotencyKey, codeDigest), legacyProof.Signature) {
 			return DeviceCredential{}, ErrInvalidEnrollment
 		}
 		if redemptionKey.Valid {
@@ -1083,10 +1114,6 @@ func lockEnrollmentMutations(ctx context.Context, tx *sql.Tx) error {
 
 func encodeDeviceCredential(lookupID string, secret []byte) string {
 	return lookupID + "." + base64.RawURLEncoding.EncodeToString(secret)
-}
-
-func legacyExchangeTranscript(redeem RedeemEnrollment, codeDigest [sha256.Size]byte) []byte {
-	return []byte("punaro-legacy-exchange-v1\n" + redeem.EnrollmentID + "\n" + redeem.ClientBinding + "\n" + redeem.IdempotencyKey + "\n" + hex.EncodeToString(codeDigest[:]))
 }
 
 func deriveEnrollmentCredentialSecret(redeem RedeemEnrollment, code []byte) [sha256.Size]byte {

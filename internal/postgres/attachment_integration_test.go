@@ -648,6 +648,7 @@ func testTrustedAttachmentIntegration(ctx context.Context, t *testing.T, app *Da
 		{`DELETE FROM relay.mail_deliveries WHERE message_id=$1`, []any{message.ID}},
 		{`DELETE FROM relay.mail_message_idempotency WHERE message_id=$1`, []any{message.ID}},
 		{`DELETE FROM relay.mail_messages WHERE id=$1`, []any{message.ID}},
+		{`DELETE FROM relay.mail_rate_buckets`, nil},
 		{`DELETE FROM relay.mail_memberships WHERE conversation_id=$1`, []any{conversation.ID}},
 		{`DELETE FROM relay.mail_role_memberships WHERE conversation_id=$1`, []any{conversation.ID}},
 		{`DELETE FROM relay.mail_role_bindings WHERE role='role/attachment-recipient'`, nil},
@@ -672,6 +673,9 @@ func testTrustedAttachmentIntegration(ctx context.Context, t *testing.T, app *Da
 	}
 	if err := cleanupTx.Commit(); err != nil {
 		t.Fatal(err)
+	}
+	if _, err := app.ReconcilePendingQuota(ctx); err != nil {
+		t.Fatalf("reconcile leftover mail pending quota: %v", err)
 	}
 }
 

@@ -106,6 +106,9 @@ func HardenClient(provided *http.Client, raw string, policy Policy) (*http.Clien
 }
 
 func validatePort(parsed *url.URL) error {
+	if strings.HasSuffix(parsed.Host, ":") {
+		return errors.New("invalid port")
+	}
 	port := parsed.Port()
 	if port == "" {
 		return nil

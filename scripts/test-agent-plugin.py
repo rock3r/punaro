@@ -20,6 +20,7 @@ MCP_SCHEMA = "https://agent-plugins.org/schemas/1.0.0/mcp.schema.json"
 CLAUDE_SCHEMA = "https://json.schemastore.org/claude-code-plugin-manifest.json"
 REQUIRED_SKILLS = {"punaro-mailbox", "punaro-reply", "punaro-attachment"}
 SKILL_LAUNCHERS = {
+    "punaro-mailbox": "punaro-adapter",
     "punaro-reply": "punaro-adapter",
     "punaro-attachment": "punaro-trusted-attachment",
 }
@@ -47,10 +48,34 @@ SHARED_METADATA = {
 }
 PUNARO_ICON = "./assets/punaro.png"
 PUNARO_ICON_SHA256 = "5cf8313cbe88e41887db89b0ecd7a668c622416ea83369fc0ec7da4f72b5a353"
+PLUGIN_LF_ATTRIBUTES = {
+    "/plugin.json text eol=lf",
+    "/mcp.json text eol=lf",
+    "/.mcp.json text eol=lf",
+    "/.codex-plugin/*.json text eol=lf",
+    "/.claude-plugin/*.json text eol=lf",
+    "/scripts/punaro-plugin-mcp text eol=lf",
+    "/scripts/punaro-plugin-mcp.cmd text eol=lf",
+    "/skills/** text eol=lf",
+}
 
 
 class ValidationError(RuntimeError):
     pass
+
+
+def validate_git_eol_contract() -> None:
+    attributes_path = ROOT / ".gitattributes"
+    if not attributes_path.is_file() or attributes_path.is_symlink():
+        raise ValidationError("missing regular .gitattributes")
+    lines = {
+        line.strip()
+        for line in attributes_path.read_text(encoding="utf-8").splitlines()
+        if line.strip() and not line.lstrip().startswith("#")
+    }
+    missing = PLUGIN_LF_ATTRIBUTES - lines
+    if missing:
+        raise ValidationError(f"plugin LF attributes are incomplete: {sorted(missing)}")
 
 
 def reject_duplicate_keys(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
@@ -128,6 +153,8 @@ def validate_skills() -> None:
             raise ValidationError(f"skill name does not match its directory: {skill_name}")
         if not re.search(r"(?m)^description:\s*\S", frontmatter):
             raise ValidationError(f"skill has no description: {skill_name}")
+        if "doctor" not in text or "without separate" not in text:
+            raise ValidationError(f"skill omits read-only doctor readiness boundary: {skill_name}")
 
     for skill_name, command in SKILL_LAUNCHERS.items():
         skill_root = skills_root / skill_name
@@ -141,21 +168,23 @@ def validate_skills() -> None:
         if not os.access(skill_root / "scripts" / command, os.X_OK):
             raise ValidationError(f"POSIX skill launcher must be executable: {skill_name}/{command}")
         posix_launcher = (skill_root / "scripts" / command).read_text(encoding="utf-8")
-        if f'.local/bin/{command}' not in posix_launcher or "PATH" in posix_launcher:
-            raise ValidationError(f"POSIX skill launcher must use the installer-owned path: {skill_name}/{command}")
+        if f'.local/state/punaro-bootstrap/current/{command}-$adapter_os-$adapter_arch' not in posix_launcher or ".local/bin/" in posix_launcher or "PATH" in posix_launcher:
+            raise ValidationError(f"POSIX skill launcher must use the selected bootstrap slot: {skill_name}/{command}")
         if "set --" in posix_launcher:
             raise ValidationError(f"POSIX skill launcher must preserve forwarded arguments: {skill_name}/{command}")
         windows_launcher = (skill_root / "scripts" / f"{command}.cmd").read_text(encoding="utf-8")
-        if f"%LOCALAPPDATA%\\Punaro\\bin\\{command}.exe" not in windows_launcher or "%PATH%" in windows_launcher:
-            raise ValidationError(f"Windows skill launcher must use the installer-owned path: {skill_name}/{command}")
+        if f"%LOCALAPPDATA%\\Punaro\\bin\\{command}.exe" not in windows_launcher or "powershell.exe" in windows_launcher.lower() or "\\bootstrap\\current\\" in windows_launcher or "%PATH%" in windows_launcher:
+            raise ValidationError(f"Windows skill launcher must use the stable installer-owned dispatcher: {skill_name}/{command}")
 
     if os.name == "posix":
         with tempfile.TemporaryDirectory(prefix="punaro-skill-launchers-") as fixture:
             home = Path(fixture)
-            bin_dir = home / ".local" / "bin"
-            bin_dir.mkdir(parents=True)
+            slot_dir = home / ".local" / "state" / "punaro-bootstrap" / "current"
+            slot_dir.mkdir(parents=True)
+            platform_os = "darwin" if os.uname().sysname == "Darwin" else "linux"
+            platform_arch = "arm64" if os.uname().machine in {"arm64", "aarch64"} else "amd64"
             for skill_name, command in SKILL_LAUNCHERS.items():
-                installed = bin_dir / command
+                installed = slot_dir / f"{command}-{platform_os}-{platform_arch}"
                 installed.write_text("#!/bin/sh\nprintf '%s\\n' \"$*\"\n", encoding="utf-8")
                 installed.chmod(0o700)
                 launcher = skills_root / skill_name / "scripts" / command
@@ -176,11 +205,11 @@ def validate_mcp() -> dict[str, Any]:
         raise ValidationError("mcp.json must use the closed Agent Plugins 1.0.0 shape")
     servers = config.get("mcpServers")
     expected = {
-        "agent-mailbox": {
+        "waypost": {
             "type": "stdio",
             "command": "./scripts/punaro-plugin-mcp",
         },
-        "agent-mailbox-windows": {
+        "waypost-windows": {
             "type": "stdio",
             "command": "./scripts/punaro-plugin-mcp.cmd",
         },
@@ -193,6 +222,9 @@ def validate_mcp() -> dict[str, Any]:
             raise ValidationError(f"mailbox launcher must be a regular package file: {launcher.name}")
     if not os.access(ROOT / "scripts/punaro-plugin-mcp", os.X_OK):
         raise ValidationError("POSIX mailbox launcher must be executable")
+    windows_launcher = (ROOT / "scripts/punaro-plugin-mcp.cmd").read_text(encoding="utf-8")
+    if "%LOCALAPPDATA%\\Punaro\\bin\\punaro-adapter.exe" not in windows_launcher or "powershell.exe" in windows_launcher.lower() or "\\bootstrap\\current\\" in windows_launcher or "%PATH%" in windows_launcher:
+        raise ValidationError("Windows mailbox launcher must use the stable installer-owned dispatcher")
     return config
 
 
@@ -245,6 +277,7 @@ def validate_codex_adapter(portable: dict[str, Any]) -> None:
 
 
 def main() -> None:
+    validate_git_eol_contract()
     portable = validate_portable_manifest()
     validate_skills()
     portable_mcp = validate_mcp()

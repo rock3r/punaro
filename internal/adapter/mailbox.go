@@ -6,10 +6,12 @@ import (
 	"encoding/json"
 	"fmt"
 	"os/exec"
+	"sort"
 	"strings"
 )
 
-// CLIMailbox is a local process boundary around agent-mailbox. It deliberately
+// CLIMailbox is a local process boundary around Waypost (or the compatible
+// legacy agent-mailbox CLI). It deliberately
 // permits only the group membership and send operations used by the adapter.
 type CLIMailbox struct {
 	binary string
@@ -24,7 +26,7 @@ type commandRunner func(context.Context, []string, []byte) ([]byte, error)
 // the only sessions advertised to Punaro.
 func NewCLIMailbox(binary, stateDir, group string) (*CLIMailbox, error) {
 	if strings.TrimSpace(binary) == "" || !strings.HasPrefix(group, "group/") {
-		return nil, fmt.Errorf("agent-mailbox binary and group/ attachment address are required")
+		return nil, fmt.Errorf("waypost binary and group/ attachment address are required")
 	}
 	return newCLIMailbox(binary, stateDir, group, runAgentMailbox), nil
 }
@@ -43,24 +45,61 @@ func newCLIMailbox(binary, stateDir, group string, runner commandRunner) *CLIMai
 // Attached returns only active memberships. A group member that has detached
 // disappears from the next advertisement without any remote command path.
 func (m *CLIMailbox) Attached(ctx context.Context) ([]string, error) {
-	output, err := m.run(ctx, []string{"group", "members", "--group", m.group, "--json"}, nil)
-	if err != nil {
-		return nil, fmt.Errorf("read local mailbox attachment group: %w", err)
-	}
-	var memberships []struct {
+	type membership struct {
 		Person string `json:"person"`
 		Active bool   `json:"active"`
 	}
-	if err := json.Unmarshal(output, &memberships); err != nil {
-		return nil, fmt.Errorf("decode local mailbox attachment group: %w", err)
-	}
-	endpoints := make([]string, 0, len(memberships))
-	for _, membership := range memberships {
-		if membership.Active && strings.TrimSpace(membership.Person) != "" {
-			endpoints = append(endpoints, membership.Person)
+	const maximumMemberships = 256
+	endpoints := make([]string, 0, maximumMemberships)
+	seen := make(map[string]struct{}, maximumMemberships)
+	cursor := ""
+	count := 0
+	for range 8 {
+		args := []string{"group", "members", "--group", m.group, "--json"}
+		if cursor != "" {
+			args = append(args, "--cursor", cursor)
 		}
+		output, err := m.run(ctx, args, nil)
+		if err != nil {
+			return nil, fmt.Errorf("read local mailbox attachment group: %w", err)
+		}
+		var memberships []membership
+		nextCursor := ""
+		if err := json.Unmarshal(output, &memberships); err != nil {
+			var page struct {
+				Items      []membership `json:"items"`
+				NextCursor string       `json:"next_cursor"`
+			}
+			if pageErr := json.Unmarshal(output, &page); pageErr != nil || page.Items == nil {
+				return nil, fmt.Errorf("decode local mailbox attachment group: %w", err)
+			}
+			memberships, nextCursor = page.Items, page.NextCursor
+		}
+		count += len(memberships)
+		if count > maximumMemberships {
+			return nil, fmt.Errorf("decode local mailbox attachment group: membership limit exceeded")
+		}
+		for _, membership := range memberships {
+			person := strings.TrimSpace(membership.Person)
+			if !membership.Active || person == "" {
+				continue
+			}
+			if _, duplicate := seen[person]; duplicate {
+				return nil, fmt.Errorf("decode local mailbox attachment group: duplicate active member")
+			}
+			seen[person] = struct{}{}
+			endpoints = append(endpoints, person)
+		}
+		if nextCursor == "" {
+			sort.Strings(endpoints)
+			return endpoints, nil
+		}
+		if nextCursor == cursor || len(nextCursor) > 4096 || strings.ContainsAny(nextCursor, "\r\n\x00") {
+			return nil, fmt.Errorf("decode local mailbox attachment group: invalid cursor")
+		}
+		cursor = nextCursor
 	}
-	return endpoints, nil
+	return nil, fmt.Errorf("decode local mailbox attachment group: pagination limit exceeded")
 }
 
 // Send forwards one typed inert envelope to the local personal mailbox.
@@ -81,10 +120,10 @@ func (m *CLIMailbox) Send(ctx context.Context, endpoint string, message InboundM
 
 func runAgentMailbox(ctx context.Context, argv []string, stdin []byte) ([]byte, error) {
 	if len(argv) == 0 {
-		return nil, fmt.Errorf("agent-mailbox command is required")
+		return nil, fmt.Errorf("waypost command is required")
 	}
-	// #nosec G204 -- argv is assembled only from the local operator's adapter
-	// configuration and fixed agent-mailbox subcommands; no relay or mailbox
+	// #nosec G204,G702 -- argv is assembled only from the local operator's adapter
+	// configuration and fixed Waypost-compatible subcommands; no relay or mailbox
 	// body data can select the executable or command arguments.
 	command := exec.CommandContext(ctx, argv[0], argv[1:]...)
 	command.Stdin = bytes.NewReader(stdin)
@@ -92,7 +131,7 @@ func runAgentMailbox(ctx context.Context, argv []string, stdin []byte) ([]byte, 
 	if err != nil {
 		// Do not include command output: a mailbox implementation might echo
 		// untrusted body data in an error response.
-		return nil, fmt.Errorf("agent-mailbox command failed: %w", err)
+		return nil, fmt.Errorf("waypost command failed: %w", err)
 	}
 	return output, nil
 }

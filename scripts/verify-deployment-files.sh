@@ -23,19 +23,31 @@ production_compose_test=scripts/test-production-compose.sh
 production_compose_bootstrap_test=scripts/test-production-compose-bootstrap.sh
 memory_onboarding_e2e_test=scripts/test-memory-onboarding-e2e.sh
 release_artifact_builder=scripts/build-release-artifacts.sh
+release_candidate_tag_generator=scripts/release-candidate-tag.sh
+release_candidate_tag_test=scripts/test-release-candidate-tag.sh
 release_assemble_test=scripts/test-assemble-release.sh
+release_publish_test=scripts/test-publish-signed-release.sh
 macos_sign_script=scripts/sign-notarize-macos.sh
 macos_import_script=scripts/import-macos-signing-cert.sh
 macos_sign_test=scripts/test-sign-notarize-macos.sh
+doctor_docs=docs/doctor.md
+operator_guide=docs/operator-guide.md
+installation_docs=docs/installation.md
 
-for path in "$unit" "$example" "$launch_agent" "$adapter_installer" "$client_installer" "$adapter_installer_test" "$server_installer" "$server_installer_test" "$attachment_relay_configurer" "$attachment_relay_configurer_test" "$agent_guidance_installer" "$agent_guidance_installer_test" "$windows_client_installer" "$windows_guidance_installer" "$windows_client_installer_test" "$windows_adapter_runner" "$windows_environment_importer" "$production_compose_verifier" "$production_compose_test" "$production_compose_bootstrap_test" "$memory_onboarding_e2e_test" "$release_artifact_builder" "$release_assemble_test" "$macos_sign_script" "$macos_import_script" "$macos_sign_test" scripts/production-compose deploy/compose/postgres-bootstrap.sh deploy/compose/postgres-entrypoint.sh docker-compose.memory-onboarding-e2e.yml .github/workflows/release.yml .github/workflows/macos-notarize.yml deploy/macos/hardened-runtime.entitlements; do
+for path in "$unit" "$example" "$launch_agent" "$adapter_installer" "$client_installer" "$adapter_installer_test" "$server_installer" "$server_installer_test" "$attachment_relay_configurer" "$attachment_relay_configurer_test" "$agent_guidance_installer" "$agent_guidance_installer_test" "$windows_client_installer" "$windows_guidance_installer" "$windows_client_installer_test" "$windows_adapter_runner" "$windows_environment_importer" "$production_compose_verifier" "$production_compose_test" "$production_compose_bootstrap_test" "$memory_onboarding_e2e_test" "$release_artifact_builder" "$release_candidate_tag_generator" "$release_candidate_tag_test" "$release_assemble_test" "$release_publish_test" "$macos_sign_script" "$macos_import_script" "$macos_sign_test" "$doctor_docs" "$operator_guide" "$installation_docs" scripts/production-compose deploy/compose/postgres-bootstrap.sh deploy/compose/postgres-entrypoint.sh docker-compose.memory-onboarding-e2e.yml .github/workflows/release.yml .github/workflows/macos-notarize.yml deploy/macos/hardened-runtime.entitlements; do
 	if [ ! -f "$path" ]; then
 		printf '%s\n' "missing adapter deployment artifact: $path" >&2
 		exit 1
 	fi
 done
 
-for executable in "$adapter_installer" "$client_installer" "$adapter_installer_test" "$server_installer" "$server_installer_test" "$attachment_relay_configurer" "$attachment_relay_configurer_test" "$agent_guidance_installer" "$agent_guidance_installer_test" "$windows_client_installer_test" "$production_compose_verifier" "$production_compose_test" "$production_compose_bootstrap_test" "$memory_onboarding_e2e_test" "$release_artifact_builder" "$release_assemble_test" "$macos_sign_script" "$macos_import_script" "$macos_sign_test" scripts/production-compose deploy/compose/postgres-bootstrap.sh deploy/compose/postgres-entrypoint.sh; do
+latest_schema=$(find internal/postgres/migrations -type f -name '[0-9][0-9][0-9]_*.sql' -print | sed 's|.*/||; s|_.*||' | sort -n | tail -1 | sed 's/^0*//')
+if [ -z "$latest_schema" ] || ! grep -Fq "currently v$latest_schema" "$operator_guide"; then
+	printf '%s\n' "operator guide does not identify the current schema as v$latest_schema" >&2
+	exit 1
+fi
+
+for executable in "$adapter_installer" "$client_installer" "$adapter_installer_test" "$server_installer" "$server_installer_test" "$attachment_relay_configurer" "$attachment_relay_configurer_test" "$agent_guidance_installer" "$agent_guidance_installer_test" "$windows_client_installer_test" "$production_compose_verifier" "$production_compose_test" "$production_compose_bootstrap_test" "$memory_onboarding_e2e_test" "$release_artifact_builder" "$release_candidate_tag_generator" "$release_candidate_tag_test" "$release_assemble_test" "$release_publish_test" "$macos_sign_script" "$macos_import_script" "$macos_sign_test" scripts/production-compose deploy/compose/postgres-bootstrap.sh deploy/compose/postgres-entrypoint.sh; do
 	if [ ! -x "$executable" ]; then
 		printf '%s\n' "deployment helper is not executable: $executable" >&2
 		exit 1
@@ -46,10 +58,11 @@ for expected in \
 	'<key>Label</key>' \
 	'<string>org.punaro.adapter</string>' \
 	'<key>KeepAlive</key>' \
-	'<true/>' \
+	'<key>SuccessfulExit</key>' \
+	'<false/>' \
 	'<key>ProcessType</key>' \
 	'<string>Background</string>' \
-	'<string>exec "$HOME/.local/bin/punaro-adapter"</string>'; do
+	'<string>exec "$HOME/.local/bin/punaro-bootstrap" run --directory "$HOME/.local/state/punaro-bootstrap"</string>'; do
 	if ! grep -Fq "$expected" "$launch_agent"; then
 		printf '%s\n' "adapter LaunchAgent is missing required setting: $expected" >&2
 		exit 1
@@ -60,6 +73,34 @@ if grep -Eq 'PUNARO_CF_ACCESS_CLIENT_(ID|SECRET)=' "$launch_agent"; then
 	printf '%s\n' 'adapter LaunchAgent must not contain Access credentials' >&2
 	exit 1
 fi
+
+for expected in \
+	'PUNARO_MAILBOX_STATE_DIR=/home/operator/.local/state/waypost' \
+	'PUNARO_AGENT_MAILBOX_BIN=/home/operator/.local/bin/waypost'; do
+	if ! grep -Fqx "$expected" "$example"; then
+		printf '%s\n' "adapter environment example is missing Waypost default: $expected" >&2
+		exit 1
+	fi
+done
+
+if ! grep -Fqx 'ReadWritePaths=%h/.local/state/punaro-adapter %h/.local/state/punaro-bootstrap %h/.local/state/waypost' "$unit"; then
+	printf '%s\n' 'adapter user unit must grant write access to the default Waypost state' >&2
+	exit 1
+fi
+
+if ! grep -Fq 'mailbox_wait' "$doctor_docs"; then
+	printf '%s\n' 'doctor documentation omits the complete legacy mailbox MCP surface' >&2
+	exit 1
+fi
+
+for expected in \
+	'if [ "$mailbox_state_dir" = "$HOME/.local/state/waypost" ]; then' \
+	'^ReadWritePaths=%h/.local/state/punaro-adapter %h/.local/state/punaro-bootstrap %h/.local/state/waypost$'; do
+	if ! grep -Fq "$expected" "$adapter_installer"; then
+		printf '%s\n' "adapter installer cannot render the Waypost systemd sandbox: $expected" >&2
+		exit 1
+	fi
+done
 
 "$adapter_installer_test"
 "$server_installer_test"
@@ -95,8 +136,12 @@ if grep -Fqx 'EnvironmentFile=%h/.config/punaro/adapter.env' "$unit"; then
 	exit 1
 fi
 
-if ! grep -Fqx 'ExecStart=%h/.local/bin/punaro-adapter' "$unit"; then
-	printf '%s\n' 'adapter user unit must exec the owner-reviewed adapter binary' >&2
+if ! grep -Fqx 'ExecStart=%h/.local/bin/punaro-bootstrap run --directory %h/.local/state/punaro-bootstrap' "$unit"; then
+	printf '%s\n' 'adapter user unit must exec punaro-bootstrap run' >&2
+	exit 1
+fi
+if ! grep -Fqx 'Restart=on-failure' "$unit"; then
+	printf '%s\n' 'adapter user unit must restart after a supervised child crash' >&2
 	exit 1
 fi
 
@@ -105,8 +150,8 @@ if ! grep -Fqx 'ProtectHome=read-only' "$unit"; then
 	exit 1
 fi
 
-if ! grep -Fqx 'ReadWritePaths=%h/.local/state/punaro-adapter %h/.local/state/ai-agent/mailbox' "$unit"; then
-	printf '%s\n' 'adapter user unit must limit writable state to its journals and mailbox store' >&2
+if ! grep -Fqx 'ReadWritePaths=%h/.local/state/punaro-adapter %h/.local/state/punaro-bootstrap %h/.local/state/waypost' "$unit"; then
+	printf '%s\n' 'adapter user unit must limit writable state to its journals, bootstrap slots, and mailbox store' >&2
 	exit 1
 fi
 
@@ -119,5 +164,35 @@ if ! grep -Fq 'https://github.com/rock3r/punaro/releases/download' .github/workf
 	printf '%s\n' 'release workflow must name the fixed GitHub Releases origin' >&2
 	exit 1
 fi
+if ! grep -Fq 'docker/setup-buildx-action@37fe631027851001ddb9b187196cc803df7f5f0e # v4.3.0' .github/workflows/release.yml; then
+	printf '%s\n' 'release workflow must configure an attestation-capable pinned Buildx builder' >&2
+	exit 1
+fi
+if ! grep -Fq 'candidate_tag=$(./scripts/release-candidate-tag.sh "$GITHUB_SHA" "$GITHUB_RUN_ID" "$GITHUB_RUN_ATTEMPT")' .github/workflows/release.yml; then
+	printf '%s\n' 'release workflow must publish under a validated run-scoped candidate image tag' >&2
+	exit 1
+fi
+if ! grep -Fq 'cygpath -w "$repo_dir"' "$release_artifact_builder"; then
+	printf '%s\n' 'release artifact builder must normalize its plugin root for native Windows tools' >&2
+	exit 1
+fi
+if ! grep -Fq 'Build release artifacts on Windows' .github/workflows/quality.yml; then
+	printf '%s\n' 'quality workflow must exercise the release artifact builder on Windows' >&2
+	exit 1
+fi
+if ! grep -Fq "go test ./cmd/punaro-enroll -run '^TestWindows'" .github/workflows/quality.yml; then
+	printf '%s\n' 'quality workflow must exercise enrollment DACL tests on Windows' >&2
+	exit 1
+fi
+if ! grep -Fq 'punaro-enroll protect-material' "$installation_docs"; then
+	printf '%s\n' 'installation documentation omits the protected Windows enrollment-transfer remediation' >&2
+	exit 1
+fi
+if ! grep -Fq 'operator_binary_release' "$doctor_docs"; then
+	printf '%s\n' 'doctor documentation omits the host operator-binary release check' >&2
+	exit 1
+fi
 "$release_assemble_test"
+"$release_publish_test"
 "$macos_sign_test"
+"$release_candidate_tag_test"

@@ -4,6 +4,8 @@ package operator
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -40,6 +42,13 @@ func ConfigFile(directory string) string { return filepath.Join(directory, confi
 
 // OverrideFile returns the generated immutable-image Compose file.
 func OverrideFile(directory string) string { return filepath.Join(directory, overrideName) }
+
+// ComposeManifestSHA256 returns the digest of the exact generated Compose
+// artifact written into every current installation and update candidate.
+func ComposeManifestSHA256() string {
+	digest := sha256.Sum256([]byte(composeOverride()))
+	return hex.EncodeToString(digest[:])
+}
 
 // ComposeProjectName returns the stable, installation-specific Docker Compose
 // project name derived from the persisted and database-verified owner identity.
@@ -420,6 +429,36 @@ func Load(directory string) (Installation, error) {
 	}
 	installation.Directory = directory
 	return installation, nil
+}
+
+// LoadContext reads a published installation marker while allowing a caller
+// deadline to bound filesystem inspection, including an individual filesystem
+// operation that is blocked on unresponsive mounted storage.
+func LoadContext(ctx context.Context, directory string) (Installation, error) {
+	if ctx == nil {
+		return Installation{}, errors.New("installation load context is missing")
+	}
+	if err := ctx.Err(); err != nil {
+		return Installation{}, err
+	}
+	type result struct {
+		installation Installation
+		err          error
+	}
+	completed := make(chan result, 1)
+	go func() {
+		installation, err := Load(directory)
+		completed <- result{installation: installation, err: err}
+	}()
+	select {
+	case <-ctx.Done():
+		return Installation{}, ctx.Err()
+	case loaded := <-completed:
+		if err := ctx.Err(); err != nil {
+			return Installation{}, err
+		}
+		return loaded.installation, loaded.err
+	}
 }
 
 func readInstallation(path string) (Installation, error) {

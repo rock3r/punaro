@@ -1,0 +1,18 @@
+{
+  "hooks": {
+    "SessionStart": [{ "hooks": [{ "type": "command", "command": "/absolute/path/to/canopi-claude-hook", "async": true, "timeout": 30 }] }],
+    "UserPromptSubmit": [{ "hooks": [{ "type": "command", "command": "/absolute/path/to/canopi-claude-hook", "async": true, "timeout": 30 }] }],
+    "PreToolUse": [{ "hooks": [{ "type": "command", "command": "/absolute/path/to/canopi-claude-hook", "async": true, "timeout": 30 }] }],
+    "PostToolUse": [{ "hooks": [{ "type": "command", "command": "/absolute/path/to/canopi-claude-hook", "async": true, "timeout": 30 }] }],
+    "PostToolUseFailure": [{ "hooks": [{ "type": "command", "command": "/absolute/path/to/canopi-claude-hook", "async": true, "timeout": 30 }] }],
+    "PostToolBatch": [{ "hooks": [{ "type": "command", "command": "/absolute/path/to/canopi-claude-hook", "async": true, "timeout": 30 }] }],
+    "PermissionRequest": [{ "hooks": [{ "type": "command", "command": "/absolute/path/to/canopi-claude-hook", "async": true, "timeout": 30 }] }],
+    "Elicitation": [{ "hooks": [{ "type": "command", "command": "/absolute/path/to/canopi-claude-hook", "async": true, "timeout": 30 }] }],
+    "ElicitationResult": [{ "hooks": [{ "type": "command", "command": "/absolute/path/to/canopi-claude-hook", "async": true, "timeout": 30 }] }],
+    "Notification": [{ "hooks": [{ "type": "command", "command": "/absolute/path/to/canopi-claude-hook", "async": true, "timeout": 30 }] }],
+    "Stop": [{ "hooks": [{ "type": "command", "command": "/absolute/path/to/canopi-claude-hook", "async": true, "timeout": 30 }] }],
+    "TaskCompleted": [{ "hooks": [{ "type": "command", "command": "/absolute/path/to/canopi-claude-hook", "async": true, "timeout": 30 }] }],
+    "SubagentStart": [{ "hooks": [{ "type": "command", "command": "/absolute/path/to/canopi-claude-hook", "async": true, "timeout": 30 }] }],
+    "SubagentStop": [{ "hooks": [{ "type": "command", "command": "/absolute/path/to/canopi-claude-hook", "async": true, "timeout": 30 }] }]
+  }
+}

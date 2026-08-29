@@ -614,7 +614,8 @@ epochs and retired SQLite sources are permanently non-abortable. A begin that
 failed before epoch insertion is aborted by durably reserving the exact epoch
 as terminal before SQLite reopens, fencing every delayed retry of that begin.
 
-M-5 mounts `POST /v1/enrollments/redeem`, authenticated
+M-5 mounts `POST /v1/enrollments/redeem`, the proof-bound legacy exchange at
+`POST /v1/legacy-enrollments/redeem`, authenticated
 `GET /v1/device/session`, and targetless `POST /v1/device/session/revoke`.
 Redemption requires exact `application/json`, a
 bounded object with four unique string fields, and the store's exact enrollment
@@ -631,6 +632,13 @@ or explicit dynamic-all project discover/read/write and attach-unclaimed;
 conversation send/receive; memory search/read/propose/write; and attachment
 upload/download. It excludes attachment delete, every administer/purge
 capability, merge/membership administration, backup, and restore.
+
+The `service` template contains no grants. It cannot be combined with project
+scope, but the owner may bind it to one exact pending legacy principal. That
+combination changes only the credential form after proof of the registered
+Ed25519 key; it does not grant project, conversation, memory, attachment, or
+installation authority. Server doctor migration uses this path so its bearer
+continues to resolve the same relay identity after cutover.
 
 ## Server invariants
 
@@ -669,8 +677,10 @@ capability, merge/membership administration, backup, and restore.
 
 ## OCI and Compose contract
 
-The release publishes one semantically versioned, digest-addressable Punaro
-application image for Linux amd64 and arm64. Role subcommands cover server,
+The first alpha release publishes one semantically versioned,
+digest-addressable Punaro application image for the Linux/amd64 LXC host plus
+native client artifacts for the documented Darwin, Linux, and Windows matrix.
+An arm64 server image remains a later platform expansion. Role subcommands cover server,
 worker, gateway, migration, administration, and supported backup operations.
 An SBOM, vulnerability scan, database compatibility range, rollback floor,
 Compose bundle, and migration/backup release notes accompany it. `latest` is

@@ -135,8 +135,7 @@ func TestE2ERealTwoClientRelayLifecycle(t *testing.T) {
 	e2eInstallClient(t, root, receiverHome, relayURL, receiverMachineID, mailbox, receiverMailboxState, false)
 	e2eRewriteRelayURL(t, senderProfile, "http://"+proxy.listener.Addr().String())
 	e2eRewriteRelayURL(t, receiverProfile, "http://"+proxy.listener.Addr().String())
-	receiverAdapter := filepath.Join(receiverHome, ".local", "bin", "punaro-adapter")
-	servicePath := e2eIsolatedLaunchAgent(t, installedServicePath, receiverHome, receiverProfile, receiverAdapter, fixture)
+	servicePath := e2eIsolatedLaunchAgent(t, installedServicePath, receiverHome, receiverProfile, fixture)
 	t.Cleanup(func() { _ = e2eLaunchctl("bootout", launchDomain, servicePath) })
 
 	senderEndpoint := "agent/" + senderMachineID + "/session"
@@ -383,7 +382,7 @@ func e2eRewriteRelayURL(t *testing.T, profile, relayURL string) {
 	}
 }
 
-func e2eIsolatedLaunchAgent(t *testing.T, installedServicePath, home, profile, binary, fixture string) string {
+func e2eIsolatedLaunchAgent(t *testing.T, installedServicePath, home, profile, fixture string) string {
 	t.Helper()
 	raw, err := os.ReadFile(installedServicePath)
 	if err != nil {
@@ -392,10 +391,12 @@ func e2eIsolatedLaunchAgent(t *testing.T, installedServicePath, home, profile, b
 	label := "org.punaro.adapter.e2e-" + strings.ReplaceAll(uuid.NewString(), "-", "")
 	labelPattern := regexp.MustCompile(`<key>Label</key>\s*<string>org\.punaro\.adapter</string>`)
 	rewritten := labelPattern.ReplaceAll(raw, []byte("<key>Label</key>\n  <string>"+label+"</string>"))
-	rewritten = []byte(strings.Replace(string(rewritten), `set -a; . "$HOME/.config/punaro/adapter.env"; set +a; `, "", 1))
-	isolationCommand := `exec /usr/bin/env -i HOME="` + home + `" PATH="/usr/bin:/bin:/usr/sbin:/sbin" ` + adapterProfileFileEnv + `="` + profile + `" "` + binary + `"`
-	rewritten = []byte(strings.Replace(string(rewritten), `exec "$HOME/.local/bin/punaro-adapter"`, isolationCommand, 1))
-	if string(rewritten) == string(raw) || strings.Contains(string(rewritten), `"$HOME/.config/punaro/adapter.env"`) || strings.Contains(string(rewritten), `"$HOME/.local/bin/punaro-adapter"`) || !strings.Contains(string(rewritten), `exec /usr/bin/env -i`) || !strings.Contains(string(rewritten), adapterProfileFileEnv) {
+	serviceCommand := `exec "$HOME/.local/bin/punaro-bootstrap" run --directory "$HOME/.local/state/punaro-bootstrap"`
+	bootstrap := filepath.Join(home, ".local", "bin", "punaro-bootstrap")
+	bootstrapState := filepath.Join(home, ".local", "state", "punaro-bootstrap")
+	isolationCommand := `exec /usr/bin/env -i HOME="` + home + `" PATH="/usr/bin:/bin:/usr/sbin:/sbin" ` + adapterProfileFileEnv + `="` + profile + `" "` + bootstrap + `" run --directory "` + bootstrapState + `"`
+	rewritten = []byte(strings.Replace(string(rewritten), serviceCommand, isolationCommand, 1))
+	if string(rewritten) == string(raw) || strings.Contains(string(rewritten), `"$HOME/.local/bin/punaro-bootstrap"`) || strings.Contains(string(rewritten), `"$HOME/.local/state/punaro-bootstrap"`) || !strings.Contains(string(rewritten), `exec /usr/bin/env -i`) || !strings.Contains(string(rewritten), adapterProfileFileEnv) || !strings.Contains(string(rewritten), bootstrap) {
 		t.Fatal("isolate installed receiver service definition")
 	}
 	path := filepath.Join(fixture, "receiver-launch-agent.plist")

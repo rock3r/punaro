@@ -5,6 +5,8 @@ package main
 import (
 	"bytes"
 	"context"
+	"crypto/ed25519"
+	"crypto/sha256"
 	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
@@ -22,6 +24,7 @@ import (
 	"github.com/rock3r/punaro/internal/adapter"
 	"github.com/rock3r/punaro/internal/clientidentity"
 	"github.com/rock3r/punaro/internal/clienttransport"
+	"github.com/rock3r/punaro/internal/legacyexchange"
 )
 
 const (
@@ -61,14 +64,15 @@ type enrollmentEnvelope struct {
 }
 
 type enrollmentPreview struct {
-	Template    string            `json:"template"`
-	PreviewHash string            `json:"preview_hash"`
-	Grants      []json.RawMessage `json:"grants"`
+	Template          string            `json:"template"`
+	LegacyPrincipalID string            `json:"legacy_principal_id,omitempty"`
+	PreviewHash       string            `json:"preview_hash"`
+	Grants            []json.RawMessage `json:"grants"`
 }
 
 type enrollmentGrantPreview struct {
 	Scope      string `json:"scope"`
-	ProjectID  string `json:"project_id"`
+	ProjectID  string `json:"project_id,omitempty"`
 	Capability string `json:"capability"`
 }
 
@@ -78,12 +82,13 @@ type accessMaterial struct {
 }
 
 type redemptionJournal struct {
-	EnrollmentID   string `json:"enrollment_id"`
-	ClientBinding  string `json:"client_binding"`
-	Code           string `json:"code"`
-	IdempotencyKey string `json:"idempotency_key"`
-	CredentialPath string `json:"credential_path"`
-	Credential     string `json:"credential,omitempty"`
+	EnrollmentID    string `json:"enrollment_id"`
+	ClientBinding   string `json:"client_binding"`
+	Code            string `json:"code"`
+	IdempotencyKey  string `json:"idempotency_key"`
+	CredentialPath  string `json:"credential_path"`
+	LegacyPublicKey string `json:"legacy_public_key,omitempty"`
+	Credential      string `json:"credential,omitempty"`
 }
 
 type redemptionRequest struct {
@@ -108,29 +113,47 @@ func main() { os.Exit(run(os.Args[1:], os.Stdout, os.Stderr)) }
 
 func run(args []string, stdout, stderr io.Writer) int {
 	if len(args) == 0 {
-		_, _ = fmt.Fprintln(stderr, "usage: punaro-enroll prepare|redeem|recover")
+		_, _ = fmt.Fprintln(stderr, "usage: punaro-enroll prepare|protect-material|redeem|recover")
 		return 2
 	}
 	switch args[0] {
 	case "prepare":
 		return runPrepare(args[1:], stdout, stderr)
+	case "protect-material":
+		return runProtectMaterial(args[1:], stdout, stderr)
 	case "redeem":
 		return runRedeem(args[1:], stdout, stderr, false)
 	case "recover":
 		return runRedeem(args[1:], stdout, stderr, true)
 	default:
-		_, _ = fmt.Fprintln(stderr, "usage: punaro-enroll prepare|redeem|recover")
+		_, _ = fmt.Fprintln(stderr, "usage: punaro-enroll prepare|protect-material|redeem|recover")
 		return 2
 	}
+}
+
+func runProtectMaterial(args []string, stdout, stderr io.Writer) int {
+	flags := flag.NewFlagSet("protect-material", flag.ContinueOnError)
+	flags.SetOutput(io.Discard)
+	path := flags.String("file", "", "absolute transferred enrollment-material file")
+	if flags.Parse(args) != nil || flags.NArg() != 0 || *path == "" {
+		return invalid(stderr)
+	}
+	if protectEnrollmentMaterial(*path) != nil {
+		_, _ = fmt.Fprintln(stderr, "punaro-enroll protect-material failed")
+		return 1
+	}
+	_, _ = fmt.Fprintln(stdout, "enrollment material protected")
+	return 0
 }
 
 func runPrepare(args []string, stdout, stderr io.Writer) int {
 	flags := flag.NewFlagSet("prepare", flag.ContinueOnError)
 	flags.SetOutput(io.Discard)
-	origin := flags.String("origin", "", "fixed Punaro HTTPS origin")
+	origin := flags.String("origin", "", "fixed Punaro origin")
 	stateDir := flags.String("state-dir", "", "absolute private enrollment state directory")
 	allowLANHTTP := flags.Bool("allow-lan-http", false, "explicitly allow plaintext credentials on the pinned trusted LAN")
 	trustedLANCIDR := flags.String("trusted-lan-cidr", "", "private or link-local CIDR containing the literal HTTP origin")
+	legacyMachineID := flags.String("legacy-machine-id", "", "registered legacy machine identity to exchange")
 	if flags.Parse(args) != nil || flags.NArg() != 0 || *stateDir == "" {
 		return invalid(stderr)
 	}
@@ -147,11 +170,11 @@ func runPrepare(args []string, stdout, stderr io.Writer) int {
 		if policy.AllowLANHTTP {
 			version = clientidentity.LANVersion
 		}
-		state = clientidentity.State{Version: version, Origin: canonical, ClientBinding: binding, AllowLANHTTP: policy.AllowLANHTTP, TrustedLANCIDR: policy.TrustedLANCIDR}
+		state = clientidentity.State{Version: version, Origin: canonical, ClientBinding: binding, LegacyMachineID: strings.TrimSpace(*legacyMachineID), AllowLANHTTP: policy.AllowLANHTTP, TrustedLANCIDR: policy.TrustedLANCIDR}
 		if err := writePrivateAtomicNew(identityPath, mustEncodeIdentity(state)); err != nil {
 			return enrollmentError(stderr, "state preparation failed", 2)
 		}
-	} else if err != nil || state.Match(canonical, state.ClientBinding, "") != nil || state.LegacyMachineID != "" || state.TransportPolicy() != policy {
+	} else if err != nil || state.Match(canonical, state.ClientBinding, strings.TrimSpace(*legacyMachineID)) != nil || state.TransportPolicy() != policy {
 		return enrollmentError(stderr, "state preparation failed", 2)
 	}
 	if err := syncPrivateDirectory(*stateDir); err != nil {
@@ -167,6 +190,7 @@ func runRedeem(args []string, stdout, stderr io.Writer, recoveryOnly bool) int {
 	materialPath := flags.String("enrollment-file", "", "absolute protected enrollment material file")
 	credentialPath := flags.String("credential-file", "", "absolute private credential destination under state-dir")
 	accessPath := flags.String("access-file", "", "absolute protected Cloudflare Access service-token file")
+	legacyKeyPath := flags.String("legacy-private-key-file", "", "absolute protected legacy Ed25519 private-key file")
 	if flags.Parse(args) != nil || flags.NArg() != 0 || *stateDir == "" || *credentialPath == "" || (!recoveryOnly && *materialPath == "") || (recoveryOnly && *materialPath != "") {
 		return invalid(stderr)
 	}
@@ -174,8 +198,17 @@ func runRedeem(args []string, stdout, stderr io.Writer, recoveryOnly bool) int {
 		return enrollmentError(stderr, "private enrollment state is unsafe", 2)
 	}
 	state, err := loadIdentity(filepath.Join(*stateDir, identityFileName))
-	if err != nil || state.LegacyMachineID != "" {
+	if err != nil || (state.LegacyMachineID == "") != (*legacyKeyPath == "") {
 		return enrollmentError(stderr, "private enrollment state is unsafe", 2)
+	}
+	var legacyPrivateKey ed25519.PrivateKey
+	legacyPublicKey := ""
+	if *legacyKeyPath != "" {
+		legacyPrivateKey, err = loadLegacyPrivateKey(*legacyKeyPath)
+		if err != nil {
+			return enrollmentError(stderr, "legacy machine credential is invalid", 2)
+		}
+		legacyPublicKey = base64.RawURLEncoding.EncodeToString(legacyPrivateKey.Public().(ed25519.PublicKey))
 	}
 	unlock, err := lockEnrollmentState(*stateDir)
 	if err != nil {
@@ -227,19 +260,22 @@ func runRedeem(args []string, stdout, stderr io.Writer, recoveryOnly bool) int {
 			if err != nil {
 				return enrollmentError(stderr, "enrollment recovery could not be created", 1)
 			}
-			journal = redemptionJournal{EnrollmentID: material.EnrollmentID, ClientBinding: material.ClientBinding, Code: material.Code, IdempotencyKey: key.String(), CredentialPath: *credentialPath}
+			journal = redemptionJournal{EnrollmentID: material.EnrollmentID, ClientBinding: material.ClientBinding, Code: material.Code, IdempotencyKey: key.String(), CredentialPath: *credentialPath, LegacyPublicKey: legacyPublicKey}
 			if !journalCanPersistCredential(journal) || writePrivateAtomicNew(journalPath, mustJSON(journal)) != nil {
 				return enrollmentError(stderr, "enrollment recovery could not be created", 1)
 			}
 		}
 	}
-	if journal.ClientBinding != state.ClientBinding || !validJournal(journal) {
+	if journal.ClientBinding != state.ClientBinding || !validJournal(journal) || (state.LegacyMachineID == "") != (journal.LegacyPublicKey == "") {
 		return enrollmentError(stderr, "private enrollment state is unsafe", 2)
+	}
+	if journal.LegacyPublicKey != legacyPublicKey {
+		return enrollmentError(stderr, "legacy machine credential does not match existing enrollment recovery", 2)
 	}
 	if err := syncPrivateDirectory(*stateDir); err != nil {
 		return enrollmentError(stderr, "enrollment recovery could not be made durable; retry this command", 1)
 	}
-	response, result := postRedemption(state.Origin, journal, accessToken, state.TransportPolicy())
+	response, result := postRedemption(state.Origin, journal, accessToken, state.TransportPolicy(), legacyPrivateKey)
 	if result == redemptionRejected {
 		if err := removeJournalIfCurrent(journalPath, journal); err != nil {
 			return enrollmentError(stderr, "enrollment was rejected; remove the private recovery file before requesting a new enrollment", 1)
@@ -361,7 +397,7 @@ func loadMaterial(path string) (enrollmentMaterial, error) {
 		return enrollmentMaterial{}, errors.New("invalid enrollment material")
 	}
 	var preview enrollmentPreview
-	if err := decodeExact(records[0], &preview, "template", "preview_hash", "grants"); err != nil || preview.Template != "trusted-agent" || !validPreviewHash(preview.PreviewHash) || !validGrantPreview(preview.Grants) {
+	if err := decodeFields(records[0], &preview, []string{"template", "preview_hash", "grants"}, []string{"legacy_principal_id"}); err != nil || !validEnrollmentPreview(preview) {
 		return enrollmentMaterial{}, errors.New("invalid enrollment material")
 	}
 	envelope, err := decodeEnrollmentEnvelope(records[1])
@@ -373,7 +409,7 @@ func loadMaterial(path string) (enrollmentMaterial, error) {
 
 func decodeEnrollmentEnvelope(raw []byte) (enrollmentEnvelope, error) {
 	var envelope enrollmentEnvelope
-	if err := decodeExact(raw, &envelope, "enrollment_id", "client_binding", "code", "expires_at", "preview_hash", "grants"); err != nil || !validMaterial(enrollmentMaterial{EnrollmentID: envelope.EnrollmentID, ClientBinding: envelope.ClientBinding, Code: envelope.Code}) || envelope.ExpiresAt.IsZero() || !validPreviewHash(envelope.PreviewHash) || !validGrantPreview(envelope.Grants) {
+	if err := decodeExact(raw, &envelope, "enrollment_id", "client_binding", "code", "expires_at", "preview_hash", "grants"); err != nil || !validMaterial(enrollmentMaterial{EnrollmentID: envelope.EnrollmentID, ClientBinding: envelope.ClientBinding, Code: envelope.Code}) || envelope.ExpiresAt.IsZero() || !validPreviewHash(envelope.PreviewHash) || !validGrantPreview(envelope.Grants, true) {
 		return enrollmentEnvelope{}, errors.New("invalid enrollment material")
 	}
 	return envelope, nil
@@ -409,9 +445,52 @@ func validPreviewHash(value string) bool {
 	return err == nil && len(decoded) == 32 && hex.EncodeToString(decoded) == value
 }
 
-func validGrantPreview(rawGrants []json.RawMessage) bool {
-	if len(rawGrants) == 0 {
+func validEnrollmentPreview(preview enrollmentPreview) bool {
+	if !validPreviewHash(preview.PreviewHash) || (preview.LegacyPrincipalID != "" && !validUUID(preview.LegacyPrincipalID)) {
 		return false
+	}
+	validGrants := false
+	switch preview.Template {
+	case "trusted-agent":
+		validGrants = validGrantPreview(preview.Grants, false)
+	case "service":
+		validGrants = len(preview.Grants) == 0
+	default:
+		return false
+	}
+	return validGrants && previewHashMatches(preview)
+}
+
+func previewHashMatches(preview enrollmentPreview) bool {
+	grants := make([]enrollmentGrantPreview, len(preview.Grants))
+	for index, raw := range preview.Grants {
+		if err := decodeFields(raw, &grants[index], []string{"scope", "capability"}, []string{"project_id"}); err != nil {
+			return false
+		}
+	}
+	var value any = grants
+	if preview.LegacyPrincipalID != "" {
+		value = struct {
+			Grants            []enrollmentGrantPreview `json:"grants"`
+			LegacyPrincipalID string                   `json:"legacy_principal_id"`
+		}{Grants: grants, LegacyPrincipalID: preview.LegacyPrincipalID}
+	}
+	body, err := json.Marshal(value)
+	if err != nil {
+		return false
+	}
+	digest := sha256.Sum256(body)
+	return matchesHexDigest(preview.PreviewHash, digest[:])
+}
+
+func matchesHexDigest(encoded string, expected []byte) bool {
+	decoded, err := hex.DecodeString(encoded)
+	return err == nil && len(decoded) == len(expected) && bytes.Equal(decoded, expected)
+}
+
+func validGrantPreview(rawGrants []json.RawMessage, allowEmpty bool) bool {
+	if len(rawGrants) == 0 {
+		return allowEmpty
 	}
 	for _, raw := range rawGrants {
 		var grant enrollmentGrantPreview
@@ -454,6 +533,21 @@ func loadAccessToken(path string) (adapter.AccessServiceToken, error) {
 	return adapter.AccessServiceToken{ClientID: value.ClientID, ClientSecret: value.ClientSecret}, nil
 }
 
+func loadLegacyPrivateKey(path string) (ed25519.PrivateKey, error) {
+	if !filepath.IsAbs(path) || filepath.Clean(path) != path {
+		return nil, errors.New("unsafe legacy machine credential")
+	}
+	raw, err := readPrivate(path, maxEnrollmentFile)
+	if err != nil {
+		return nil, err
+	}
+	decoded, err := base64.RawURLEncoding.Strict().DecodeString(strings.TrimSpace(string(raw)))
+	if err != nil || len(decoded) != ed25519.PrivateKeySize || base64.RawURLEncoding.EncodeToString(decoded) != strings.TrimSpace(string(raw)) {
+		return nil, errors.New("invalid legacy machine credential")
+	}
+	return ed25519.PrivateKey(decoded), nil
+}
+
 func validAccessValue(value string) bool {
 	return value != "" && !strings.ContainsAny(value, " \t\r\n")
 }
@@ -464,7 +558,7 @@ func loadJournal(path string) (redemptionJournal, error) {
 		return redemptionJournal{}, err
 	}
 	var value redemptionJournal
-	if err := decodeFields(raw, &value, []string{"enrollment_id", "client_binding", "code", "idempotency_key", "credential_path"}, []string{"credential"}); err != nil || !validJournal(value) {
+	if err := decodeFields(raw, &value, []string{"enrollment_id", "client_binding", "code", "idempotency_key", "credential_path"}, []string{"legacy_public_key", "credential"}); err != nil || !validJournal(value) {
 		return redemptionJournal{}, errors.New("invalid recovery journal")
 	}
 	return value, nil
@@ -495,7 +589,11 @@ func validMaterial(value enrollmentMaterial) bool {
 	return validUUID(value.EnrollmentID) && validUUID(value.ClientBinding) && validCode(value.Code)
 }
 func validJournal(value redemptionJournal) bool {
-	return validMaterial(enrollmentMaterial{EnrollmentID: value.EnrollmentID, ClientBinding: value.ClientBinding, Code: value.Code}) && validUUID(value.IdempotencyKey) && safeStateDir(value.CredentialPath) && (value.Credential == "" || validStoredCredential(value.Credential))
+	return validMaterial(enrollmentMaterial{EnrollmentID: value.EnrollmentID, ClientBinding: value.ClientBinding, Code: value.Code}) && validUUID(value.IdempotencyKey) && safeStateDir(value.CredentialPath) && (value.LegacyPublicKey == "" || validLegacyJournalPublicKey(value.LegacyPublicKey)) && (value.Credential == "" || validStoredCredential(value.Credential))
+}
+func validLegacyJournalPublicKey(value string) bool {
+	decoded, err := base64.RawURLEncoding.Strict().DecodeString(value)
+	return err == nil && len(decoded) == ed25519.PublicKeySize && base64.RawURLEncoding.EncodeToString(decoded) == value
 }
 func validUUID(value string) bool {
 	parsed, err := uuid.Parse(value)
@@ -617,12 +715,31 @@ const (
 	redemptionSucceeded
 )
 
-func postRedemption(origin string, journal redemptionJournal, accessToken adapter.AccessServiceToken, policy clienttransport.Policy) (redemptionResponse, redemptionResult) {
-	body, err := json.Marshal(redemptionRequest{EnrollmentID: journal.EnrollmentID, ClientBinding: journal.ClientBinding, Code: journal.Code, IdempotencyKey: journal.IdempotencyKey})
+func postRedemption(origin string, journal redemptionJournal, accessToken adapter.AccessServiceToken, policy clienttransport.Policy, legacyPrivateKey ed25519.PrivateKey) (redemptionResponse, redemptionResult) {
+	requestValue := any(redemptionRequest{EnrollmentID: journal.EnrollmentID, ClientBinding: journal.ClientBinding, Code: journal.Code, IdempotencyKey: journal.IdempotencyKey})
+	path := "/v1/enrollments/redeem"
+	if len(legacyPrivateKey) == ed25519.PrivateKeySize {
+		code, err := base64.RawURLEncoding.Strict().DecodeString(journal.Code)
+		if err != nil {
+			return redemptionResponse{}, redemptionUnavailable
+		}
+		digest := sha256.Sum256(code)
+		signature := ed25519.Sign(legacyPrivateKey, legacyexchange.Transcript(journal.EnrollmentID, journal.ClientBinding, journal.IdempotencyKey, digest))
+		requestValue = struct {
+			EnrollmentID   string `json:"enrollment_id"`
+			ClientBinding  string `json:"client_binding"`
+			Code           string `json:"code"`
+			IdempotencyKey string `json:"idempotency_key"`
+			PublicKey      string `json:"legacy_public_key"`
+			Signature      string `json:"legacy_signature"`
+		}{EnrollmentID: journal.EnrollmentID, ClientBinding: journal.ClientBinding, Code: journal.Code, IdempotencyKey: journal.IdempotencyKey, PublicKey: base64.RawURLEncoding.EncodeToString(legacyPrivateKey.Public().(ed25519.PublicKey)), Signature: base64.RawURLEncoding.EncodeToString(signature)}
+		path = "/v1/legacy-enrollments/redeem"
+	}
+	body, err := json.Marshal(requestValue)
 	if err != nil {
 		return redemptionResponse{}, redemptionUnavailable
 	}
-	request, err := http.NewRequestWithContext(context.Background(), http.MethodPost, origin+"/v1/enrollments/redeem", bytes.NewReader(body))
+	request, err := http.NewRequestWithContext(context.Background(), http.MethodPost, origin+path, bytes.NewReader(body))
 	if err != nil {
 		return redemptionResponse{}, redemptionUnavailable
 	}

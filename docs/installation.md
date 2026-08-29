@@ -12,8 +12,10 @@ installers:
 The scripts build from the source checkout you run them from. Use a reviewed,
 pinned checkout or a verified release artifact; do not pipe a network download
 into a shell. `punaro-bootstrap` pulls from GitHub Releases, documented in
-[github-releases.md](github-releases.md). Until a catalog/manifest pair is
-signed, install from a reviewed checkout. Neither installer accepts or prints secret values. For the
+[github-releases.md](github-releases.md). The one-time client installer seeds a
+reviewed checkout; after a signed catalog/manifest pair is published, use
+`punaro-bootstrap update` for release changes instead of rebuilding in place.
+Neither installer accepts or prints secret values. For the
 supported fresh server path, follow the [production Compose lifecycle](production-compose.md#first-installation).
 It is the sole path that configures relay authority, device authentication,
 trusted attachment storage, memory APIs, ingress, and lifecycle recovery
@@ -92,8 +94,8 @@ package image without creating users, changing systemd, or starting services.
 
 ## 2. Install one client machine
 
-Install `agent-mailbox` first. Then, as the same unprivileged user that owns
-that mailbox state, run from the reviewed Punaro checkout:
+Install Waypost 0.8 or newer first. Then, as the same unprivileged user that
+owns that mailbox state, run from the reviewed Punaro checkout:
 
 ```sh
 ./scripts/install-client.sh \
@@ -102,17 +104,49 @@ that mailbox state, run from the reviewed Punaro checkout:
   --agent-guidance-dir /path/to/agent-project
 ```
 
-The machine ID must be unique. The script derives the exclusive endpoint
-namespace `agent/laptop-review/`, builds `punaro-adapter`, creates the local
-`group/punaro-attached` group, writes owner-only local state, installs the
-launchd (macOS) or user-systemd (Linux) service definition, and prints a
-public enrollment JSON record. launchd declares it as a background process;
+The machine ID must be unique. The script derives the checked-in plugin release
+and skill digest and embeds them into the fixed bootstrap and adapter binaries,
+so doctor can compare the installed supervisor to signed-release compatibility
+policy. It also derives the exclusive endpoint namespace
+`agent/laptop-review/`, builds `punaro-adapter` and
+`punaro-bootstrap`, seeds the current bootstrap slot from that checkout,
+creates the local `group/punaro-attached` group, writes owner-only local
+state, installs the launchd (macOS) or user-systemd (Linux) service
+definition that launches `punaro-bootstrap run`, and prints a public
+enrollment JSON record. launchd declares it as a background process;
 systemd disables terminal input and sends output only to the journal. It does
 not start the adapter yet.
 
+New installs auto-detect `waypost` before the legacy `agent-mailbox` binary and
+use `~/.local/state/waypost` for Waypost state. Use `--waypost-bin` and
+`--mailbox-state-dir` when the reviewed executable or state lives elsewhere.
+`--agent-mailbox-bin` remains a deprecated option alias so an existing legacy
+installation can be reinstalled without changing its mailbox boundary.
+
+When the signed release catalog is available, install it into the managed slot
+and keep the fixed bootstrap-owned service lifecycle:
+
+```sh
+punaro-bootstrap update \
+  --directory "$HOME/.local/state/punaro-bootstrap" \
+  --keys-file /absolute/private/punaro-release.pub \
+  --release v0.1.0-alpha.11
+punaro-bootstrap doctor \
+  --directory "$HOME/.local/state/punaro-bootstrap" \
+  --keys-file /absolute/private/punaro-release.pub \
+  --machine-id laptop-review
+punaro-adapter doctor --plugin-root /absolute/installed/punaro-plugin
+```
+
+The update verifies the signed catalog and manifest plus every exact artifact
+length/digest before changing slots. Do not download a binary named `latest`,
+replace current-slot files manually, or run a versioned adapter directly from
+the service. See [GitHub Releases](github-releases.md) and
+[doctor](doctor.md).
+
 ### Windows 10/11 client
 
-Install `agent-mailbox.exe` and Go first. Run this from the reviewed checkout
+Install `waypost.exe` 0.8 or newer and Go first. Run this from the reviewed checkout
 in a normal interactive PowerShell session for the Windows user that owns that
 mailbox:
 
@@ -122,6 +156,11 @@ powershell -NoProfile -File .\scripts\install-client.ps1 `
   -MachineId windows-review `
   -AgentGuidanceDir C:\src\agent-project
 ```
+
+The Windows installer auto-detects `waypost.exe` before a legacy
+`agent-mailbox.exe` and uses `%LOCALAPPDATA%\waypost` for new Waypost state.
+Use `-WaypostBin` and `-MailboxStateDir` for explicit reviewed locations;
+`-AgentMailboxBin` remains a deprecated PowerShell alias.
 
 The installer writes private state below `%LOCALAPPDATA%\Punaro`, applies an
 exclusive ACL for the current user, and registers the hidden **Punaro Adapter**
@@ -135,7 +174,30 @@ verify with:
 
 ```powershell
 Get-ScheduledTask -TaskName 'Punaro Adapter'
+& "$env:LOCALAPPDATA\Punaro\bin\punaro-bootstrap.exe" doctor `
+  --directory "$env:LOCALAPPDATA\Punaro\bootstrap" `
+  --keys-file C:\absolute\private\punaro-release.pub `
+  --machine-id windows-review
+& "$env:LOCALAPPDATA\Punaro\bin\punaro-adapter.exe" doctor `
+  --plugin-root C:\absolute\installed\punaro-plugin
 ```
+
+When reinstalling over an enabled repeating task, the installer disables it
+for the complete replacement critical section. It then stops every task instance,
+including one that started while the disable fence was being acquired, and every
+process using the exact installed bootstrap image before replacing any managed
+executable. It verifies process image identity and bounded exit first, restores
+the prior enabled and running state on failure, reports restoration failures with
+the original installer error, and does not terminate unrelated processes or
+weaken the binary replaceability fence.
+
+An alpha.8 failure may leave that bootstrap image running after the scheduled
+task has already returned to **Ready**. When the enabled repeating task still
+exists, alpha.9 fences it and terminates only the process whose image is exactly
+`%LOCALAPPDATA%\Punaro\bin\punaro-bootstrap.exe`. If that task definition no
+longer exists or is deliberately disabled, verify and stop that exact image
+manually before rerunning the installer. Do not disable the replaceability fence
+or terminate by name.
 
 The installer also builds `%LOCALAPPDATA%\Punaro\bin\punaro-trusted-attachment.exe`.
 After ordinary device enrollment, the operator separately provisions its fixed
@@ -160,9 +222,46 @@ if you decline it during client setup.
 
 Agents with plugin support can instead load the repository's
 [Punaro agent plugin](agent-plugin.md). It provides the same three skills plus
-the local `agent-mailbox` MCP declaration without modifying a project's
+the local Waypost MCP declaration without modifying a project's
 guidance files. Use one skill-installation method for a project so the same
 skills are not discovered twice.
+
+### Migrate an existing agent-mailbox state to Waypost
+
+This is an operator migration, not an agent-message action. Stop the Punaro
+adapter and every agent application or MCP process using the legacy mailbox,
+then take an owner-only recovery copy of the complete legacy state directory.
+Run Waypost's durable migration with both custom paths explicit:
+
+```sh
+waypost --state-dir "$HOME/.local/state/waypost" migrate \
+  --from "$HOME/.local/state/ai-agent/mailbox"
+```
+
+On Windows, stop the **Punaro Adapter** Scheduled Task and every client using
+the mailbox, then run:
+
+```powershell
+& waypost.exe --state-dir "$env:LOCALAPPDATA\waypost" migrate `
+  --from "$env:LOCALAPPDATA\ai-agent\mailbox"
+```
+
+Waypost refuses overlapping paths, an existing unrelated destination, or an
+ambiguous interrupted copy. Rerun the same command to resume only a migration
+it owns. Windows cross-volume migration may deliberately retain the old source
+as a recovery copy; do not delete it until the rollout and rollback drill are
+complete.
+
+With the service still stopped, edit only `PUNARO_AGENT_MAILBOX_BIN` and
+`PUNARO_MAILBOX_STATE_DIR` in the owner-only Punaro `adapter.env` to the exact
+reviewed Waypost executable and migrated directory. Preserve mode `0600` on
+Unix or the current-user-only Windows ACL, and never print or rewrite the
+Access secret lines. Rerun the client installer with the same machine/relay and
+the explicit `--waypost-bin` / `--mailbox-state-dir` (or `-WaypostBin` /
+`-MailboxStateDir`) values, enable the service, then run adapter doctor with the
+installed plugin root. Rollback restores the complete private backup and both
+profile paths together; never point a legacy binary at `waypost.db` or Waypost
+at an unmigrated `mailbox.db`.
 
 ## 3. Approve and configure the client
 
@@ -235,12 +334,12 @@ skills are not discovered twice.
    namespace, then attach it to the local group. For example:
 
    ```sh
-   agent-mailbox group add-member \
+   waypost group add-member \
      --group group/punaro-attached \
      --person agent/laptop-review/agent-a
    ```
 
-   Use `mailbox_bind` in the local `agent-mailbox` MCP to create the explicit
+   Use `waypost_bind` in the local Waypost MCP to create the explicit
    address first. The installer cannot infer which agent sessions should be
    reachable.
 4. Re-run the same client command with `--enable`, then verify the user
@@ -386,10 +485,12 @@ PUNARO_CLIENT_IDENTITY_FILE=/absolute/private/client-identity.json
 PUNARO_CLIENT_BINDING=the-enrollment-client-binding
 ```
 
-The sidecar contains only version `1`, the fixed canonical HTTPS origin, the
-opaque client binding, and (during a legacy transition) the exact legacy
-machine ID. It never contains an enrollment code, bearer credential, private
-key, Access token, project grant, or mailbox address. The adapter refuses a
+The sidecar contains only version `1`, the fixed canonical HTTPS or literal
+loopback HTTP origin, the opaque client binding, and (during a legacy
+transition) the exact legacy machine ID. Non-loopback trusted-LAN HTTP uses
+version `2` with its explicit acknowledgement and containing CIDR. It never
+contains an enrollment code, bearer credential, private key, Access token,
+project grant, or mailbox address. The adapter refuses a
 missing pair, unsafe sidecar, unknown version, or origin/binding/machine
 mismatch before it opens a transport client. Existing legacy profiles without
 both entries continue their existing path; adding the sidecar alone neither
@@ -420,6 +521,31 @@ punaro-enroll prepare \
   --state-dir "$HOME/.config/punaro/device-enrollment"
 ```
 
+For a same-host listener, literal loopback HTTP uses the same zero-policy
+version-one state and needs no trusted-LAN flags:
+
+```sh
+punaro-enroll prepare \
+  --origin http://127.0.0.1:8080 \
+  --state-dir "$HOME/.config/punaro/device-enrollment"
+```
+
+This exception is limited to literal loopback addresses. DNS names and private
+or link-local addresses still fail unless they use HTTPS or the explicit
+trusted-LAN policy described below. An explicit port is part of the stored
+identity for loopback HTTP, including `:80`, so use the same port spelling in
+the adapter profile. HTTPS remains canonicalized: an explicit `:443` is omitted.
+
+For a registered legacy adapter or gateway, bind preparation to its exact
+existing machine ID:
+
+```sh
+punaro-enroll prepare \
+  --origin https://punaro.example \
+  --state-dir "$HOME/.config/punaro/device-enrollment" \
+  --legacy-machine-id EXISTING_MACHINE_ID
+```
+
 The command prints only the canonical origin and an opaque `client_binding`.
 Give that public value to the server owner. The owner previews and creates the
 least-privilege grant with `punaro-admin client invite --machine-id ID`; the
@@ -431,6 +557,39 @@ unchanged through an approved protected channel into a current-user-only regular
 file on that client. Do not paste it
 into terminal commands, shell history, environment variables, diagnostic
 bundles, or source-controlled configuration.
+For a legacy exchange the owner also supplies the exact content-free
+`--legacy-principal-id` from `punaro-admin legacy list`; the new machine ID must
+remain the existing registered machine ID.
+
+For a non-agent service probe such as server doctor, the owner uses
+`--service` instead of `--project` or `--all-projects`. Its exact preview has an
+empty `grants` array and grants no project, conversation, memory, attachment,
+or installation capability. `--service` is mutually exclusive with project
+scope, but an existing registered legacy machine (such as the key-backed server
+doctor) may also supply its exact `--legacy-principal-id` for the same
+proof-bound exchange described above. The result remains zero-grant and the
+resulting device credential authenticates
+only routes that require no capability grant. This is the supported migration
+for a key-backed server doctor; do not issue a fresh unrelated service client
+and retire the old doctor first.
+
+Windows file transfer tools commonly leave the destination with an inherited
+ACL. Before redemption, tighten that exact transferred file without displaying
+or parsing its contents:
+
+```powershell
+punaro-enroll protect-material `
+  --file C:\absolute\private\enrollment-material.json
+```
+
+The command accepts only an absolute regular file within the enrollment size
+bound, refuses a directory, reparse point, or replacement race, and replaces
+the inherited ACL with exactly one protected FullControl ACE for the current
+user. It does not weaken or modify parent directories. `redeem` then performs
+the normal strict private-file and enrollment-document validation. On
+macOS/Linux the same command is available when a transfer tool has broadened
+the mode; it verifies current-user ownership and changes only that exact file
+to `0600`.
 
 Redeem that protected file on the client:
 
@@ -440,6 +599,23 @@ punaro-enroll redeem \
   --enrollment-file /absolute/private/enrollment-material.json \
   --credential-file "$HOME/.config/punaro/device-enrollment/device.credential"
 ```
+
+For the legacy state prepared above, add only the absolute protected old-key
+file path. The client signs a transcript binding the one-time material,
+idempotency key, and decoded code digest, and sends the public key and signature
+to the dedicated exchange route; it never sends or prints the private key:
+
+```sh
+punaro-enroll redeem \
+  --state-dir "$HOME/.config/punaro/device-enrollment" \
+  --enrollment-file /absolute/private/enrollment-material.json \
+  --credential-file "$HOME/.config/punaro/device-enrollment/device.credential" \
+  --legacy-private-key-file /absolute/private/existing-machine.key
+```
+
+Repeat the same legacy-key-file option with `recover` after an interrupted
+exchange. A wrong key, unregistered key, stale material, or already retired
+identity returns the same content-free rejection.
 
 If the public origin is protected by Cloudflare Access, create a distinct
 service token for this device and have its secret manager write the paired
@@ -466,12 +642,15 @@ or diagnostics. Continue to keep the token in the owner-only adapter profile
 for the installed relay adapter; do not reuse it on another device.
 
 `punaro-enroll` checks the exact binding before any network request, contacts
-only the canonical HTTPS origin selected during `prepare`, and writes a private
-recovery journal before redemption. If a network interruption occurs, rerun
-the same `redeem` command; if the transfer file is gone, use `punaro-enroll
+only the canonical validated origin selected during `prepare`, and writes a
+private recovery journal before redemption. If a network interruption occurs,
+rerun the same `redeem` command; if the transfer file is gone, use `punaro-enroll
 recover` with the state and credential paths, and include the same
 `--access-file` when the origin is Access-protected. The retry has the same
-idempotency key, so it cannot mint a second device credential. The server retains that
+idempotency key, so it cannot mint a second device credential. A legacy journal
+also binds the non-secret public key; supplying a different private-key file is
+rejected locally without contacting the server or discarding recovery state.
+The server retains that
 recovery record while its non-expiring credential and principal remain active;
 after revocation or disablement, request a new enrollment. A rejected (including
 expired-first-use, already-used, or revoked) enrollment fails closed and tells the user
@@ -479,6 +658,25 @@ to request a new enrollment; its private recovery journal is removed so the
 replacement material is not blocked. After success, remove the transferred material
 through its approved secret-handling process; the identity sidecar remains
 non-secret and the recovery journal is removed.
+
+For a legacy adapter or Telegram gateway, successful redemption only marks the
+server inventory `migrated` and stages the protected bearer credential. Keep
+the service running with its unchanged `PUNARO_MACHINE_PRIVATE_KEY_FILE` while
+the remaining legacy machines migrate. A bearer cannot authenticate the relay
+until the owner completes mail cutover and restarts the server with the
+published PostgreSQL relay and credential-transition settings; switching the
+profile earlier takes the client offline.
+
+Only after that server activation succeeds, replace
+`PUNARO_MACHINE_PRIVATE_KEY_FILE=...` with exactly one absolute
+`PUNARO_DEVICE_CREDENTIAL_FILE=/absolute/private/device.credential` entry, keep
+the same `PUNARO_MACHINE_ID`, relay origin, Access pair, and endpoint authority,
+then restart the client service and require its doctor report to pass. Never
+retain both credential entries. The adapter and gateway load the bearer only
+from the protected file, send it only in the `Authorization` header, and never
+place it in argv, environment values, reports, or logs. Keep the old private
+key until the new doctor probe passes; remove it later through the approved
+secret-retirement process.
 
 The server owner lists and permanently revokes installed clients with
 `punaro-admin client list` and `punaro-admin client revoke`, using only
@@ -524,8 +722,16 @@ shared ACLs, and replacement races fail closed.
 
 ## Agent mailbox behavior
 
-Agents use the local `agent-mailbox` MCP, not a remote Punaro MCP. Call
-`mailbox_status` once, then use bounded `mailbox_wait` calls to block until
-mail is available. Call `mailbox_recv` to claim it and `mailbox_ack` after
-handling it. A WebSocket wake is only an optimization; the durable fetch/ack
-path remains correct through sleep, reconnect, or missed wake events.
+Agents use the local Waypost MCP, not a remote Punaro MCP. Call
+`waypost_status` once, then call non-blocking `waypost_recv` to claim mail and
+`waypost_ack` with the exact returned delivery ID and lease token after
+handling it. For a bounded blocking wait, call
+`waypost_status(include_cli_context=true)`, then run only the reported CLI and
+state directory with `wait --for BOUND_ADDRESS --timeout 5m --json`; claim the
+result through `waypost_recv`. Repeat bounded waits during long-running work.
+A complete legacy `mailbox_status` / `mailbox_wait` / `mailbox_recv` /
+`mailbox_ack` MCP surface remains supported during rolling migration, but one
+claim must never mix tool families. A WebSocket wake
+accelerates adapter polling only; it does not itself create a model turn. The durable fetch/ack path
+remains correct through sleep, reconnect, or missed wake events. A successful `punaro-adapter send` proves relay acceptance only
+(`accepted/queued`); it is not a mailbox acknowledgement or an agent action.

@@ -15,11 +15,25 @@ on:
         description: Monotonic catalog sequence
         required: true
         type: string
-      draft:
-        description: Create a draft GitHub Release
+      minimum_bootstrap_release:
+        description: Oldest installed fixed bootstrap compatible with this release
         required: true
-        type: boolean
-        default: true
+        type: string
+      minimum_safe_sequence:
+        description: Optional higher safety floor (retires all lower release sequences)
+        required: false
+        default: ''
+        type: string
+      critical_blocks:
+        description: Optional comma-separated release sequences to block
+        required: false
+        default: ''
+        type: string
+      supported_from:
+        description: Optional comma-separated older releases supported as direct upgrade sources
+        required: false
+        default: ''
+        type: string
 
 concurrency:
   group: punaro-github-release
@@ -29,8 +43,257 @@ permissions:
   contents: read
 
 jobs:
+  preflight:
+    name: Validate release request before publication
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    outputs:
+      release: ${{ steps.identity.outputs.release }}
+      sequence: ${{ steps.identity.outputs.sequence }}
+      catalog_sequence: ${{ steps.identity.outputs.catalog_sequence }}
+      minimum_bootstrap_release: ${{ steps.identity.outputs.minimum_bootstrap_release }}
+      minimum_safe_sequence: ${{ steps.identity.outputs.minimum_safe_sequence }}
+      critical_blocks: ${{ steps.identity.outputs.critical_blocks }}
+      supported_from: ${{ steps.identity.outputs.supported_from }}
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
+      - uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6
+        with:
+          go-version-file: go.mod
+      - name: Resolve release identity and policy
+        id: identity
+        env:
+          INPUT_RELEASE: ${{ inputs.release }}
+          INPUT_SEQUENCE: ${{ inputs.sequence }}
+          INPUT_CATALOG_SEQUENCE: ${{ inputs.catalog_sequence }}
+          INPUT_MINIMUM_BOOTSTRAP_RELEASE: ${{ inputs.minimum_bootstrap_release }}
+          INPUT_MINIMUM_SAFE_SEQUENCE: ${{ inputs.minimum_safe_sequence }}
+          INPUT_CRITICAL_BLOCKS: ${{ inputs.critical_blocks }}
+          INPUT_SUPPORTED_FROM: ${{ inputs.supported_from }}
+          RELEASE_PUBLIC_KEYS: ${{ vars.PUNARO_RELEASE_PUBLIC_KEYS }}
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -eu
+          release=$INPUT_RELEASE
+          sequence=$INPUT_SEQUENCE
+          catalog_sequence=$INPUT_CATALOG_SEQUENCE
+          minimum_bootstrap_release=$INPUT_MINIMUM_BOOTSTRAP_RELEASE
+          case "$release" in
+            v[0-9]*.[0-9]*.[0-9]*) ;;
+            *) printf '%s\n' "unsupported release name: $release" >&2; exit 2 ;;
+          esac
+          case "$sequence" in
+            ''|*[!0-9]*) printf '%s\n' "sequence must be a positive integer" >&2; exit 2 ;;
+          esac
+          case "$catalog_sequence" in
+            ''|*[!0-9]*) printf '%s\n' "catalog sequence must be a positive integer" >&2; exit 2 ;;
+          esac
+          if [ "$sequence" -lt 1 ] || [ "$catalog_sequence" -lt 1 ]; then
+            printf '%s\n' 'sequences must be at least 1' >&2
+            exit 2
+          fi
+          case "$minimum_bootstrap_release" in
+            v[0-9]*.[0-9]*.[0-9]*) ;;
+            *) printf '%s\n' 'minimum bootstrap release must be a product release name' >&2; exit 2 ;;
+          esac
+          minimum_safe_sequence=$INPUT_MINIMUM_SAFE_SEQUENCE
+          if [ -n "$minimum_safe_sequence" ]; then
+            case "$minimum_safe_sequence" in
+              *[!0-9]*) printf '%s\n' 'minimum safe sequence must be a positive integer' >&2; exit 2 ;;
+            esac
+            if [ "$minimum_safe_sequence" -lt 1 ] || [ "$minimum_safe_sequence" -gt "$sequence" ]; then
+              printf '%s\n' 'minimum safe sequence must be between 1 and the release sequence' >&2
+              exit 2
+            fi
+          fi
+          critical_blocks=$INPUT_CRITICAL_BLOCKS
+          if [ -n "$critical_blocks" ]; then
+            IFS=, read -r -a blocks <<<"$critical_blocks"
+            if [ "${#blocks[@]}" -gt 32 ]; then
+              printf '%s\n' 'at most 32 critical blocks are allowed' >&2
+              exit 2
+            fi
+            for block in "${blocks[@]}"; do
+              case "$block" in
+                ''|*[!0-9]*) printf '%s\n' 'critical blocks must be comma-separated positive integers' >&2; exit 2 ;;
+              esac
+              if [ "$block" -lt 1 ] || [ "$block" -ge "$sequence" ]; then
+                printf '%s\n' 'critical block must be lower than the release sequence' >&2
+                exit 2
+              fi
+            done
+          fi
+          supported_from=$INPUT_SUPPORTED_FROM
+          request_args=(
+            --release "$release"
+            --sequence "$sequence"
+            --catalog-sequence "$catalog_sequence"
+            --minimum-bootstrap-release "$minimum_bootstrap_release"
+          )
+          if [ -n "$minimum_safe_sequence" ]; then
+            request_args+=(--minimum-safe-sequence "$minimum_safe_sequence")
+          fi
+          if [ -n "$critical_blocks" ]; then
+            IFS=, read -r -a blocks <<<"$critical_blocks"
+            for block in "${blocks[@]}"; do
+              request_args+=(--critical-block "$block")
+            done
+          fi
+          if [ -n "$supported_from" ]; then
+            IFS=, read -r -a sources <<<"$supported_from"
+            if [ "${#sources[@]}" -gt 32 ]; then
+              printf '%s\n' 'at most 32 supported upgrade sources are allowed' >&2
+              exit 2
+            fi
+            for source in "${sources[@]}"; do
+              case "$source" in
+                v[0-9]*.[0-9]*.[0-9]*) ;;
+                *) printf '%s\n' 'supported upgrade sources must be comma-separated release names' >&2; exit 2 ;;
+              esac
+              if [ "$source" = "$release" ]; then
+                printf '%s\n' 'the target release cannot be its own upgrade source' >&2
+                exit 2
+              fi
+              request_args+=(--supported-from "$source")
+            done
+          fi
+          go run ./cmd/punaro-release validate-request "${request_args[@]}"
+          if gh release view "$release" >/dev/null 2>&1; then
+            printf '%s\n' "release $release already exists" >&2
+            exit 2
+          fi
+          catalog_has_history=false
+          history_error='existing live catalog is not a verified pair'
+          if catalog_state=$(gh release view catalog --json isDraft,assets 2>/dev/null); then
+            catalog_draft=$(printf '%s\n' "$catalog_state" | jq -er 'if .isDraft == true then "true" elif .isDraft == false then "false" else error("invalid draft state") end')
+            previous_dir="$RUNNER_TEMP/preflight-catalog"
+            if [ "$catalog_draft" = false ]; then
+              mkdir "$previous_dir"
+              gh release download catalog --pattern punaro-catalog.json --dir "$previous_dir"
+              gh release download catalog --pattern punaro-catalog.sig --dir "$previous_dir"
+              catalog_has_history=true
+            else
+              recovery_assets=$(printf '%s\n' "$catalog_state" | jq -er '[.assets[].name | select(. == "punaro-catalog.previous.json" or . == "punaro-catalog.previous.sig")] | length')
+              if [ "$recovery_assets" -eq 1 ]; then
+                printf '%s\n' 'draft catalog recovery pair is incomplete' >&2
+                exit 2
+              fi
+              if [ "$recovery_assets" -eq 2 ]; then
+                recovery_dir="$RUNNER_TEMP/preflight-catalog-recovery"
+                mkdir "$previous_dir" "$recovery_dir"
+                gh release download catalog --pattern punaro-catalog.previous.json --dir "$recovery_dir"
+                gh release download catalog --pattern punaro-catalog.previous.sig --dir "$recovery_dir"
+                cp "$recovery_dir/punaro-catalog.previous.json" "$previous_dir/punaro-catalog.json"
+                cp "$recovery_dir/punaro-catalog.previous.sig" "$previous_dir/punaro-catalog.sig"
+                catalog_has_history=true
+                history_error='draft catalog predecessor is not a verified recovery pair'
+              fi
+            fi
+          fi
+          if [ "$catalog_has_history" = true ]; then
+            if [ -z "$RELEASE_PUBLIC_KEYS" ]; then
+              printf '%s\n' 'PUNARO_RELEASE_PUBLIC_KEYS must contain the trusted public key set before validating the live catalog' >&2
+              exit 2
+            fi
+            keys_file="$RUNNER_TEMP/punaro-release.pub"
+            umask 077
+            printf '%s' "$RELEASE_PUBLIC_KEYS" >"$keys_file"
+            if ! go run ./cmd/punaro-release verify \
+              --keys-file "$keys_file" \
+              --document "$previous_dir/punaro-catalog.json" \
+              --signature "$previous_dir/punaro-catalog.sig"; then
+              printf '%s\n' "$history_error" >&2
+              exit 2
+            fi
+            advancement_args=()
+            if [ -n "$minimum_safe_sequence" ]; then
+              advancement_args+=(--minimum-safe-sequence "$minimum_safe_sequence")
+            fi
+            if [ -n "$critical_blocks" ]; then
+              IFS=, read -r -a blocks <<<"$critical_blocks"
+              for block in "${blocks[@]}"; do
+                advancement_args+=(--critical-block "$block")
+              done
+            fi
+            go run ./cmd/punaro-release validate-advancement \
+              --previous-catalog "$previous_dir/punaro-catalog.json" \
+              --release "$release" \
+              --sequence "$sequence" \
+              --catalog-sequence "$catalog_sequence" \
+              "${advancement_args[@]}"
+          fi
+          {
+            printf 'release=%s\n' "$release"
+            printf 'sequence=%s\n' "$sequence"
+            printf 'catalog_sequence=%s\n' "$catalog_sequence"
+            printf 'minimum_bootstrap_release=%s\n' "$minimum_bootstrap_release"
+            printf 'minimum_safe_sequence=%s\n' "$minimum_safe_sequence"
+            printf 'critical_blocks=%s\n' "$critical_blocks"
+            printf 'supported_from=%s\n' "$supported_from"
+          } >>"$GITHUB_OUTPUT"
+
+  image:
+    name: Publish digest-pinned gateway image
+    needs: preflight
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    outputs:
+      image: ${{ steps.publish.outputs.image }}
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
+      - uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6
+        with:
+          go-version-file: go.mod
+      - uses: docker/setup-buildx-action@37fe631027851001ddb9b187196cc803df7f5f0e # v4.3.0
+      - name: Publish image with SBOM and provenance
+        id: publish
+        env:
+          GHCR_TOKEN: ${{ github.token }}
+          RELEASE: ${{ needs.preflight.outputs.release }}
+          SEQUENCE: ${{ needs.preflight.outputs.sequence }}
+          CATALOG_SEQUENCE: ${{ needs.preflight.outputs.catalog_sequence }}
+        run: |
+          set -eu
+          repository="ghcr.io/${GITHUB_REPOSITORY_OWNER,,}/punaro"
+          facts=$(env -u GOOS -u GOARCH -u CGO_ENABLED go run ./cmd/punaro-release build-facts \
+            --release "$RELEASE" \
+            --plugin-root "$PWD")
+          compose_sha256=$(printf '%s\n' "$facts" | jq -er .compose_sha256)
+          migration_sha256=$(printf '%s\n' "$facts" | jq -er .migration_manifest_sha256)
+          skill_sha256=$(printf '%s\n' "$facts" | jq -er .skill_set_sha256)
+          plugin_runtime_sha256=$(printf '%s\n' "$facts" | jq -er .plugin_runtime_sha256)
+          printf '%s' "$GHCR_TOKEN" | docker login ghcr.io --username "$GITHUB_ACTOR" --password-stdin
+          candidate_tag=$(./scripts/release-candidate-tag.sh "$GITHUB_SHA" "$GITHUB_RUN_ID" "$GITHUB_RUN_ATTEMPT")
+          metadata="$RUNNER_TEMP/punaro-image-metadata.json"
+          docker buildx build \
+            --platform linux/amd64 \
+            --provenance mode=max \
+            --sbom true \
+            --build-arg "PUNARO_RELEASE=$RELEASE" \
+            --build-arg "PUNARO_SEQUENCE=$SEQUENCE" \
+            --build-arg "PUNARO_CATALOG_SEQUENCE=$CATALOG_SEQUENCE" \
+            --build-arg "PUNARO_IMAGE=$repository:$RELEASE" \
+            --build-arg "PUNARO_COMPOSE_SHA256=$compose_sha256" \
+            --build-arg "PUNARO_MIGRATION_SHA256=$migration_sha256" \
+            --build-arg "PUNARO_SKILL_SET_SHA256=$skill_sha256" \
+            --build-arg "PUNARO_PLUGIN_RUNTIME_SHA256=$plugin_runtime_sha256" \
+            --label "org.opencontainers.image.revision=$GITHUB_SHA" \
+            --label "org.opencontainers.image.version=$RELEASE" \
+            --metadata-file "$metadata" \
+            --tag "$repository:$candidate_tag" \
+            --push .
+          digest=$(jq -er '."containerimage.digest"' "$metadata")
+          case "$digest" in sha256:[0-9a-f][0-9a-f]*) ;; *) printf '%s\n' 'published image digest is invalid' >&2; exit 2 ;; esac
+          [ "${#digest}" -eq 71 ] || { printf '%s\n' 'published image digest is invalid' >&2; exit 2; }
+          image="$repository@$digest"
+          printf 'image=%s\n' "$image" >>"$GITHUB_OUTPUT"
+
   build:
     name: Build ${{ matrix.goos }}/${{ matrix.goarch }}
+    needs: [preflight, image]
     runs-on: ${{ matrix.runner }}
     strategy:
       fail-fast: true
@@ -48,7 +311,10 @@ jobs:
             goos: linux
             goarch: arm64
             cgo: '0'
-          - runner: windows-latest
+          # Cross-compile from the same LF checkout used to assemble the
+          # portable plugin bundle. Native Windows checkout conversion changes
+          # the byte-bound skill/runtime digests embedded in the adapter.
+          - runner: ubuntu-latest
             goos: windows
             goarch: amd64
             cgo: '0'
@@ -63,7 +329,12 @@ jobs:
           GOOS: ${{ matrix.goos }}
           GOARCH: ${{ matrix.goarch }}
           CGO_ENABLED: ${{ matrix.cgo }}
-        run: ./scripts/build-release-artifacts.sh --output-dir dist
+        run: >-
+          ./scripts/build-release-artifacts.sh --output-dir dist
+          --release "${{ needs.preflight.outputs.release }}"
+          --sequence "${{ needs.preflight.outputs.sequence }}"
+          --catalog-sequence "${{ needs.preflight.outputs.catalog_sequence }}"
+          --image "${{ needs.image.outputs.image }}"
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: punaro-${{ matrix.goos }}-${{ matrix.goarch }}
@@ -72,7 +343,7 @@ jobs:
 
   publish:
     name: Assemble catalog and draft GitHub Release
-    needs: build
+    needs: [preflight, image, build]
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -85,49 +356,90 @@ jobs:
         with:
           path: dist
           merge-multiple: true
-      - name: Resolve release identity
-        id: identity
+      - name: Assemble unsigned catalog and manifest
         env:
-          INPUT_RELEASE: ${{ inputs.release }}
-          INPUT_SEQUENCE: ${{ inputs.sequence }}
-          INPUT_CATALOG_SEQUENCE: ${{ inputs.catalog_sequence }}
+          RELEASE: ${{ needs.preflight.outputs.release }}
+          SEQUENCE: ${{ needs.preflight.outputs.sequence }}
+          CATALOG_SEQUENCE: ${{ needs.preflight.outputs.catalog_sequence }}
+          MINIMUM_BOOTSTRAP_RELEASE: ${{ needs.preflight.outputs.minimum_bootstrap_release }}
+          MINIMUM_SAFE_SEQUENCE: ${{ needs.preflight.outputs.minimum_safe_sequence }}
+          CRITICAL_BLOCKS: ${{ needs.preflight.outputs.critical_blocks }}
+          SUPPORTED_FROM: ${{ needs.preflight.outputs.supported_from }}
+          RELEASE_PUBLIC_KEYS: ${{ vars.PUNARO_RELEASE_PUBLIC_KEYS }}
           GH_TOKEN: ${{ github.token }}
         run: |
           set -eu
-          release=$INPUT_RELEASE
-          sequence=$INPUT_SEQUENCE
-          catalog_sequence=$INPUT_CATALOG_SEQUENCE
-          case "$release" in
-            v[0-9]*.[0-9]*.[0-9]*) ;;
-            *) printf '%s\n' "unsupported release name: $release" >&2; exit 2 ;;
-          esac
-          case "$sequence" in
-            ''|*[!0-9]*) printf '%s\n' "sequence must be a positive integer" >&2; exit 2 ;;
-          esac
-          case "$catalog_sequence" in
-            ''|*[!0-9]*) printf '%s\n' "catalog sequence must be a positive integer" >&2; exit 2 ;;
-          esac
-          if [ "$sequence" -lt 1 ] || [ "$catalog_sequence" -lt 1 ]; then
-            printf '%s\n' 'sequences must be at least 1' >&2
-            exit 2
+          previous_args=()
+          policy_args=()
+          if [ -n "$MINIMUM_SAFE_SEQUENCE" ]; then
+            policy_args+=(--minimum-safe-sequence "$MINIMUM_SAFE_SEQUENCE")
           fi
-          {
-            printf 'release=%s\n' "$release"
-            printf 'sequence=%s\n' "$sequence"
-            printf 'catalog_sequence=%s\n' "$catalog_sequence"
-          } >>"$GITHUB_OUTPUT"
-      - name: Assemble unsigned catalog and manifest
-        env:
-          RELEASE: ${{ steps.identity.outputs.release }}
-          SEQUENCE: ${{ steps.identity.outputs.sequence }}
-          CATALOG_SEQUENCE: ${{ steps.identity.outputs.catalog_sequence }}
-        run: |
-          set -eu
+          if [ -n "$CRITICAL_BLOCKS" ]; then
+            IFS=, read -r -a blocks <<<"$CRITICAL_BLOCKS"
+            for block in "${blocks[@]}"; do
+              policy_args+=(--critical-block "$block")
+            done
+          fi
+          if [ -n "$SUPPORTED_FROM" ]; then
+            IFS=, read -r -a sources <<<"$SUPPORTED_FROM"
+            for source in "${sources[@]}"; do
+              policy_args+=(--supported-from "$source")
+            done
+          fi
+          catalog_has_history=false
+          history_error='existing live catalog is not a verified pair'
+          if catalog_state=$(gh release view catalog --json isDraft,assets 2>/dev/null); then
+            catalog_draft=$(printf '%s\n' "$catalog_state" | jq -er 'if .isDraft == true then "true" elif .isDraft == false then "false" else error("invalid draft state") end')
+            previous_dir="$RUNNER_TEMP/previous-catalog"
+            if [ "$catalog_draft" = false ]; then
+              mkdir "$previous_dir"
+              gh release download catalog --pattern punaro-catalog.json --dir "$previous_dir"
+              gh release download catalog --pattern punaro-catalog.sig --dir "$previous_dir"
+              catalog_has_history=true
+            else
+              recovery_assets=$(printf '%s\n' "$catalog_state" | jq -er '[.assets[].name | select(. == "punaro-catalog.previous.json" or . == "punaro-catalog.previous.sig")] | length')
+              if [ "$recovery_assets" -eq 1 ]; then
+                printf '%s\n' 'draft catalog recovery pair is incomplete' >&2
+                exit 2
+              fi
+              if [ "$recovery_assets" -eq 2 ]; then
+                recovery_dir="$RUNNER_TEMP/catalog-recovery"
+                mkdir "$previous_dir" "$recovery_dir"
+                gh release download catalog --pattern punaro-catalog.previous.json --dir "$recovery_dir"
+                gh release download catalog --pattern punaro-catalog.previous.sig --dir "$recovery_dir"
+                cp "$recovery_dir/punaro-catalog.previous.json" "$previous_dir/punaro-catalog.json"
+                cp "$recovery_dir/punaro-catalog.previous.sig" "$previous_dir/punaro-catalog.sig"
+                catalog_has_history=true
+                history_error='draft catalog predecessor is not a verified recovery pair'
+              fi
+            fi
+          fi
+          if [ "$catalog_has_history" = true ]; then
+            if [ -z "$RELEASE_PUBLIC_KEYS" ]; then
+              printf '%s\n' 'PUNARO_RELEASE_PUBLIC_KEYS must contain the trusted public key set before inheriting a live catalog' >&2
+              exit 2
+            fi
+            keys_file="$RUNNER_TEMP/punaro-release.pub"
+            umask 077
+            printf '%s' "$RELEASE_PUBLIC_KEYS" >"$keys_file"
+            if ! go run ./cmd/punaro-release verify \
+              --keys-file "$keys_file" \
+              --document "$previous_dir/punaro-catalog.json" \
+              --signature "$previous_dir/punaro-catalog.sig"; then
+              printf '%s\n' "$history_error" >&2
+              exit 2
+            fi
+            previous_args=(--previous-catalog "$previous_dir/punaro-catalog.json")
+          fi
           go run ./cmd/punaro-release assemble \
             --dir dist \
             --release "$RELEASE" \
             --sequence "$SEQUENCE" \
-            --catalog-sequence "$CATALOG_SEQUENCE"
+            --catalog-sequence "$CATALOG_SEQUENCE" \
+            --minimum-bootstrap-release "$MINIMUM_BOOTSTRAP_RELEASE" \
+            --image "${{ needs.image.outputs.image }}" \
+            "${policy_args[@]}" \
+            "${previous_args[@]}"
           go run ./cmd/punaro-release validate --dir dist
           if grep -Eq 'https?://' dist/punaro-release.json dist/punaro-catalog.json; then
             printf '%s\n' 'assembled documents contain a URL' >&2
@@ -135,9 +447,8 @@ jobs:
           fi
       - name: Publish GitHub Releases
         env:
-          RELEASE: ${{ steps.identity.outputs.release }}
+          RELEASE: ${{ needs.preflight.outputs.release }}
           GH_TOKEN: ${{ github.token }}
-          DRAFT: ${{ inputs.draft }}
         run: |
           set -eu
           notes=$(mktemp)
@@ -152,16 +463,5 @@ jobs:
             printf '%s\n' "release $RELEASE already exists" >&2
             exit 2
           fi
-          set -- --title "Punaro $RELEASE" --notes-file "$notes"
-          if [ "$DRAFT" = true ]; then
-            set -- --draft "$@"
-          fi
-          gh release create "$RELEASE" --target "$GITHUB_SHA" "$@" dist/*
-          if gh release view catalog >/dev/null 2>&1; then
-            gh release upload catalog dist/punaro-catalog.json --clobber
-          else
-            gh release create catalog --prerelease \
-              --title "Punaro release catalog" \
-              --notes "Short-lived unsigned catalog. Bootstrap requires punaro-catalog.sig from the offline signing key." \
-              dist/punaro-catalog.json
-          fi
+          gh release create "$RELEASE" --target "$GITHUB_SHA" --draft \
+            --title "Punaro $RELEASE" --notes-file "$notes" dist/*

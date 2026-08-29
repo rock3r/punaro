@@ -35,58 +35,150 @@ const (
 // MigrationSourceCounts are the exact logical row counts bound into a source
 // manifest. Cutover metadata is intentionally excluded.
 type MigrationSourceCounts struct {
-	Endpoints               int64 `json:"endpoints"`
-	Conversations           int64 `json:"conversations"`
-	Memberships             int64 `json:"memberships"`
-	Roles                   int64 `json:"roles"`
-	RoleMemberships         int64 `json:"role_memberships"`
-	RoleBindings            int64 `json:"role_bindings"`
-	Messages                int64 `json:"messages"`
-	Deliveries              int64 `json:"deliveries"`
-	RecipientCursors        int64 `json:"recipient_cursors"`
-	MessageIdempotency      int64 `json:"message_idempotency"`
-	ConversationIdempotency int64 `json:"conversation_idempotency"`
-	ControlEvents           int64 `json:"control_events,omitempty"`
-	ControlIdempotency      int64 `json:"control_idempotency,omitempty"`
-	RequestNonces           int64 `json:"request_nonces"`
+	Endpoints                int64 `json:"endpoints"`
+	Conversations            int64 `json:"conversations"`
+	Memberships              int64 `json:"memberships"`
+	Roles                    int64 `json:"roles"`
+	RoleMemberships          int64 `json:"role_memberships"`
+	RoleBindings             int64 `json:"role_bindings"`
+	Messages                 int64 `json:"messages"`
+	Deliveries               int64 `json:"deliveries"`
+	RecipientCursors         int64 `json:"recipient_cursors"`
+	MessageIdempotency       int64 `json:"message_idempotency"`
+	ConversationIdempotency  int64 `json:"conversation_idempotency"`
+	ControlEvents            int64 `json:"control_events,omitempty"`
+	ControlIdempotency       int64 `json:"control_idempotency,omitempty"`
+	RoleProfiles             int64 `json:"role_profiles,omitempty"`
+	RoleProfileIdempotency   int64 `json:"role_profile_idempotency,omitempty"`
+	RateBuckets              int64 `json:"rate_buckets,omitempty"`
+	DirectConversations      int64 `json:"direct_conversations,omitempty"`
+	MessageFromRoles         int64 `json:"message_from_roles,omitempty"`
+	DirectMessageIdempotency int64 `json:"direct_message_idempotency,omitempty"`
+	TelegramClaims           int64 `json:"telegram_claims,omitempty"`
+	TelegramParticipants     int64 `json:"telegram_participants,omitempty"`
+	TelegramClaimEvents      int64 `json:"telegram_claim_events,omitempty"`
+	TelegramClaimIdempotency int64 `json:"telegram_claim_idempotency,omitempty"`
+	DisplayNameIdempotency   int64 `json:"display_name_idempotency,omitempty"`
+	RequestNonces            int64 `json:"request_nonces"`
 }
 
 // MigrationSourceHashes are per-table hashes over canonical ordered rows.
 type MigrationSourceHashes struct {
-	Endpoints               string `json:"endpoints"`
-	Conversations           string `json:"conversations"`
-	Memberships             string `json:"memberships"`
-	Roles                   string `json:"roles"`
-	RoleMemberships         string `json:"role_memberships"`
-	RoleBindings            string `json:"role_bindings"`
-	Messages                string `json:"messages"`
-	Deliveries              string `json:"deliveries"`
-	RecipientCursors        string `json:"recipient_cursors"`
-	MessageIdempotency      string `json:"message_idempotency"`
-	ConversationIdempotency string `json:"conversation_idempotency"`
-	ControlEvents           string `json:"control_events,omitempty"`
-	ControlIdempotency      string `json:"control_idempotency,omitempty"`
-	RequestNonces           string `json:"request_nonces"`
+	Endpoints                string `json:"endpoints"`
+	Conversations            string `json:"conversations"`
+	Memberships              string `json:"memberships"`
+	Roles                    string `json:"roles"`
+	RoleMemberships          string `json:"role_memberships"`
+	RoleBindings             string `json:"role_bindings"`
+	Messages                 string `json:"messages"`
+	Deliveries               string `json:"deliveries"`
+	RecipientCursors         string `json:"recipient_cursors"`
+	MessageIdempotency       string `json:"message_idempotency"`
+	ConversationIdempotency  string `json:"conversation_idempotency"`
+	ControlEvents            string `json:"control_events,omitempty"`
+	ControlIdempotency       string `json:"control_idempotency,omitempty"`
+	RoleProfiles             string `json:"role_profiles,omitempty"`
+	RoleProfileIdempotency   string `json:"role_profile_idempotency,omitempty"`
+	RateBuckets              string `json:"rate_buckets,omitempty"`
+	DirectConversations      string `json:"direct_conversations,omitempty"`
+	MessageFromRoles         string `json:"message_from_roles,omitempty"`
+	DirectMessageIdempotency string `json:"direct_message_idempotency,omitempty"`
+	TelegramClaims           string `json:"telegram_claims,omitempty"`
+	TelegramParticipants     string `json:"telegram_participants,omitempty"`
+	TelegramClaimEvents      string `json:"telegram_claim_events,omitempty"`
+	TelegramClaimIdempotency string `json:"telegram_claim_idempotency,omitempty"`
+	DisplayNameIdempotency   string `json:"display_name_idempotency,omitempty"`
+	RequestNonces            string `json:"request_nonces"`
 }
 
 // MigrationSourceManifest is a content-addressed logical view of one SQLite
 // relay. It never includes file bytes, page order, WAL state, or secrets.
 type MigrationSourceManifest struct {
-	Version                 int                   `json:"version"`
-	SourceID                string                `json:"source_id"`
-	Phase                   MigrationSourcePhase  `json:"phase"`
-	EpochID                 string                `json:"epoch_id,omitempty"`
-	TargetIdentity          string                `json:"target_identity,omitempty"`
-	Counts                  MigrationSourceCounts `json:"counts"`
-	TableSHA256             MigrationSourceHashes `json:"table_sha256"`
-	Fingerprint             string                `json:"fingerprint"`
-	ExpectedFingerprint     string                `json:"-"`
-	lastEpochID             string
-	lastTargetIdentity      string
-	lastExpectedFingerprint string
-	lastResultFingerprint   string
-	lastCutoff              int64
-	lastTransition          string
+	Version                     int                   `json:"version"`
+	SourceID                    string                `json:"source_id"`
+	Phase                       MigrationSourcePhase  `json:"phase"`
+	EpochID                     string                `json:"epoch_id,omitempty"`
+	TargetIdentity              string                `json:"target_identity,omitempty"`
+	Counts                      MigrationSourceCounts `json:"counts"`
+	TableSHA256                 MigrationSourceHashes `json:"table_sha256"`
+	Fingerprint                 string                `json:"fingerprint"`
+	ExpectedFingerprint         string                `json:"-"`
+	lastEpochID                 string
+	lastTargetIdentity          string
+	lastExpectedFingerprint     string
+	lastResultFingerprint       string
+	lastCutoff                  int64
+	lastTransition              string
+	legacyTelegramRepairLineage bool
+}
+
+// IsLegacyTelegramMigrationSource identifies the exact v7-shaped predecessor
+// branch that carried Telegram claims and current message metadata without the
+// later profile, rate-limit, direct-message, rename-idempotency, and
+// claim-idempotency tables.
+func IsLegacyTelegramMigrationSource(manifest MigrationSourceManifest) bool {
+	return manifest.Version == 7 &&
+		manifest.TableSHA256.TelegramClaims != "" && manifest.TableSHA256.TelegramParticipants != "" && manifest.TableSHA256.TelegramClaimEvents != "" &&
+		manifest.Counts.RoleProfiles == 0 && manifest.TableSHA256.RoleProfiles == "" &&
+		manifest.Counts.RoleProfileIdempotency == 0 && manifest.TableSHA256.RoleProfileIdempotency == "" &&
+		manifest.Counts.RateBuckets == 0 && manifest.TableSHA256.RateBuckets == "" &&
+		manifest.Counts.DirectConversations == 0 && manifest.TableSHA256.DirectConversations == "" &&
+		manifest.Counts.MessageFromRoles == 0 && manifest.TableSHA256.MessageFromRoles == "" &&
+		manifest.Counts.DirectMessageIdempotency == 0 && manifest.TableSHA256.DirectMessageIdempotency == "" &&
+		manifest.Counts.DisplayNameIdempotency == 0 && manifest.TableSHA256.DisplayNameIdempotency == "" &&
+		manifest.Counts.TelegramClaimIdempotency == manifest.Counts.TelegramClaims && validMigrationDigest(manifest.TableSHA256.TelegramClaimIdempotency)
+}
+
+func isLegacyTelegramRepairLineage(manifest MigrationSourceManifest) bool {
+	return IsLegacyTelegramMigrationSource(manifest) || manifest.legacyTelegramRepairLineage
+}
+
+func legacyTelegramRepairJournalAllows(manifest MigrationSourceManifest) bool {
+	switch manifest.Phase {
+	case MigrationSourceActive:
+		return manifest.lastTransition == "aborted"
+	case MigrationSourcePrepared:
+		return manifest.lastTransition == "prepared"
+	case MigrationSourceRetired:
+		return manifest.lastTransition == "retired"
+	default:
+		return false
+	}
+}
+
+// MigrationSourceTablePresent reports whether one canonical cutover table is
+// represented by the source schema rather than by an empty destination table.
+func MigrationSourceTablePresent(manifest MigrationSourceManifest, table string) bool {
+	legacyTelegram := IsLegacyTelegramMigrationSource(manifest)
+	if legacyTelegram {
+		if table == "mail_telegram_claim_idempotency" {
+			return true
+		}
+		switch table {
+		case "mail_role_profiles", "mail_role_profile_idempotency", "mail_rate_buckets", "mail_direct_conversations", "mail_message_from_roles", "mail_direct_message_idempotency", "mail_conversation_display_name_idempotency":
+			return false
+		}
+	}
+	parentRoleOnlyV3 := manifest.Version == 3 && manifest.Counts.ControlEvents == 0 && manifest.Counts.ControlIdempotency == 0 && manifest.TableSHA256.ControlEvents == "" && manifest.TableSHA256.ControlIdempotency == ""
+	if manifest.Version == 1 && (table == "mail_roles" || table == "mail_role_memberships" || table == "mail_role_bindings") {
+		return false
+	}
+	if (manifest.Version <= 2 || parentRoleOnlyV3) && (table == "mail_conversation_controls" || table == "mail_conversation_control_idempotency") {
+		return false
+	}
+	if manifest.Version < 4 && (table == "mail_role_profiles" || table == "mail_role_profile_idempotency") {
+		return false
+	}
+	if manifest.Version < 5 && table == "mail_rate_buckets" {
+		return false
+	}
+	if manifest.Version < 6 && (table == "mail_direct_conversations" || table == "mail_message_from_roles" || table == "mail_direct_message_idempotency") {
+		return false
+	}
+	if manifest.Version < 7 && (table == "mail_telegram_claims" || table == "mail_telegram_participants" || table == "mail_telegram_claim_events" || table == "mail_conversation_display_name_idempotency") {
+		return false
+	}
+	return manifest.Version >= 8 || table != "mail_telegram_claim_idempotency"
 }
 
 type migrationTableSpec struct {
@@ -95,12 +187,12 @@ type migrationTableSpec struct {
 
 var migrationTableSpecs = []migrationTableSpec{
 	{"endpoints", "endpoint,machine_id,lease_until,ownership_generation,consumer_id,consumer_generation,consumer_lease_until", "endpoint"},
-	{"conversations", "id,next_sequence,created_at", "id"},
+	{"conversations", "id,next_sequence,created_at,display_name", "id"},
 	{"memberships", "conversation_id,endpoint,capabilities", "conversation_id,endpoint"},
 	{"roles", "role,machine_id", "role"},
 	{"role_memberships", "conversation_id,role,capabilities", "conversation_id,role"},
 	{"role_bindings", "role,session_endpoint,machine_id,ownership_generation,lease_until", "role"},
-	{"messages", "id,conversation_id,sequence,from_endpoint,body,created_at", "id"},
+	{"messages", "id,conversation_id,sequence,from_endpoint,from_participant,in_reply_to_message_id,in_reply_to_endpoint,telegram_thread_id,body,created_at", "id"},
 	{"deliveries", "id,message_id,recipient_endpoint,lease_machine_id,lease_token,lease_generation,ownership_generation,consumer_generation,lease_until,acked_at", "id"},
 	{"recipient_cursors", "recipient_endpoint,conversation_id,sequence", "recipient_endpoint,conversation_id"},
 	{"idempotency", "machine_id,key,request_hash,message_id,created_at", "machine_id,key"},
@@ -108,12 +200,48 @@ var migrationTableSpecs = []migrationTableSpec{
 	{"conversation_controls", "id,conversation_id,actor_endpoint,operation,member_endpoint,member_capabilities,created_at", "id"},
 	{"conversation_control_idempotency", "machine_id,key,request_hash,control_id,created_at", "machine_id,key"},
 	{"request_nonces", "machine_id,nonce,expires_at", "machine_id,nonce"},
+	{"role_profiles", "role,display_name,direct_addressable,updated_at", "role"},
+	{"role_profile_idempotency", "machine_id,key,request_hash,role,display_name,direct_addressable,updated_at,created_at", "machine_id,key"},
+	{"rate_buckets", "kind,bucket_key,tokens,updated_at", "kind,bucket_key"},
+	{"direct_conversations", "role_low,role_high,conversation_id,created_at", "role_low,role_high"},
+	{"message_from_roles", "message_id,from_role", "message_id"},
+	{"direct_message_idempotency", "machine_id,key,request_hash,from_role,to_role,conversation_id,message_id,sequence,created_at", "machine_id,key"},
+	{"telegram_claims", "conversation_id,status,requested_by_machine,requested_by_endpoint,idempotency_key,request_hash,created_at,completed_at", "conversation_id"},
+	{"telegram_participants", "conversation_id,label,created_at", "conversation_id"},
+	{"telegram_claim_events", "id,conversation_id,event,actor_machine,actor_endpoint,created_at", "id"},
+	{"conversation_display_name_idempotency", "machine_id,key,request_hash,conversation_id,created_at", "machine_id,key"},
+	{"telegram_claim_idempotency", "machine_id,key,request_hash,conversation_id,created_at", "machine_id,key"},
 }
 
-var roleMigrationTableSpecs = func() []migrationTableSpec {
+var v3MigrationTableSpecs = withParentConversationAndMessageColumns(migrationTableSpecs[:14])
+var v4MigrationTableSpecs = withParentConversationAndMessageColumns(migrationTableSpecs[:16])
+var v5MigrationTableSpecs = withParentConversationAndMessageColumns(migrationTableSpecs[:17])
+var v6MigrationTableSpecs = withParentConversationAndMessageColumns(migrationTableSpecs[:20])
+var v7MigrationTableSpecs = append([]migrationTableSpec(nil), migrationTableSpecs[:24]...)
+
+var legacyTelegramV7MigrationTableSpecs = func() []migrationTableSpec {
+	specs := append([]migrationTableSpec(nil), migrationTableSpecs[:14]...)
+	specs = append(specs, migrationTableSpecs[20:23]...)
+	return append(specs, migrationTableSpecs[24])
+}()
+
+var roleMigrationTableSpecs = withParentConversationAndMessageColumns(func() []migrationTableSpec {
 	specs := append([]migrationTableSpec(nil), migrationTableSpecs[:11]...)
 	return append(specs, migrationTableSpecs[13])
-}()
+}())
+
+func withParentConversationAndMessageColumns(specs []migrationTableSpec) []migrationTableSpec {
+	out := append([]migrationTableSpec(nil), specs...)
+	for index := range out {
+		switch out[index].name {
+		case "conversations":
+			out[index].columns = "id,next_sequence,created_at"
+		case "messages":
+			out[index].columns = "id,conversation_id,sequence,from_endpoint,body,created_at"
+		}
+	}
+	return out
+}
 
 var legacyMigrationTableSpecs = []migrationTableSpec{
 	{"endpoints", "endpoint,machine_id,lease_until,ownership_generation,consumer_id,consumer_generation,consumer_lease_until", "endpoint"},
@@ -127,9 +255,24 @@ var legacyMigrationTableSpecs = []migrationTableSpec{
 	{"request_nonces", "machine_id,nonce,expires_at", "machine_id,nonce"},
 }
 
-const migrationSourceSchema = "punaro-relay-sqlite-v3:endpoints;conversations;memberships;roles;role_memberships;role_bindings;messages;deliveries;recipient_cursors;idempotency;conversation_idempotency;conversation_controls;conversation_control_idempotency;request_nonces"
+const v7MigrationSourceSchema = "punaro-relay-sqlite-v7:endpoints;conversations;memberships;roles;role_memberships;role_bindings;messages;deliveries;recipient_cursors;idempotency;conversation_idempotency;conversation_controls;conversation_control_idempotency;request_nonces;role_profiles;role_profile_idempotency;rate_buckets;direct_conversations;message_from_roles;direct_message_idempotency;telegram_claims;telegram_participants;telegram_claim_events;conversation_display_name_idempotency"
+const legacyTelegramV7MigrationSourceSchema = "punaro-relay-sqlite-v7-legacy-telegram:endpoints;conversations;memberships;roles;role_memberships;role_bindings;messages;deliveries;recipient_cursors;idempotency;conversation_idempotency;conversation_controls;conversation_control_idempotency;request_nonces;telegram_claims;telegram_participants;telegram_claim_events;telegram_claim_idempotency-derived-from-telegram_claims"
+
+const legacyMigrationEndpointRepairsTable = "relay_migration_endpoint_repairs"
+const migrationSourceSchema = v7MigrationSourceSchema + ";telegram_claim_idempotency"
+const v6MigrationSourceSchema = "punaro-relay-sqlite-v6:endpoints;conversations;memberships;roles;role_memberships;role_bindings;messages;deliveries;recipient_cursors;idempotency;conversation_idempotency;conversation_controls;conversation_control_idempotency;request_nonces;role_profiles;role_profile_idempotency;rate_buckets;direct_conversations;message_from_roles;direct_message_idempotency"
+const v5MigrationSourceSchema = "punaro-relay-sqlite-v5:endpoints;conversations;memberships;roles;role_memberships;role_bindings;messages;deliveries;recipient_cursors;idempotency;conversation_idempotency;conversation_controls;conversation_control_idempotency;request_nonces;role_profiles;role_profile_idempotency;rate_buckets"
+const v4MigrationSourceSchema = "punaro-relay-sqlite-v4:endpoints;conversations;memberships;roles;role_memberships;role_bindings;messages;deliveries;recipient_cursors;idempotency;conversation_idempotency;conversation_controls;conversation_control_idempotency;request_nonces;role_profiles;role_profile_idempotency"
+const v3MigrationSourceSchema = "punaro-relay-sqlite-v3:endpoints;conversations;memberships;roles;role_memberships;role_bindings;messages;deliveries;recipient_cursors;idempotency;conversation_idempotency;conversation_controls;conversation_control_idempotency;request_nonces"
 const roleMigrationSourceSchema = "punaro-relay-sqlite-v3:endpoints;conversations;memberships;roles;role_memberships;role_bindings;messages;deliveries;recipient_cursors;idempotency;conversation_idempotency;request_nonces"
 const legacyMigrationSourceSchema = "punaro-relay-sqlite-v1:endpoints;conversations;memberships;messages;deliveries;recipient_cursors;idempotency;conversation_idempotency;request_nonces"
+
+func migrationSourceQuery(spec migrationTableSpec, legacyTelegram bool) (string, string, string) {
+	if legacyTelegram && spec.name == "telegram_claim_idempotency" {
+		return "requested_by_machine AS machine_id,idempotency_key AS key,request_hash,conversation_id,created_at", "telegram_claims", "requested_by_machine,idempotency_key"
+	}
+	return spec.columns, spec.name, spec.order
+}
 
 // InspectMigrationSource reads an existing source without creating, migrating,
 // checkpointing, or changing its logical cutover state.
@@ -175,13 +318,22 @@ func CheckMigrationSourceEnrollmentCoverage(ctx context.Context, path, enrollmen
 	if err != nil {
 		return err
 	}
+	repairedOwners, err := readLegacyMigrationEndpointRepairs(ctx, tx, manifest)
+	if err != nil {
+		return err
+	}
 	rows, err := tx.QueryContext(ctx, `SELECT endpoint, machine_id FROM endpoints ORDER BY endpoint COLLATE BINARY`)
 	if err != nil {
 		return errors.New("relay migration endpoints are unavailable")
 	}
 	for rows.Next() {
 		var endpoint, machineID string
-		if err := rows.Scan(&endpoint, &machineID); err != nil || !authenticator.AllowsEndpoint(machineID, endpoint) {
+		if err := rows.Scan(&endpoint, &machineID); err != nil {
+			_ = rows.Close()
+			return errors.New("relay migration enrollment does not cover every endpoint")
+		}
+		retiredRepairEndpoint := repairedOwners[endpoint] == machineID
+		if !authenticator.AllowsEndpoint(machineID, endpoint) && !retiredRepairEndpoint {
 			_ = rows.Close()
 			return errors.New("relay migration enrollment does not cover every endpoint")
 		}
@@ -239,6 +391,11 @@ func PrepareMigrationSource(ctx context.Context, path, epochID, targetIdentity, 
 		if current.Phase != MigrationSourceActive || current.Fingerprint != expectedFingerprint {
 			return MigrationSourceManifest{}, errors.New("relay migration source changed before preparation")
 		}
+		if isLegacyTelegramRepairLineage(current) {
+			if err := repairLegacyTelegramMigrationSource(ctx, conn, current); err != nil {
+				return MigrationSourceManifest{}, err
+			}
+		}
 		if _, err := conn.ExecContext(ctx, `UPDATE endpoints SET lease_until=?,ownership_generation=ownership_generation+1,
 			consumer_id=NULL,consumer_generation=consumer_generation+CASE WHEN consumer_id IS NULL THEN 0 ELSE 1 END,consumer_lease_until=NULL`, now.UTC().UnixMilli()); err != nil {
 			return MigrationSourceManifest{}, errors.New("relay migration endpoint fencing failed")
@@ -254,6 +411,11 @@ func PrepareMigrationSource(ctx context.Context, path, epochID, targetIdentity, 
 			lease_generation=lease_generation+CASE WHEN lease_token IS NULL THEN 0 ELSE 1 END,
 			ownership_generation=NULL,consumer_generation=NULL,lease_until=NULL`); err != nil {
 			return MigrationSourceManifest{}, errors.New("relay migration delivery fencing failed")
+		}
+		if isLegacyTelegramRepairLineage(current) {
+			if err := verifyRepairedLegacyTelegramMigrationSource(ctx, conn); err != nil {
+				return MigrationSourceManifest{}, err
+			}
 		}
 		prepared, err := inspectMigrationSource(ctx, conn)
 		if err != nil {
@@ -274,6 +436,152 @@ func PrepareMigrationSource(ctx context.Context, path, epochID, targetIdentity, 
 		prepared.lastTransition = "prepared"
 		return prepared, nil
 	})
+}
+
+func retiredMigrationMachineID(endpoint string) string {
+	digest := sha256.Sum256([]byte(endpoint))
+	return "migration-retired-" + hex.EncodeToString(digest[:])
+}
+
+func readLegacyMigrationEndpointRepairs(ctx context.Context, q migrationQueryer, manifest MigrationSourceManifest) (map[string]string, error) {
+	var tables int
+	if err := q.QueryRowContext(ctx, `SELECT count(*) FROM sqlite_master WHERE type='table' AND name=?`, legacyMigrationEndpointRepairsTable).Scan(&tables); err != nil || tables < 0 || tables > 1 {
+		return nil, errors.New("relay migration legacy endpoint provenance is unavailable")
+	}
+	repairs := make(map[string]string)
+	if tables == 0 {
+		return repairs, nil
+	}
+	journalAllowsRepairs := isLegacyTelegramRepairLineage(manifest) && legacyTelegramRepairJournalAllows(manifest)
+	if !journalAllowsRepairs {
+		return nil, errors.New("relay migration legacy endpoint provenance is invalid")
+	}
+	rows, err := q.QueryContext(ctx, `SELECT endpoint,machine_id FROM relay_migration_endpoint_repairs ORDER BY endpoint COLLATE BINARY`)
+	if err != nil {
+		return nil, errors.New("relay migration legacy endpoint provenance is unavailable")
+	}
+	for rows.Next() {
+		var endpoint, machineID string
+		if err := rows.Scan(&endpoint, &machineID); err != nil || !ValidEndpoint(endpoint) || machineID != retiredMigrationMachineID(endpoint) {
+			_ = rows.Close()
+			return nil, errors.New("relay migration legacy endpoint provenance is invalid")
+		}
+		repairs[endpoint] = machineID
+	}
+	if err := rows.Close(); err != nil || rows.Err() != nil {
+		return nil, errors.New("relay migration legacy endpoint provenance is unavailable")
+	}
+	return repairs, nil
+}
+
+func installLegacyMigrationEndpointRepairs(ctx context.Context, conn *sql.Conn) error {
+	if _, err := conn.ExecContext(ctx, `CREATE TABLE relay_migration_endpoint_repairs(endpoint TEXT PRIMARY KEY,machine_id TEXT NOT NULL) WITHOUT ROWID`); err != nil {
+		return errors.New("relay migration legacy endpoint provenance cannot be installed")
+	}
+	for _, operation := range []string{"INSERT", "UPDATE", "DELETE"} {
+		name := "relay_migration_guard_" + legacyMigrationEndpointRepairsTable + "_" + strings.ToLower(operation)
+		statement := fmt.Sprintf(`CREATE TRIGGER %s BEFORE %s ON %s
+			WHEN COALESCE((SELECT phase FROM relay_migration_control WHERE singleton=1), 'missing') <> 'active'
+			BEGIN SELECT RAISE(ABORT, 'relay migration source is not writable'); END`, name, operation, legacyMigrationEndpointRepairsTable) // #nosec G201 -- identifiers come only from fixed internal constants.
+		if _, err := conn.ExecContext(ctx, statement); err != nil { // #nosec G202 -- identifiers come only from fixed internal constants.
+			return errors.New("relay migration legacy endpoint provenance cannot be installed")
+		}
+	}
+	return nil
+}
+
+func repairLegacyTelegramMigrationSource(ctx context.Context, conn *sql.Conn, manifest MigrationSourceManifest) error {
+	repairs, err := readLegacyMigrationEndpointRepairs(ctx, conn, manifest)
+	if err != nil {
+		return err
+	}
+	existing, err := conn.QueryContext(ctx, `SELECT endpoint,machine_id FROM endpoints ORDER BY endpoint COLLATE BINARY`)
+	if err != nil {
+		return errors.New("relay migration legacy endpoint provenance is unavailable")
+	}
+	for existing.Next() {
+		var endpoint, machineID string
+		if err := existing.Scan(&endpoint, &machineID); err != nil || machineID == retiredMigrationMachineID(endpoint) && repairs[endpoint] != machineID {
+			_ = existing.Close()
+			return errors.New("relay migration legacy endpoint provenance is invalid")
+		}
+		delete(repairs, endpoint)
+	}
+	if err := existing.Close(); err != nil || existing.Err() != nil || len(repairs) != 0 {
+		return errors.New("relay migration legacy endpoint provenance is unavailable")
+	}
+	var repairTables int
+	if err := conn.QueryRowContext(ctx, `SELECT count(*) FROM sqlite_master WHERE type='table' AND name=?`, legacyMigrationEndpointRepairsTable).Scan(&repairTables); err != nil {
+		return errors.New("relay migration legacy endpoint provenance is unavailable")
+	}
+	if repairTables == 0 {
+		if err := installLegacyMigrationEndpointRepairs(ctx, conn); err != nil {
+			return err
+		}
+	}
+	rows, err := conn.QueryContext(ctx, `WITH referenced(endpoint) AS (
+		SELECT endpoint FROM memberships
+		UNION SELECT from_endpoint FROM messages
+		UNION SELECT recipient_endpoint FROM deliveries WHERE substr(recipient_endpoint,1,6)<>char(30)||'role:'
+		UNION SELECT recipient_endpoint FROM recipient_cursors WHERE substr(recipient_endpoint,1,6)<>char(30)||'role:'
+		UNION SELECT actor_endpoint FROM conversation_controls
+		UNION SELECT member_endpoint FROM conversation_controls
+		UNION SELECT session_endpoint FROM role_bindings
+		UNION SELECT requested_by_endpoint FROM telegram_claims
+		UNION SELECT actor_endpoint FROM telegram_claim_events
+		UNION SELECT in_reply_to_endpoint FROM messages WHERE in_reply_to_endpoint IS NOT NULL
+	)
+	SELECT referenced.endpoint,COALESCE(min(role_bindings.machine_id),''),count(DISTINCT role_bindings.machine_id)
+	FROM referenced LEFT JOIN endpoints ON endpoints.endpoint=referenced.endpoint
+	LEFT JOIN role_bindings ON role_bindings.session_endpoint=referenced.endpoint
+	WHERE endpoints.endpoint IS NULL GROUP BY referenced.endpoint ORDER BY referenced.endpoint COLLATE BINARY`)
+	if err != nil {
+		return errors.New("relay migration legacy endpoint repair is unavailable")
+	}
+	type missingEndpoint struct{ endpoint, bindingMachine string }
+	var missing []missingEndpoint
+	for rows.Next() {
+		var endpoint, bindingMachine string
+		var bindingMachines int
+		if err := rows.Scan(&endpoint, &bindingMachine, &bindingMachines); err != nil || !ValidEndpoint(endpoint) || bindingMachines > 1 || bindingMachine != "" && !ValidMachineID(bindingMachine) {
+			_ = rows.Close()
+			return errors.New("relay migration legacy endpoint repair is ambiguous")
+		}
+		missing = append(missing, missingEndpoint{endpoint: endpoint, bindingMachine: bindingMachine})
+	}
+	if err := rows.Close(); err != nil || rows.Err() != nil {
+		return errors.New("relay migration legacy endpoint repair is unavailable")
+	}
+	for _, item := range missing {
+		machineID := item.bindingMachine
+		if machineID == "" {
+			machineID = retiredMigrationMachineID(item.endpoint)
+		}
+		if _, err := conn.ExecContext(ctx, `INSERT INTO endpoints(endpoint,machine_id,lease_until,ownership_generation,consumer_id,consumer_generation,consumer_lease_until) VALUES(?,?,0,1,NULL,0,NULL)`, item.endpoint, machineID); err != nil {
+			return errors.New("relay migration legacy endpoint repair cannot be persisted")
+		}
+		if item.bindingMachine == "" {
+			if _, err := conn.ExecContext(ctx, `INSERT INTO relay_migration_endpoint_repairs(endpoint,machine_id) VALUES(?,?)`, item.endpoint, machineID); err != nil {
+				return errors.New("relay migration legacy endpoint provenance cannot be persisted")
+			}
+		}
+	}
+	return nil
+}
+
+func verifyRepairedLegacyTelegramMigrationSource(ctx context.Context, q migrationQueryer) error {
+	var invalid bool
+	err := q.QueryRowContext(ctx, `SELECT
+		EXISTS(SELECT 1 FROM memberships m LEFT JOIN endpoints e ON e.endpoint=m.endpoint WHERE e.endpoint IS NULL)
+		OR EXISTS(SELECT 1 FROM messages m LEFT JOIN endpoints e ON e.endpoint=m.from_endpoint WHERE e.endpoint IS NULL)
+		OR EXISTS(SELECT 1 FROM deliveries d LEFT JOIN endpoints e ON e.endpoint=d.recipient_endpoint LEFT JOIN roles r ON substr(d.recipient_endpoint,7)=r.role WHERE (substr(d.recipient_endpoint,1,6)=char(30)||'role:' AND r.role IS NULL) OR (substr(d.recipient_endpoint,1,6)<>char(30)||'role:' AND e.endpoint IS NULL))
+		OR EXISTS(SELECT 1 FROM recipient_cursors c LEFT JOIN endpoints e ON e.endpoint=c.recipient_endpoint LEFT JOIN roles r ON substr(c.recipient_endpoint,7)=r.role WHERE (substr(c.recipient_endpoint,1,6)=char(30)||'role:' AND r.role IS NULL) OR (substr(c.recipient_endpoint,1,6)<>char(30)||'role:' AND e.endpoint IS NULL))
+		OR EXISTS(SELECT 1 FROM deliveries WHERE lease_machine_id IS NOT NULL OR lease_token IS NOT NULL OR ownership_generation IS NOT NULL OR consumer_generation IS NOT NULL OR lease_until IS NOT NULL)
+		OR EXISTS(SELECT 1 FROM role_bindings b LEFT JOIN roles r ON r.role=b.role LEFT JOIN endpoints e ON e.endpoint=b.session_endpoint WHERE r.role IS NULL OR e.endpoint IS NULL OR r.machine_id<>b.machine_id OR e.machine_id<>b.machine_id OR e.ownership_generation<>b.ownership_generation)`).Scan(&invalid)
+	if err != nil || invalid {
+		return errors.New("relay migration legacy source repair is incomplete")
+	}
+	return nil
 }
 
 // AbortPreparedMigrationSource reopens SQLite only before the permanent retire
@@ -376,18 +684,87 @@ func inspectMigrationSource(ctx context.Context, q migrationQueryer) (MigrationS
 	if err := q.QueryRowContext(ctx, `SELECT count(*) FROM sqlite_master WHERE type='table' AND name IN ('conversation_controls','conversation_control_idempotency')`).Scan(&controlTables); err != nil || controlTables != 0 && controlTables != 2 {
 		return MigrationSourceManifest{}, errors.New("relay migration source schema is unavailable")
 	}
+	var profileTables int
+	if err := q.QueryRowContext(ctx, `SELECT count(*) FROM sqlite_master WHERE type='table' AND name IN ('role_profiles','role_profile_idempotency')`).Scan(&profileTables); err != nil || profileTables != 0 && profileTables != 2 {
+		return MigrationSourceManifest{}, errors.New("relay migration source schema is unavailable")
+	}
+	var rateBucketTables int
+	if err := q.QueryRowContext(ctx, `SELECT count(*) FROM sqlite_master WHERE type='table' AND name='rate_buckets'`).Scan(&rateBucketTables); err != nil || rateBucketTables != 0 && rateBucketTables != 1 {
+		return MigrationSourceManifest{}, errors.New("relay migration source schema is unavailable")
+	}
+	var directTables int
+	if err := q.QueryRowContext(ctx, `SELECT count(*) FROM sqlite_master WHERE type='table' AND name IN ('direct_conversations','message_from_roles','direct_message_idempotency')`).Scan(&directTables); err != nil || directTables != 0 && directTables != 3 {
+		return MigrationSourceManifest{}, errors.New("relay migration source schema is unavailable")
+	}
+	if profileTables == 2 && controlTables != 2 {
+		return MigrationSourceManifest{}, errors.New("relay migration source schema is unavailable")
+	}
+	if rateBucketTables == 1 && profileTables != 2 {
+		return MigrationSourceManifest{}, errors.New("relay migration source schema is unavailable")
+	}
+	if directTables == 3 && rateBucketTables != 1 {
+		return MigrationSourceManifest{}, errors.New("relay migration source schema is unavailable")
+	}
+	var telegramTables int
+	if err := q.QueryRowContext(ctx, `SELECT count(*) FROM sqlite_master WHERE type='table' AND name IN ('telegram_claims','telegram_participants','telegram_claim_events')`).Scan(&telegramTables); err != nil || telegramTables != 0 && telegramTables != 3 {
+		return MigrationSourceManifest{}, errors.New("relay migration source schema is unavailable")
+	}
+	var claimIdempotencyTables int
+	if err := q.QueryRowContext(ctx, `SELECT count(*) FROM sqlite_master WHERE type='table' AND name='telegram_claim_idempotency'`).Scan(&claimIdempotencyTables); err != nil || claimIdempotencyTables != 0 && claimIdempotencyTables != 1 {
+		return MigrationSourceManifest{}, errors.New("relay migration source schema is unavailable")
+	}
+	if claimIdempotencyTables == 1 && telegramTables != 3 {
+		return MigrationSourceManifest{}, errors.New("relay migration source schema is unavailable")
+	}
+	var repairTables, toRoleColumns int
+	if err := q.QueryRowContext(ctx, `SELECT count(*) FROM sqlite_master WHERE type='table' AND name=?`, legacyMigrationEndpointRepairsTable).Scan(&repairTables); err != nil || repairTables < 0 || repairTables > 1 {
+		return MigrationSourceManifest{}, errors.New("relay migration source schema is unavailable")
+	}
+	if err := q.QueryRowContext(ctx, `SELECT count(*) FROM pragma_table_info('messages') WHERE name='to_role'`).Scan(&toRoleColumns); err != nil || toRoleColumns < 0 || toRoleColumns > 1 {
+		return MigrationSourceManifest{}, errors.New("relay migration source schema is unavailable")
+	}
+	reopenedLegacyTelegram := repairTables == 1 && toRoleColumns == 1 && controlTables == 2 && profileTables == 2 && rateBucketTables == 1 && directTables == 3 && telegramTables == 3 && claimIdempotencyTables == 1
 	manifest := MigrationSourceManifest{Version: 3}
 	roleOnly := false
-	tableSpecs, schema := migrationTableSpecs, migrationSourceSchema
-	if roleTables == 0 {
-		if controlTables != 0 {
+	legacyTelegram := false
+	tableSpecs, schema := v3MigrationTableSpecs, v3MigrationSourceSchema
+	switch {
+	case roleTables == 0:
+		if controlTables != 0 || profileTables != 0 || rateBucketTables != 0 || directTables != 0 {
 			return MigrationSourceManifest{}, errors.New("relay migration source schema is unavailable")
 		}
 		manifest.Version, tableSpecs, schema = 1, legacyMigrationTableSpecs, legacyMigrationSourceSchema
-	} else if controlTables == 0 {
+	case controlTables == 0:
 		roleOnly = true
 		manifest.Version = 2
 		tableSpecs, schema = roleMigrationTableSpecs, roleMigrationSourceSchema
+	case telegramTables == 3 && claimIdempotencyTables == 0 && profileTables == 0 && rateBucketTables == 0 && directTables == 0:
+		// The Telegram topic-claim branch was deployed from a supported
+		// predecessor before the later profile, rate-limit, direct-message,
+		// rename-idempotency, and claim-idempotency tables converged on main.
+		// Its conversation/message columns and Telegram tables are v7-shaped.
+		legacyTelegram = true
+		manifest.Version = 7
+		tableSpecs, schema = legacyTelegramV7MigrationTableSpecs, legacyTelegramV7MigrationSourceSchema
+	case reopenedLegacyTelegram:
+		manifest.Version = 8
+		manifest.legacyTelegramRepairLineage = true
+		tableSpecs, schema = migrationTableSpecs, migrationSourceSchema+";legacy-telegram-repair-lineage"
+	case claimIdempotencyTables == 1 && telegramTables == 3:
+		manifest.Version = 8
+		tableSpecs, schema = migrationTableSpecs, migrationSourceSchema
+	case directTables == 3 && telegramTables == 3:
+		manifest.Version = 7
+		tableSpecs, schema = v7MigrationTableSpecs, v7MigrationSourceSchema
+	case directTables == 3:
+		manifest.Version = 6
+		tableSpecs, schema = v6MigrationTableSpecs, v6MigrationSourceSchema
+	case profileTables == 2 && rateBucketTables == 1:
+		manifest.Version = 5
+		tableSpecs, schema = v5MigrationTableSpecs, v5MigrationSourceSchema
+	case profileTables == 2:
+		manifest.Version = 4
+		tableSpecs, schema = v4MigrationTableSpecs, v4MigrationSourceSchema
 	}
 	var storedFingerprint sql.NullString
 	var controlRows int
@@ -417,7 +794,10 @@ func inspectMigrationSource(ctx context.Context, q migrationQueryer) (MigrationS
 	if manifest.lastTransition != "" && manifest.lastTransition != "prepared" && manifest.lastTransition != "aborted" && manifest.lastTransition != "retired" {
 		return MigrationSourceManifest{}, errors.New("relay migration transition journal is invalid")
 	}
-	if err := verifyMigrationSourceSchemaVersion(ctx, q, manifest.Version, controlTables == 2); err != nil {
+	if reopenedLegacyTelegram && !legacyTelegramRepairJournalAllows(manifest) {
+		return MigrationSourceManifest{}, errors.New("relay migration legacy endpoint provenance is invalid")
+	}
+	if err := verifyMigrationSourceSchemaVersion(ctx, q, manifest.Version, controlTables == 2, profileTables == 2, rateBucketTables == 1, directTables == 3, legacyTelegram, legacyTelegram || manifest.legacyTelegramRepairLineage); err != nil {
 		return MigrationSourceManifest{}, err
 	}
 	overall := sha256.New()
@@ -429,7 +809,8 @@ func inspectMigrationSource(ctx context.Context, q migrationQueryer) (MigrationS
 	}
 	for _, spec := range tableSpecs {
 		tableHash := sha256.New()
-		query := fmt.Sprintf("SELECT %s FROM %s ORDER BY %s", spec.columns, spec.name, spec.order)
+		selectColumns, sourceTable, order := migrationSourceQuery(spec, legacyTelegram)
+		query := fmt.Sprintf("SELECT %s FROM %s ORDER BY %s", selectColumns, sourceTable, order)
 		rows, err := q.QueryContext(ctx, query) // #nosec G202 -- query fragments come only from the fixed migrationTableSpecs allowlist.
 		if err != nil {
 			return MigrationSourceManifest{}, errors.New("relay migration source rows are unavailable")
@@ -487,11 +868,18 @@ func inspectMigrationSource(ctx context.Context, q migrationQueryer) (MigrationS
 	return manifest, nil
 }
 
-func verifyMigrationSourceSchemaVersion(ctx context.Context, q migrationQueryer, version int, controls bool) error {
+func conversationDisplayNameTypeCheck(version int) string {
+	if version < 7 {
+		return ""
+	}
+	return " OR (display_name IS NOT NULL AND typeof(display_name)<>'text')"
+}
+
+func verifyMigrationSourceSchemaVersion(ctx context.Context, q migrationQueryer, version int, controls, profiles, rateBuckets, direct, legacyTelegram, legacyTelegramRepairLineage bool) error {
 	if version == 1 {
 		return verifyLegacyMigrationSourceSchema(ctx, q)
 	}
-	return verifyMigrationSourceSchema(ctx, q, controls)
+	return verifyMigrationSourceSchema(ctx, q, version, controls, profiles, rateBuckets, direct, legacyTelegram, legacyTelegramRepairLineage)
 }
 
 func verifyLegacyMigrationSourceSchema(ctx context.Context, q migrationQueryer) error {
@@ -508,6 +896,7 @@ func verifyLegacyMigrationSourceSchema(ctx context.Context, q migrationQueryer) 
 		}
 		names = append(names, name)
 	}
+	names = filterOperationalQuotaTables(names)
 	want := []string{"conversation_idempotency", "conversations", "deliveries", "endpoints", "idempotency", "memberships", "messages", "recipient_cursors", "relay_migration_control", "request_nonces"}
 	if err := rows.Err(); err != nil || strings.Join(names, "\x00") != strings.Join(want, "\x00") {
 		return errors.New("relay migration source has an unexpected schema")
@@ -526,7 +915,11 @@ func verifyLegacyMigrationSourceSchema(ctx context.Context, q migrationQueryer) 
 	return foreignKeys.Close()
 }
 
-func verifyMigrationSourceSchema(ctx context.Context, q migrationQueryer, controls bool) error {
+func verifyMigrationSourceSchema(ctx context.Context, q migrationQueryer, version int, controls, profiles, rateBuckets, direct, legacyTelegram, legacyTelegramRepairLineage bool) error {
+	var repairTables int
+	if err := q.QueryRowContext(ctx, `SELECT count(*) FROM sqlite_master WHERE type='table' AND name=?`, legacyMigrationEndpointRepairsTable).Scan(&repairTables); err != nil || repairTables < 0 || repairTables > 1 || repairTables == 1 && !legacyTelegramRepairLineage {
+		return errors.New("relay migration source schema is unavailable")
+	}
 	rows, err := q.QueryContext(ctx, `SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%' ORDER BY name`)
 	if err != nil {
 		return errors.New("relay migration source schema is unavailable")
@@ -540,33 +933,113 @@ func verifyMigrationSourceSchema(ctx context.Context, q migrationQueryer, contro
 		}
 		names = append(names, name)
 	}
-	want := []string{"conversation_control_idempotency", "conversation_controls", "conversation_idempotency", "conversations", "deliveries", "endpoints", "idempotency", "memberships", "messages", "recipient_cursors", "relay_migration_control", "request_nonces", "role_bindings", "role_memberships", "roles"}
-	if !controls {
-		want = []string{"conversation_idempotency", "conversations", "deliveries", "endpoints", "idempotency", "memberships", "messages", "recipient_cursors", "relay_migration_control", "request_nonces", "role_bindings", "role_memberships", "roles"}
+	names = filterOperationalQuotaTables(names)
+	want := []string{"conversation_control_idempotency", "conversation_controls", "conversation_display_name_idempotency", "conversation_idempotency", "conversations", "deliveries", "endpoints", "idempotency", "memberships", "messages", "recipient_cursors", "relay_migration_control", "request_nonces", "role_bindings", "role_memberships", "roles", "telegram_claim_events", "telegram_claim_idempotency", "telegram_claims", "telegram_participants"}
+	switch {
+	case legacyTelegram:
+		want = []string{"conversation_control_idempotency", "conversation_controls", "conversation_idempotency", "conversations", "deliveries", "endpoints", "idempotency", "memberships", "messages", "recipient_cursors", "relay_migration_control", "request_nonces", "role_bindings", "role_memberships", "roles", "telegram_claim_events", "telegram_claims", "telegram_participants"}
+		if repairTables == 1 {
+			want = append(want, legacyMigrationEndpointRepairsTable)
+		}
+	case direct:
+		want = []string{"conversation_control_idempotency", "conversation_controls", "conversation_display_name_idempotency", "conversation_idempotency", "conversations", "deliveries", "direct_conversations", "direct_message_idempotency", "endpoints", "idempotency", "memberships", "message_from_roles", "messages", "rate_buckets", "recipient_cursors", "relay_migration_control", "request_nonces", "role_bindings", "role_memberships", "role_profile_idempotency", "role_profiles", "roles", "telegram_claim_events", "telegram_claim_idempotency", "telegram_claims", "telegram_participants"}
+	case rateBuckets:
+		want = []string{"conversation_control_idempotency", "conversation_controls", "conversation_display_name_idempotency", "conversation_idempotency", "conversations", "deliveries", "endpoints", "idempotency", "memberships", "messages", "rate_buckets", "recipient_cursors", "relay_migration_control", "request_nonces", "role_bindings", "role_memberships", "role_profile_idempotency", "role_profiles", "roles", "telegram_claim_events", "telegram_claim_idempotency", "telegram_claims", "telegram_participants"}
+	case profiles:
+		want = []string{"conversation_control_idempotency", "conversation_controls", "conversation_display_name_idempotency", "conversation_idempotency", "conversations", "deliveries", "endpoints", "idempotency", "memberships", "messages", "recipient_cursors", "relay_migration_control", "request_nonces", "role_bindings", "role_memberships", "role_profile_idempotency", "role_profiles", "roles", "telegram_claim_events", "telegram_claim_idempotency", "telegram_claims", "telegram_participants"}
+	case !controls:
+		want = []string{"conversation_display_name_idempotency", "conversation_idempotency", "conversations", "deliveries", "endpoints", "idempotency", "memberships", "messages", "recipient_cursors", "relay_migration_control", "request_nonces", "role_bindings", "role_memberships", "roles", "telegram_claim_events", "telegram_claim_idempotency", "telegram_claims", "telegram_participants"}
 	}
+	if legacyTelegramRepairLineage && !legacyTelegram {
+		want = append(want, legacyMigrationEndpointRepairsTable)
+	}
+	if version < 8 {
+		filtered := make([]string, 0, len(want))
+		for _, name := range want {
+			if name == "telegram_claim_idempotency" {
+				continue
+			}
+			filtered = append(filtered, name)
+		}
+		want = filtered
+	}
+	if version < 7 {
+		filtered := make([]string, 0, len(want))
+		for _, name := range want {
+			if name == "telegram_claims" || name == "telegram_participants" || name == "telegram_claim_events" || name == "conversation_display_name_idempotency" {
+				continue
+			}
+			filtered = append(filtered, name)
+		}
+		want = filtered
+	}
+	sort.Strings(want)
 	if strings.Join(names, "\x00") != strings.Join(want, "\x00") {
 		return errors.New("relay migration source has an unexpected schema")
 	}
 	expectedColumns := map[string][]string{
-		"endpoints":                        {"endpoint:TEXT:0:1:-", "machine_id:TEXT:1:0:-", "lease_until:INTEGER:1:0:-", "ownership_generation:INTEGER:1:0:1", "consumer_id:TEXT:0:0:-", "consumer_generation:INTEGER:1:0:0", "consumer_lease_until:INTEGER:0:0:-"},
-		"conversations":                    {"id:TEXT:0:1:-", "next_sequence:INTEGER:1:0:0", "created_at:INTEGER:1:0:-"},
-		"memberships":                      {"conversation_id:TEXT:1:1:-", "endpoint:TEXT:1:2:-", "capabilities:INTEGER:1:0:-"},
-		"roles":                            {"role:TEXT:0:1:-", "machine_id:TEXT:1:0:-"},
-		"role_memberships":                 {"conversation_id:TEXT:1:1:-", "role:TEXT:1:2:-", "capabilities:INTEGER:1:0:-"},
-		"role_bindings":                    {"role:TEXT:0:1:-", "session_endpoint:TEXT:1:0:-", "machine_id:TEXT:1:0:-", "ownership_generation:INTEGER:1:0:-", "lease_until:INTEGER:1:0:-"},
-		"messages":                         {"id:TEXT:0:1:-", "conversation_id:TEXT:1:0:-", "sequence:INTEGER:1:0:-", "from_endpoint:TEXT:1:0:-", "body:TEXT:1:0:-", "created_at:INTEGER:1:0:-"},
-		"deliveries":                       {"id:TEXT:0:1:-", "message_id:TEXT:1:0:-", "recipient_endpoint:TEXT:1:0:-", "lease_machine_id:TEXT:0:0:-", "lease_token:TEXT:0:0:-", "lease_generation:INTEGER:1:0:0", "ownership_generation:INTEGER:0:0:-", "consumer_generation:INTEGER:0:0:-", "lease_until:INTEGER:0:0:-", "acked_at:INTEGER:0:0:-"},
-		"recipient_cursors":                {"recipient_endpoint:TEXT:1:1:-", "conversation_id:TEXT:1:2:-", "sequence:INTEGER:1:0:0"},
-		"idempotency":                      {"machine_id:TEXT:1:1:-", "key:TEXT:1:2:-", "request_hash:TEXT:1:0:-", "message_id:TEXT:1:0:-", "created_at:INTEGER:1:0:-"},
-		"conversation_idempotency":         {"machine_id:TEXT:1:1:-", "key:TEXT:1:2:-", "request_hash:TEXT:1:0:-", "conversation_id:TEXT:1:0:-", "created_at:INTEGER:1:0:-"},
-		"conversation_controls":            {"id:TEXT:0:1:-", "conversation_id:TEXT:1:0:-", "actor_endpoint:TEXT:1:0:-", "operation:TEXT:1:0:-", "member_endpoint:TEXT:1:0:-", "member_capabilities:INTEGER:1:0:-", "created_at:INTEGER:1:0:-"},
-		"conversation_control_idempotency": {"machine_id:TEXT:1:1:-", "key:TEXT:1:2:-", "request_hash:TEXT:1:0:-", "control_id:TEXT:1:0:-", "created_at:INTEGER:1:0:-"},
-		"request_nonces":                   {"machine_id:TEXT:1:1:-", "nonce:TEXT:1:2:-", "expires_at:INTEGER:1:0:-"},
-		"relay_migration_control":          {"singleton:INTEGER:0:1:-", "source_id:TEXT:1:0:-", "phase:TEXT:1:0:'active'", "epoch_id:TEXT:0:0:-", "target_identity:TEXT:0:0:-", "fingerprint:TEXT:0:0:-", "last_epoch_id:TEXT:0:0:-", "last_target_identity:TEXT:0:0:-", "last_expected_fingerprint:TEXT:0:0:-", "last_result_fingerprint:TEXT:0:0:-", "last_cutoff:INTEGER:0:0:-", "last_transition:TEXT:0:0:-", "changed_at:INTEGER:1:0:-"},
+		"endpoints":                             {"endpoint:TEXT:0:1:-", "machine_id:TEXT:1:0:-", "lease_until:INTEGER:1:0:-", "ownership_generation:INTEGER:1:0:1", "consumer_id:TEXT:0:0:-", "consumer_generation:INTEGER:1:0:0", "consumer_lease_until:INTEGER:0:0:-"},
+		"conversations":                         {"id:TEXT:0:1:-", "next_sequence:INTEGER:1:0:0", "created_at:INTEGER:1:0:-", "display_name:TEXT:0:0:-"},
+		"memberships":                           {"conversation_id:TEXT:1:1:-", "endpoint:TEXT:1:2:-", "capabilities:INTEGER:1:0:-"},
+		"roles":                                 {"role:TEXT:0:1:-", "machine_id:TEXT:1:0:-"},
+		"role_memberships":                      {"conversation_id:TEXT:1:1:-", "role:TEXT:1:2:-", "capabilities:INTEGER:1:0:-"},
+		"role_bindings":                         {"role:TEXT:0:1:-", "session_endpoint:TEXT:1:0:-", "machine_id:TEXT:1:0:-", "ownership_generation:INTEGER:1:0:-", "lease_until:INTEGER:1:0:-"},
+		"messages":                              {"id:TEXT:0:1:-", "conversation_id:TEXT:1:0:-", "sequence:INTEGER:1:0:-", "from_endpoint:TEXT:1:0:-", "from_participant:TEXT:0:0:-", "in_reply_to_message_id:TEXT:0:0:-", "in_reply_to_endpoint:TEXT:0:0:-", "telegram_thread_id:INTEGER:0:0:-", "body:TEXT:1:0:-", "created_at:INTEGER:1:0:-"},
+		"rate_buckets":                          {"kind:TEXT:1:1:-", "bucket_key:TEXT:1:2:-", "tokens:INTEGER:1:0:-", "updated_at:INTEGER:1:0:-"},
+		"telegram_claims":                       {"conversation_id:TEXT:0:1:-", "status:TEXT:1:0:-", "requested_by_machine:TEXT:1:0:-", "requested_by_endpoint:TEXT:1:0:-", "idempotency_key:TEXT:1:0:-", "request_hash:TEXT:1:0:-", "created_at:INTEGER:1:0:-", "completed_at:INTEGER:0:0:-"},
+		"telegram_claim_idempotency":            {"machine_id:TEXT:1:1:-", "key:TEXT:1:2:-", "request_hash:TEXT:1:0:-", "conversation_id:TEXT:1:0:-", "created_at:INTEGER:1:0:-"},
+		"telegram_participants":                 {"conversation_id:TEXT:0:1:-", "label:TEXT:1:0:-", "created_at:INTEGER:1:0:-"},
+		"telegram_claim_events":                 {"id:TEXT:0:1:-", "conversation_id:TEXT:1:0:-", "event:TEXT:1:0:-", "actor_machine:TEXT:1:0:-", "actor_endpoint:TEXT:1:0:-", "created_at:INTEGER:1:0:-"},
+		"deliveries":                            {"id:TEXT:0:1:-", "message_id:TEXT:1:0:-", "recipient_endpoint:TEXT:1:0:-", "lease_machine_id:TEXT:0:0:-", "lease_token:TEXT:0:0:-", "lease_generation:INTEGER:1:0:0", "ownership_generation:INTEGER:0:0:-", "consumer_generation:INTEGER:0:0:-", "lease_until:INTEGER:0:0:-", "acked_at:INTEGER:0:0:-"},
+		"recipient_cursors":                     {"recipient_endpoint:TEXT:1:1:-", "conversation_id:TEXT:1:2:-", "sequence:INTEGER:1:0:0"},
+		"idempotency":                           {"machine_id:TEXT:1:1:-", "key:TEXT:1:2:-", "request_hash:TEXT:1:0:-", "message_id:TEXT:1:0:-", "created_at:INTEGER:1:0:-"},
+		"conversation_idempotency":              {"machine_id:TEXT:1:1:-", "key:TEXT:1:2:-", "request_hash:TEXT:1:0:-", "conversation_id:TEXT:1:0:-", "created_at:INTEGER:1:0:-"},
+		"conversation_controls":                 {"id:TEXT:0:1:-", "conversation_id:TEXT:1:0:-", "actor_endpoint:TEXT:1:0:-", "operation:TEXT:1:0:-", "member_endpoint:TEXT:1:0:-", "member_capabilities:INTEGER:1:0:-", "created_at:INTEGER:1:0:-"},
+		"conversation_control_idempotency":      {"machine_id:TEXT:1:1:-", "key:TEXT:1:2:-", "request_hash:TEXT:1:0:-", "control_id:TEXT:1:0:-", "created_at:INTEGER:1:0:-"},
+		"conversation_display_name_idempotency": {"machine_id:TEXT:1:1:-", "key:TEXT:1:2:-", "request_hash:TEXT:1:0:-", "conversation_id:TEXT:1:0:-", "created_at:INTEGER:1:0:-"},
+		"request_nonces":                        {"machine_id:TEXT:1:1:-", "nonce:TEXT:1:2:-", "expires_at:INTEGER:1:0:-"},
+		"relay_migration_control":               {"singleton:INTEGER:0:1:-", "source_id:TEXT:1:0:-", "phase:TEXT:1:0:'active'", "epoch_id:TEXT:0:0:-", "target_identity:TEXT:0:0:-", "fingerprint:TEXT:0:0:-", "last_epoch_id:TEXT:0:0:-", "last_target_identity:TEXT:0:0:-", "last_expected_fingerprint:TEXT:0:0:-", "last_result_fingerprint:TEXT:0:0:-", "last_cutoff:INTEGER:0:0:-", "last_transition:TEXT:0:0:-", "changed_at:INTEGER:1:0:-"},
+		"role_profiles":                         {"role:TEXT:0:1:-", "display_name:TEXT:0:0:-", "direct_addressable:INTEGER:1:0:0", "updated_at:INTEGER:1:0:-"},
+		"role_profile_idempotency":              {"machine_id:TEXT:1:1:-", "key:TEXT:1:2:-", "request_hash:TEXT:1:0:-", "role:TEXT:1:0:-", "display_name:TEXT:0:0:-", "direct_addressable:INTEGER:1:0:-", "updated_at:INTEGER:1:0:-", "created_at:INTEGER:1:0:-"},
+		"direct_conversations":                  {"role_low:TEXT:1:1:-", "role_high:TEXT:1:2:-", "conversation_id:TEXT:1:0:-", "created_at:INTEGER:1:0:-"},
+		"message_from_roles":                    {"message_id:TEXT:0:1:-", "from_role:TEXT:1:0:-"},
+		"direct_message_idempotency":            {"machine_id:TEXT:1:1:-", "key:TEXT:1:2:-", "request_hash:TEXT:1:0:-", "from_role:TEXT:1:0:-", "to_role:TEXT:1:0:-", "conversation_id:TEXT:1:0:-", "message_id:TEXT:1:0:-", "sequence:INTEGER:1:0:-", "created_at:INTEGER:1:0:-"},
+	}
+	if repairTables == 1 {
+		expectedColumns[legacyMigrationEndpointRepairsTable] = []string{"endpoint:TEXT:1:1:-", "machine_id:TEXT:1:0:-"}
 	}
 	if !controls {
 		delete(expectedColumns, "conversation_controls")
 		delete(expectedColumns, "conversation_control_idempotency")
+	}
+	if !profiles {
+		delete(expectedColumns, "role_profiles")
+		delete(expectedColumns, "role_profile_idempotency")
+	}
+	if !rateBuckets {
+		delete(expectedColumns, "rate_buckets")
+	}
+	if !direct {
+		delete(expectedColumns, "direct_conversations")
+		delete(expectedColumns, "message_from_roles")
+		delete(expectedColumns, "direct_message_idempotency")
+	}
+	if legacyTelegram {
+		delete(expectedColumns, "conversation_display_name_idempotency")
+	}
+	if legacyTelegramRepairLineage {
+		expectedColumns["messages"] = append(expectedColumns["messages"], "to_role:TEXT:0:0:-")
+	}
+	if version < 8 {
+		delete(expectedColumns, "telegram_claim_idempotency")
+	}
+	if version < 7 {
+		delete(expectedColumns, "telegram_claims")
+		delete(expectedColumns, "telegram_participants")
+		delete(expectedColumns, "telegram_claim_events")
+		delete(expectedColumns, "conversation_display_name_idempotency")
+		expectedColumns["conversations"] = []string{"id:TEXT:0:1:-", "next_sequence:INTEGER:1:0:0", "created_at:INTEGER:1:0:-"}
+		expectedColumns["messages"] = []string{"id:TEXT:0:1:-", "conversation_id:TEXT:1:0:-", "sequence:INTEGER:1:0:-", "from_endpoint:TEXT:1:0:-", "body:TEXT:1:0:-", "created_at:INTEGER:1:0:-"}
 	}
 	for table, expected := range expectedColumns {
 		columns, err := q.QueryContext(ctx, fmt.Sprintf("PRAGMA table_info(%s)", table)) // #nosec G202 -- table comes only from the fixed expectedColumns allowlist.
@@ -595,20 +1068,51 @@ func verifyMigrationSourceSchema(ctx context.Context, q migrationQueryer, contro
 		}
 	}
 	expectedForeignKeys := map[string][]string{
-		"memberships":                      {"conversations:conversation_id:id:NO ACTION:CASCADE:NONE"},
-		"role_memberships":                 {"conversations:conversation_id:id:NO ACTION:CASCADE:NONE", "roles:role:role:NO ACTION:RESTRICT:NONE"},
-		"role_bindings":                    {"roles:role:role:NO ACTION:CASCADE:NONE"},
-		"messages":                         {"conversations:conversation_id:id:NO ACTION:CASCADE:NONE"},
-		"deliveries":                       {"messages:message_id:id:NO ACTION:CASCADE:NONE"},
-		"recipient_cursors":                {"conversations:conversation_id:id:NO ACTION:CASCADE:NONE"},
-		"idempotency":                      {"messages:message_id:id:NO ACTION:CASCADE:NONE"},
-		"conversation_idempotency":         {"conversations:conversation_id:id:NO ACTION:CASCADE:NONE"},
-		"conversation_controls":            {"conversations:conversation_id:id:NO ACTION:CASCADE:NONE"},
-		"conversation_control_idempotency": {"conversation_controls:control_id:id:NO ACTION:CASCADE:NONE"},
+		"memberships":                           {"conversations:conversation_id:id:NO ACTION:CASCADE:NONE"},
+		"role_memberships":                      {"conversations:conversation_id:id:NO ACTION:CASCADE:NONE", "roles:role:role:NO ACTION:RESTRICT:NONE"},
+		"role_bindings":                         {"roles:role:role:NO ACTION:CASCADE:NONE"},
+		"messages":                              {"conversations:conversation_id:id:NO ACTION:CASCADE:NONE"},
+		"deliveries":                            {"messages:message_id:id:NO ACTION:CASCADE:NONE"},
+		"recipient_cursors":                     {"conversations:conversation_id:id:NO ACTION:CASCADE:NONE"},
+		"idempotency":                           {"messages:message_id:id:NO ACTION:CASCADE:NONE"},
+		"conversation_idempotency":              {"conversations:conversation_id:id:NO ACTION:CASCADE:NONE"},
+		"conversation_controls":                 {"conversations:conversation_id:id:NO ACTION:CASCADE:NONE"},
+		"conversation_control_idempotency":      {"conversation_controls:control_id:id:NO ACTION:CASCADE:NONE"},
+		"conversation_display_name_idempotency": {"conversations:conversation_id:id:NO ACTION:CASCADE:NONE"},
+		"role_profiles":                         {"roles:role:role:NO ACTION:CASCADE:NONE"},
+		"role_profile_idempotency":              {"role_profiles:role:role:NO ACTION:CASCADE:NONE"},
+		"direct_conversations":                  {"roles:role_low:role:NO ACTION:RESTRICT:NONE", "roles:role_high:role:NO ACTION:RESTRICT:NONE", "conversations:conversation_id:id:NO ACTION:CASCADE:NONE"},
+		"message_from_roles":                    {"messages:message_id:id:NO ACTION:CASCADE:NONE", "roles:from_role:role:NO ACTION:RESTRICT:NONE"},
+		"direct_message_idempotency":            {"conversations:conversation_id:id:NO ACTION:CASCADE:NONE", "messages:message_id:id:NO ACTION:CASCADE:NONE"},
+		"telegram_claims":                       {"conversations:conversation_id:id:NO ACTION:CASCADE:NONE"},
+		"telegram_participants":                 {"conversations:conversation_id:id:NO ACTION:CASCADE:NONE"},
+		"telegram_claim_events":                 {"conversations:conversation_id:id:NO ACTION:CASCADE:NONE"},
+		"telegram_claim_idempotency":            {"conversations:conversation_id:id:NO ACTION:CASCADE:NONE"},
 	}
 	if !controls {
 		delete(expectedForeignKeys, "conversation_controls")
 		delete(expectedForeignKeys, "conversation_control_idempotency")
+	}
+	if !profiles {
+		delete(expectedForeignKeys, "role_profiles")
+		delete(expectedForeignKeys, "role_profile_idempotency")
+	}
+	if !direct {
+		delete(expectedForeignKeys, "direct_conversations")
+		delete(expectedForeignKeys, "message_from_roles")
+		delete(expectedForeignKeys, "direct_message_idempotency")
+	}
+	if legacyTelegram {
+		delete(expectedForeignKeys, "conversation_display_name_idempotency")
+	}
+	if version < 8 {
+		delete(expectedForeignKeys, "telegram_claim_idempotency")
+	}
+	if version < 7 {
+		delete(expectedForeignKeys, "telegram_claims")
+		delete(expectedForeignKeys, "telegram_participants")
+		delete(expectedForeignKeys, "telegram_claim_events")
+		delete(expectedForeignKeys, "conversation_display_name_idempotency")
 	}
 	for table := range expectedColumns {
 		foreignKeys, err := q.QueryContext(ctx, fmt.Sprintf("PRAGMA foreign_key_list(%s)", table)) // #nosec G202 -- table comes only from the fixed expectedColumns allowlist.
@@ -646,12 +1150,67 @@ func verifyMigrationSourceSchema(ctx context.Context, q migrationQueryer, contro
 		"conversation_idempotency:1:pk:0:machine_id,key",
 		"conversation_controls:1:pk:0:id",
 		"conversation_control_idempotency:1:pk:0:machine_id,key",
+		"conversation_display_name_idempotency:1:pk:0:machine_id,key",
 		"request_nonces:1:pk:0:machine_id,nonce", "request_nonces:0:c:0:expires_at",
+		"role_profiles:1:pk:0:role",
+		"role_profile_idempotency:1:pk:0:machine_id,key",
+		"telegram_claims:1:pk:0:conversation_id",
+		"telegram_claims:1:c:0:requested_by_machine,idempotency_key",
+		"telegram_participants:1:pk:0:conversation_id",
+		"telegram_claim_events:1:pk:0:id",
+		"telegram_claim_idempotency:1:pk:0:machine_id,key",
+	}
+	if !profiles {
+		expectedIndexes = append(expectedIndexes[:len(expectedIndexes)-7], expectedIndexes[len(expectedIndexes)-5:]...)
 	}
 	if !controls {
 		expectedIndexes = []string{
-			"endpoints:1:pk:0:endpoint", "conversations:1:pk:0:id", "memberships:1:pk:0:conversation_id,endpoint", "roles:1:pk:0:role", "role_memberships:1:pk:0:conversation_id,role", "role_bindings:1:pk:0:role", "role_bindings:0:c:0:machine_id,session_endpoint,ownership_generation,lease_until", "messages:1:pk:0:id", "messages:1:u:0:conversation_id,sequence", "deliveries:1:pk:0:id", "deliveries:1:u:0:message_id,recipient_endpoint", "deliveries:0:c:0:recipient_endpoint,acked_at,lease_until", "recipient_cursors:1:pk:0:recipient_endpoint,conversation_id", "idempotency:1:pk:0:machine_id,key", "conversation_idempotency:1:pk:0:machine_id,key", "request_nonces:1:pk:0:machine_id,nonce", "request_nonces:0:c:0:expires_at",
+			"endpoints:1:pk:0:endpoint", "conversations:1:pk:0:id", "memberships:1:pk:0:conversation_id,endpoint", "roles:1:pk:0:role", "role_memberships:1:pk:0:conversation_id,role", "role_bindings:1:pk:0:role", "role_bindings:0:c:0:machine_id,session_endpoint,ownership_generation,lease_until", "messages:1:pk:0:id", "messages:1:u:0:conversation_id,sequence", "deliveries:1:pk:0:id", "deliveries:1:u:0:message_id,recipient_endpoint", "deliveries:0:c:0:recipient_endpoint,acked_at,lease_until", "recipient_cursors:1:pk:0:recipient_endpoint,conversation_id", "idempotency:1:pk:0:machine_id,key", "conversation_idempotency:1:pk:0:machine_id,key", "conversation_display_name_idempotency:1:pk:0:machine_id,key", "request_nonces:1:pk:0:machine_id,nonce", "request_nonces:0:c:0:expires_at",
+			"telegram_claims:1:pk:0:conversation_id", "telegram_claims:1:c:0:requested_by_machine,idempotency_key", "telegram_participants:1:pk:0:conversation_id", "telegram_claim_events:1:pk:0:id", "telegram_claim_idempotency:1:pk:0:machine_id,key",
 		}
+	}
+	if rateBuckets {
+		expectedIndexes = append(expectedIndexes, "rate_buckets:1:pk:0:kind,bucket_key")
+	}
+	if direct {
+		expectedIndexes = append(expectedIndexes,
+			"direct_conversations:1:pk:0:role_low,role_high", "direct_conversations:1:u:0:conversation_id",
+			"message_from_roles:1:pk:0:message_id",
+			"direct_message_idempotency:1:pk:0:machine_id,key",
+		)
+	}
+	if version < 8 {
+		filtered := expectedIndexes[:0]
+		for _, index := range expectedIndexes {
+			if strings.HasPrefix(index, "telegram_claim_idempotency:") {
+				continue
+			}
+			filtered = append(filtered, index)
+		}
+		expectedIndexes = filtered
+	}
+	if version < 7 {
+		filtered := expectedIndexes[:0]
+		for _, index := range expectedIndexes {
+			if strings.HasPrefix(index, "telegram_") || strings.HasPrefix(index, "conversation_display_name_idempotency:") {
+				continue
+			}
+			filtered = append(filtered, index)
+		}
+		expectedIndexes = filtered
+	}
+	if legacyTelegram {
+		filtered := expectedIndexes[:0]
+		for _, index := range expectedIndexes {
+			if strings.HasPrefix(index, "conversation_display_name_idempotency:") || index == "telegram_claims:1:c:0:requested_by_machine,idempotency_key" {
+				continue
+			}
+			filtered = append(filtered, index)
+		}
+		expectedIndexes = filtered
+	}
+	if repairTables == 1 {
+		expectedIndexes = append(expectedIndexes, legacyMigrationEndpointRepairsTable+":1:pk:0:endpoint")
 	}
 	var actualIndexes []string
 	for table := range expectedColumns {
@@ -736,9 +1295,38 @@ func verifyMigrationSourceSchema(ctx context.Context, q migrationQueryer, contro
 			return errors.New("relay migration source has an unexpected trigger")
 		}
 	}
-	wantTriggers := 42
-	if !controls {
-		wantTriggers = 36
+	wantTriggers := 57
+	switch {
+	case direct:
+		wantTriggers = 75
+	case rateBuckets:
+		wantTriggers = 66
+	case profiles:
+		wantTriggers = 63
+	case !controls:
+		wantTriggers = 51
+	}
+	if version < 8 {
+		wantTriggers -= 3
+	}
+	if repairTables == 1 {
+		wantTriggers += 3
+	}
+	if version < 7 {
+		wantTriggers -= 12
+	}
+	if legacyTelegram {
+		wantTriggers -= 3
+	}
+	var quotaTables int
+	if err := q.QueryRowContext(ctx, `SELECT count(*) FROM sqlite_master WHERE type='table' AND name IN ('pending_quota_recipients','pending_quota_install','delivery_terminals')`).Scan(&quotaTables); err != nil || quotaTables != 0 && quotaTables != 2 && quotaTables != 3 {
+		return errors.New("relay migration source schema is unavailable")
+	}
+	if quotaTables >= 2 {
+		wantTriggers += 6
+	}
+	if quotaTables == 3 {
+		wantTriggers += 3
 	}
 	if err := triggerRows.Close(); err != nil || triggerRows.Err() != nil || len(seenTriggers) != wantTriggers {
 		return errors.New("relay migration source guard inventory is incomplete")
@@ -791,7 +1379,7 @@ func verifyMigrationSourceSchema(ctx context.Context, q migrationQueryer, contro
 		OR EXISTS (SELECT 1 FROM conversation_controls AS control LEFT JOIN conversation_control_idempotency AS retry ON retry.control_id=control.id GROUP BY control.id HAVING count(retry.control_id)<>1)
 		OR EXISTS (SELECT 1 FROM uuid_values WHERE typeof(value)<>'text' OR length(value)<>36 OR substr(value,9,1)<>'-' OR substr(value,14,1)<>'-' OR substr(value,19,1)<>'-' OR substr(value,24,1)<>'-' OR lower(replace(value,'-','')) GLOB '*[^0-9a-f]*')
 		OR EXISTS (SELECT 1 FROM endpoints WHERE typeof(endpoint)<>'text' OR typeof(machine_id)<>'text' OR typeof(lease_until)<>'integer' OR typeof(ownership_generation)<>'integer' OR (consumer_id IS NOT NULL AND typeof(consumer_id)<>'text') OR typeof(consumer_generation)<>'integer' OR (consumer_lease_until IS NOT NULL AND typeof(consumer_lease_until)<>'integer'))
-		OR EXISTS (SELECT 1 FROM conversations WHERE typeof(next_sequence)<>'integer' OR typeof(created_at)<>'integer')
+		OR EXISTS (SELECT 1 FROM conversations WHERE typeof(next_sequence)<>'integer' OR typeof(created_at)<>'integer'` + conversationDisplayNameTypeCheck(version) + `)
 		OR EXISTS (SELECT 1 FROM memberships WHERE typeof(endpoint)<>'text' OR typeof(capabilities)<>'integer')
 		OR EXISTS (SELECT 1 FROM roles WHERE typeof(role)<>'text' OR typeof(machine_id)<>'text')
 		OR EXISTS (SELECT 1 FROM role_memberships WHERE typeof(role)<>'text' OR typeof(capabilities)<>'integer')
@@ -812,6 +1400,59 @@ func verifyMigrationSourceSchema(ctx context.Context, q migrationQueryer, contro
 		OR EXISTS (SELECT 1 FROM conversation_control_idempotency WHERE typeof(machine_id)<>'text' OR typeof(key)<>'text' OR typeof(request_hash)<>'text' OR typeof(created_at)<>'integer')
 		OR EXISTS (SELECT 1 FROM request_nonces WHERE typeof(machine_id)<>'text' OR typeof(nonce)<>'text' OR typeof(expires_at)<>'integer')
 		OR EXISTS (SELECT 1 FROM relay_migration_control WHERE typeof(source_id)<>'text' OR typeof(phase)<>'text' OR (epoch_id IS NOT NULL AND typeof(epoch_id)<>'text') OR (target_identity IS NOT NULL AND typeof(target_identity)<>'text') OR (fingerprint IS NOT NULL AND typeof(fingerprint)<>'text') OR (last_epoch_id IS NOT NULL AND typeof(last_epoch_id)<>'text') OR (last_target_identity IS NOT NULL AND typeof(last_target_identity)<>'text') OR (last_expected_fingerprint IS NOT NULL AND typeof(last_expected_fingerprint)<>'text') OR (last_result_fingerprint IS NOT NULL AND typeof(last_result_fingerprint)<>'text') OR (last_cutoff IS NOT NULL AND typeof(last_cutoff)<>'integer') OR (last_transition IS NOT NULL AND typeof(last_transition)<>'text') OR typeof(changed_at)<>'integer')`
+	if rateBuckets {
+		logicalStateQuery += `
+		OR EXISTS (SELECT 1 FROM rate_buckets WHERE kind NOT IN ('sender','conversation') OR typeof(kind)<>'text' OR typeof(bucket_key)<>'text' OR typeof(tokens)<>'integer' OR tokens<0 OR typeof(updated_at)<>'integer')`
+	}
+	if direct {
+		logicalStateQuery = strings.Replace(logicalStateQuery, "UNION ALL SELECT control_id FROM conversation_control_idempotency\n\t)", "UNION ALL SELECT control_id FROM conversation_control_idempotency\n\t\tUNION ALL SELECT conversation_id FROM direct_conversations UNION ALL SELECT message_id FROM message_from_roles\n\t\tUNION ALL SELECT conversation_id FROM direct_message_idempotency UNION ALL SELECT message_id FROM direct_message_idempotency\n\t)", 1)
+		logicalStateQuery += `
+		OR EXISTS (SELECT 1 FROM direct_conversations WHERE role_low>=role_high OR typeof(role_low)<>'text' OR typeof(role_high)<>'text' OR typeof(created_at)<>'integer')
+		OR EXISTS (SELECT 1 FROM direct_conversations AS pair LEFT JOIN roles AS low ON low.role=pair.role_low LEFT JOIN roles AS high ON high.role=pair.role_high LEFT JOIN conversations AS conversation ON conversation.id=pair.conversation_id WHERE low.role IS NULL OR high.role IS NULL OR conversation.id IS NULL)
+		OR EXISTS (SELECT 1 FROM message_from_roles AS sender LEFT JOIN messages AS message ON message.id=sender.message_id LEFT JOIN roles AS role ON role.role=sender.from_role WHERE message.id IS NULL OR role.role IS NULL OR typeof(sender.from_role)<>'text')
+		OR EXISTS (SELECT 1 FROM direct_message_idempotency WHERE length(request_hash)<>64 OR request_hash GLOB '*[^0-9a-f]*' OR sequence<1)
+		OR EXISTS (SELECT 1 FROM direct_message_idempotency AS retry LEFT JOIN conversations AS conversation ON conversation.id=retry.conversation_id LEFT JOIN messages AS message ON message.id=retry.message_id WHERE conversation.id IS NULL OR message.id IS NULL
+			OR typeof(retry.machine_id)<>'text' OR typeof(retry.key)<>'text' OR typeof(retry.request_hash)<>'text' OR typeof(retry.from_role)<>'text' OR typeof(retry.to_role)<>'text' OR typeof(retry.sequence)<>'integer' OR typeof(retry.created_at)<>'integer')`
+	}
+	if profiles {
+		logicalStateQuery += `
+		OR EXISTS (SELECT 1 FROM role_profiles WHERE direct_addressable NOT IN (0,1) OR typeof(role)<>'text' OR (display_name IS NOT NULL AND typeof(display_name)<>'text') OR typeof(direct_addressable)<>'integer' OR typeof(updated_at)<>'integer')
+		OR EXISTS (SELECT 1 FROM role_profiles AS profile LEFT JOIN roles AS role ON role.role=profile.role WHERE role.role IS NULL)
+		OR EXISTS (SELECT 1 FROM role_profile_idempotency WHERE length(request_hash)<>64 OR request_hash GLOB '*[^0-9a-f]*' OR direct_addressable NOT IN (0,1))
+		OR EXISTS (SELECT 1 FROM role_profile_idempotency AS retry LEFT JOIN role_profiles AS profile ON profile.role=retry.role WHERE profile.role IS NULL
+			OR typeof(retry.machine_id)<>'text' OR typeof(retry.key)<>'text' OR typeof(retry.request_hash)<>'text' OR typeof(retry.role)<>'text'
+			OR (retry.display_name IS NOT NULL AND typeof(retry.display_name)<>'text') OR typeof(retry.direct_addressable)<>'integer' OR typeof(retry.updated_at)<>'integer' OR typeof(retry.created_at)<>'integer')`
+	}
+	if legacyTelegram {
+		for _, clause := range []string{
+			"\n        OR EXISTS (SELECT 1 FROM memberships AS membership LEFT JOIN endpoints AS endpoint ON endpoint.endpoint=membership.endpoint WHERE endpoint.endpoint IS NULL)",
+			"\n        OR EXISTS (SELECT 1 FROM messages AS message LEFT JOIN endpoints AS endpoint ON endpoint.endpoint=message.from_endpoint WHERE endpoint.endpoint IS NULL)",
+			"\n\t\tOR EXISTS (SELECT 1 FROM conversation_controls AS control\n\t\t\tLEFT JOIN endpoints AS actor ON actor.endpoint=control.actor_endpoint\n\t\t\tLEFT JOIN endpoints AS member ON member.endpoint=control.member_endpoint\n\t\t\tWHERE actor.endpoint IS NULL OR member.endpoint IS NULL)",
+		} {
+			logicalStateQuery = strings.ReplaceAll(logicalStateQuery, clause, "")
+		}
+		logicalStateQuery = strings.Replace(logicalStateQuery,
+			`OR EXISTS (SELECT 1 FROM deliveries WHERE lease_generation<0 OR (lease_token IS NOT NULL AND (ownership_generation<1 OR consumer_generation<0)) OR (acked_at IS NOT NULL AND lease_token IS NOT NULL) OR ((lease_machine_id IS NULL OR lease_token IS NULL OR ownership_generation IS NULL OR consumer_generation IS NULL OR lease_until IS NULL) AND NOT (lease_machine_id IS NULL AND lease_token IS NULL AND ownership_generation IS NULL AND consumer_generation IS NULL AND lease_until IS NULL)))`,
+			`OR EXISTS (SELECT 1 FROM deliveries WHERE lease_generation<0)`, 1)
+		logicalStateQuery = strings.Replace(logicalStateQuery,
+			`OR EXISTS (SELECT 1 FROM deliveries AS delivery LEFT JOIN endpoints AS endpoint ON endpoint.endpoint=delivery.recipient_endpoint LEFT JOIN roles AS role ON substr(delivery.recipient_endpoint,7)=role.role WHERE (substr(delivery.recipient_endpoint,1,6)=char(30)||'role:' AND role.role IS NULL) OR (substr(delivery.recipient_endpoint,1,6)<>char(30)||'role:' AND endpoint.endpoint IS NULL))`,
+			`OR EXISTS (SELECT 1 FROM deliveries AS delivery LEFT JOIN roles AS role ON substr(delivery.recipient_endpoint,7)=role.role WHERE substr(delivery.recipient_endpoint,1,6)=char(30)||'role:' AND role.role IS NULL)`, 1)
+		logicalStateQuery = strings.Replace(logicalStateQuery,
+			`OR EXISTS (SELECT 1 FROM recipient_cursors AS cursor LEFT JOIN endpoints AS endpoint ON endpoint.endpoint=cursor.recipient_endpoint LEFT JOIN roles AS role ON substr(cursor.recipient_endpoint,7)=role.role WHERE (substr(cursor.recipient_endpoint,1,6)=char(30)||'role:' AND role.role IS NULL) OR (substr(cursor.recipient_endpoint,1,6)<>char(30)||'role:' AND endpoint.endpoint IS NULL))`,
+			`OR EXISTS (SELECT 1 FROM recipient_cursors AS cursor LEFT JOIN roles AS role ON substr(cursor.recipient_endpoint,7)=role.role WHERE substr(cursor.recipient_endpoint,1,6)=char(30)||'role:' AND role.role IS NULL)`, 1)
+		logicalStateQuery = strings.Replace(logicalStateQuery,
+			`WHERE role.role IS NULL OR endpoint.endpoint IS NULL`,
+			`WHERE role.role IS NULL`, 1)
+		logicalStateQuery = strings.Replace(logicalStateQuery,
+			`OR endpoint.machine_id<>binding.machine_id OR endpoint.ownership_generation<>binding.ownership_generation)`,
+			`OR (endpoint.endpoint IS NOT NULL AND endpoint.machine_id<>binding.machine_id))`, 1)
+		logicalStateQuery += `
+		OR EXISTS (SELECT 1 FROM telegram_claims GROUP BY requested_by_machine,idempotency_key HAVING count(*)>1)`
+	}
+	if legacyTelegramRepairLineage {
+		logicalStateQuery += `
+		OR EXISTS (SELECT 1 FROM messages WHERE to_role IS NOT NULL)`
+	}
 	if !controls {
 		for _, clause := range []string{
 			"\n\t\tUNION ALL SELECT id FROM conversation_controls UNION ALL SELECT conversation_id FROM conversation_controls\n\t\tUNION ALL SELECT control_id FROM conversation_control_idempotency",
@@ -861,18 +1502,30 @@ func validateMigrationSourceValue(table, column string, value any) error {
 	switch table + "." + column {
 	case "endpoints.endpoint", "memberships.endpoint", "messages.from_endpoint", "role_bindings.session_endpoint", "conversation_controls.actor_endpoint", "conversation_controls.member_endpoint":
 		valid = ValidEndpoint(text)
-	case "roles.role", "role_memberships.role", "role_bindings.role":
+	case "roles.role", "role_memberships.role", "role_bindings.role", "role_profiles.role", "role_profile_idempotency.role", "direct_conversations.role_low", "direct_conversations.role_high", "message_from_roles.from_role", "direct_message_idempotency.from_role", "direct_message_idempotency.to_role":
 		valid = ValidRole(text)
-	case "endpoints.machine_id", "roles.machine_id", "role_bindings.machine_id", "deliveries.lease_machine_id", "idempotency.machine_id", "conversation_idempotency.machine_id", "conversation_control_idempotency.machine_id", "request_nonces.machine_id":
+	case "endpoints.machine_id", "roles.machine_id", "role_bindings.machine_id", "deliveries.lease_machine_id", "idempotency.machine_id", "conversation_idempotency.machine_id", "conversation_control_idempotency.machine_id", "conversation_display_name_idempotency.machine_id", "role_profile_idempotency.machine_id", "direct_message_idempotency.machine_id", "request_nonces.machine_id", "telegram_claims.requested_by_machine", "telegram_claim_events.actor_machine", "telegram_claim_idempotency.machine_id":
 		valid = ValidMachineID(text)
 	case "deliveries.recipient_endpoint", "recipient_cursors.recipient_endpoint":
 		_, roleRecipient := parseRoleRecipient(text)
 		valid = roleRecipient || ValidEndpoint(text)
-	case "endpoints.consumer_id", "idempotency.key", "conversation_idempotency.key", "conversation_control_idempotency.key", "request_nonces.nonce":
+	case "telegram_claims.requested_by_endpoint", "telegram_claim_events.actor_endpoint", "messages.in_reply_to_endpoint":
+		valid = ValidEndpoint(text)
+	case "messages.from_participant", "telegram_participants.label":
+		valid = text == TelegramUserParticipant
+	case "endpoints.consumer_id", "idempotency.key", "conversation_idempotency.key", "conversation_control_idempotency.key", "conversation_display_name_idempotency.key", "role_profile_idempotency.key", "direct_message_idempotency.key", "request_nonces.nonce", "telegram_claims.idempotency_key", "telegram_claim_idempotency.key":
 		valid = ValidRequestToken(text)
+	case "messages.in_reply_to_message_id":
+		valid = ValidRequestToken(text) || uuid.Validate(text) == nil
+	case "role_profiles.display_name", "role_profile_idempotency.display_name":
+		_, valid = NormalizeRoleDisplayName(text)
+	case "rate_buckets.kind":
+		valid = text == "sender" || text == "conversation"
+	case "rate_buckets.bucket_key":
+		valid = ValidMachineID(text) || uuid.Validate(text) == nil
 	case "messages.body":
 		valid = ValidMessageBody(text)
-	case "conversations.id", "memberships.conversation_id", "messages.id", "messages.conversation_id", "deliveries.id", "deliveries.message_id", "recipient_cursors.conversation_id", "idempotency.message_id", "conversation_idempotency.conversation_id", "conversation_controls.id", "conversation_controls.conversation_id", "conversation_control_idempotency.control_id":
+	case "conversations.id", "memberships.conversation_id", "messages.id", "messages.conversation_id", "deliveries.id", "deliveries.message_id", "recipient_cursors.conversation_id", "idempotency.message_id", "conversation_idempotency.conversation_id", "conversation_controls.id", "conversation_controls.conversation_id", "conversation_control_idempotency.control_id", "conversation_display_name_idempotency.conversation_id", "direct_conversations.conversation_id", "message_from_roles.message_id", "direct_message_idempotency.conversation_id", "direct_message_idempotency.message_id", "telegram_claims.conversation_id", "telegram_participants.conversation_id", "telegram_claim_events.id", "telegram_claim_events.conversation_id", "telegram_claim_idempotency.conversation_id":
 		valid = uuid.Validate(text) == nil
 	default:
 		return nil
@@ -939,6 +1592,28 @@ func setMigrationTableEvidence(manifest *MigrationSourceManifest, table string, 
 		manifest.Counts.ControlEvents, manifest.TableSHA256.ControlEvents = count, digest
 	case "conversation_control_idempotency":
 		manifest.Counts.ControlIdempotency, manifest.TableSHA256.ControlIdempotency = count, digest
+	case "role_profiles":
+		manifest.Counts.RoleProfiles, manifest.TableSHA256.RoleProfiles = count, digest
+	case "role_profile_idempotency":
+		manifest.Counts.RoleProfileIdempotency, manifest.TableSHA256.RoleProfileIdempotency = count, digest
+	case "rate_buckets":
+		manifest.Counts.RateBuckets, manifest.TableSHA256.RateBuckets = count, digest
+	case "direct_conversations":
+		manifest.Counts.DirectConversations, manifest.TableSHA256.DirectConversations = count, digest
+	case "message_from_roles":
+		manifest.Counts.MessageFromRoles, manifest.TableSHA256.MessageFromRoles = count, digest
+	case "direct_message_idempotency":
+		manifest.Counts.DirectMessageIdempotency, manifest.TableSHA256.DirectMessageIdempotency = count, digest
+	case "telegram_claims":
+		manifest.Counts.TelegramClaims, manifest.TableSHA256.TelegramClaims = count, digest
+	case "telegram_participants":
+		manifest.Counts.TelegramParticipants, manifest.TableSHA256.TelegramParticipants = count, digest
+	case "telegram_claim_events":
+		manifest.Counts.TelegramClaimEvents, manifest.TableSHA256.TelegramClaimEvents = count, digest
+	case "telegram_claim_idempotency":
+		manifest.Counts.TelegramClaimIdempotency, manifest.TableSHA256.TelegramClaimIdempotency = count, digest
+	case "conversation_display_name_idempotency":
+		manifest.Counts.DisplayNameIdempotency, manifest.TableSHA256.DisplayNameIdempotency = count, digest
 	case "request_nonces":
 		manifest.Counts.RequestNonces, manifest.TableSHA256.RequestNonces = count, digest
 	}

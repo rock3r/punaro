@@ -15,44 +15,58 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/rock3r/punaro/internal/listener"
+	"github.com/rock3r/punaro/internal/relay"
 
 	"github.com/rock3r/punaro/internal/ingress"
 )
 
 // Config is the explicit environment-derived daemon configuration.
 type Config struct {
-	ListenAddr                      string
-	HealthListenAddr                string
-	DataDir                         string
-	LogLevel                        string
-	RelayEnabled                    bool
-	RelayMachinesJSON               string
-	RelayStore                      string
-	AccessIssuer                    string
-	AccessAudience                  string
-	AccessJWKSURL                   string
-	AccessJWKSFile                  string
-	PostgresEnabled                 bool
-	PostgresDSNFile                 string
-	DeviceAuthEnabled               bool
-	MemoryAPIEnabled                bool
-	MemoryMutationsEnabled          bool
-	RemoteMCPMetadataEnabled        bool
-	RemoteMCPResourceURL            string
-	RemoteMCPAuthorizationServers   string
-	RemoteMCPTokenValidationEnabled bool
-	RemoteMCPIssuer                 string
-	RemoteMCPJWKSURL                string
-	RemoteMCPSubjectBindingsJSON    string
-	MemoryOpenAIEmbeddingsURL       string
-	MemoryOpenAIAPIKeyFile          string
-	TrustedAttachmentsEnabled       bool
-	TrustedAttachmentBlobDir        string
-	CredentialTransitionEnabled     bool
-	IngressMode                     string
-	PublicURL                       string
-	TrustedLANCIDR                  string
-	TrustedLANHTTP                  bool
+	ListenAddr                           string
+	HealthListenAddr                     string
+	DataDir                              string
+	LogLevel                             string
+	RelayEnabled                         bool
+	RelayMachinesJSON                    string
+	RelayStore                           string
+	AccessIssuer                         string
+	AccessAudience                       string
+	AccessJWKSURL                        string
+	AccessJWKSFile                       string
+	PostgresEnabled                      bool
+	PostgresDSNFile                      string
+	DeviceAuthEnabled                    bool
+	MemoryAPIEnabled                     bool
+	MemoryMutationsEnabled               bool
+	RemoteMCPMetadataEnabled             bool
+	RemoteMCPResourceURL                 string
+	RemoteMCPAuthorizationServers        string
+	RemoteMCPTokenValidationEnabled      bool
+	RemoteMCPIssuer                      string
+	RemoteMCPJWKSURL                     string
+	RemoteMCPSubjectBindingsJSON         string
+	MemoryOpenAIEmbeddingsURL            string
+	MemoryOpenAIAPIKeyFile               string
+	TrustedAttachmentsEnabled            bool
+	TrustedAttachmentBlobDir             string
+	CredentialTransitionEnabled          bool
+	IngressMode                          string
+	PublicURL                            string
+	TrustedLANCIDR                       string
+	TrustedLANHTTP                       bool
+	RelaySenderRateBurst                 int
+	RelaySenderRateRefillPerMinute       int
+	RelayConversationRateBurst           int
+	RelayConversationRateRefillPerMinute int
+	RelayRateRetryAfterMaxSeconds        int
+	RelayPendingRecipientCount           int
+	RelayPendingRecipientBytes           int64
+	RelayPendingInstallationCount        int
+	RelayPendingInstallationBytes        int64
+	RelayPendingRetryAfterSeconds        int
+	RelayPendingMaxAgeSeconds            int
+	RelayTerminalRetentionSeconds        int
+	RelayDeliveryMaintenanceBatch        int
 }
 
 // Load reads configuration and optionally loads an explicitly named dotenv file.
@@ -227,7 +241,109 @@ func Load(explicitEnvFile string) (Config, error) {
 	if !postgresEnabled && postgresDSNFile != "" {
 		return Config{}, fmt.Errorf("PUNARO_POSTGRES_DSN_FILE requires PUNARO_POSTGRES_ENABLED")
 	}
-	return Config{ListenAddr: listenAddr, HealthListenAddr: healthListenAddr, DataDir: dataDir, LogLevel: level, RelayEnabled: relayEnabled, RelayMachinesJSON: relayMachines, RelayStore: relayStore, AccessIssuer: accessIssuer, AccessAudience: accessAudience, AccessJWKSURL: accessJWKSURL, AccessJWKSFile: accessJWKSFile, PostgresEnabled: postgresEnabled, PostgresDSNFile: postgresDSNFile, DeviceAuthEnabled: deviceAuthEnabled, MemoryAPIEnabled: memoryAPIEnabled, MemoryMutationsEnabled: memoryMutationsEnabled, RemoteMCPMetadataEnabled: remoteMCPMetadataEnabled, RemoteMCPResourceURL: remoteMCPResourceURL, RemoteMCPAuthorizationServers: remoteMCPAuthorizationServers, RemoteMCPTokenValidationEnabled: remoteMCPTokenValidationEnabled, RemoteMCPIssuer: remoteMCPIssuer, RemoteMCPJWKSURL: remoteMCPJWKSURL, RemoteMCPSubjectBindingsJSON: remoteMCPSubjectBindingsJSON, MemoryOpenAIEmbeddingsURL: memoryOpenAIEmbeddingsURL, MemoryOpenAIAPIKeyFile: memoryOpenAIAPIKeyFile, TrustedAttachmentsEnabled: trustedAttachmentsEnabled, TrustedAttachmentBlobDir: trustedAttachmentBlobDir, CredentialTransitionEnabled: credentialTransitionEnabled, IngressMode: ingressMode, PublicURL: publicURL, TrustedLANCIDR: trustedLANCIDR, TrustedLANHTTP: trustedLANHTTP}, nil
+	defaults := relay.DefaultRateLimitConfig()
+	senderBurst, err := parseBoundedInt("PUNARO_RELAY_SENDER_RATE_BURST", value("PUNARO_RELAY_SENDER_RATE_BURST", strconv.Itoa(defaults.SenderBurst)), relay.RateLimitBurstMin, relay.RateLimitBurstMax)
+	if err != nil {
+		return Config{}, err
+	}
+	senderRefill, err := parseBoundedInt("PUNARO_RELAY_SENDER_RATE_REFILL_PER_MINUTE", value("PUNARO_RELAY_SENDER_RATE_REFILL_PER_MINUTE", strconv.Itoa(defaults.SenderRefillPerMinute)), relay.RateLimitRefillMin, relay.RateLimitRefillMax)
+	if err != nil {
+		return Config{}, err
+	}
+	conversationBurst, err := parseBoundedInt("PUNARO_RELAY_CONVERSATION_RATE_BURST", value("PUNARO_RELAY_CONVERSATION_RATE_BURST", strconv.Itoa(defaults.ConversationBurst)), relay.RateLimitBurstMin, relay.RateLimitBurstMax)
+	if err != nil {
+		return Config{}, err
+	}
+	conversationRefill, err := parseBoundedInt("PUNARO_RELAY_CONVERSATION_RATE_REFILL_PER_MINUTE", value("PUNARO_RELAY_CONVERSATION_RATE_REFILL_PER_MINUTE", strconv.Itoa(defaults.ConversationRefillPerMinute)), relay.RateLimitRefillMin, relay.RateLimitRefillMax)
+	if err != nil {
+		return Config{}, err
+	}
+	retryAfterMax, err := parseBoundedInt("PUNARO_RELAY_RATE_RETRY_AFTER_MAX_SECONDS", value("PUNARO_RELAY_RATE_RETRY_AFTER_MAX_SECONDS", strconv.Itoa(defaults.RetryAfterMaxSeconds)), relay.RateLimitRetryAfterMin, relay.RateLimitRetryAfterMaxBound)
+	if err != nil {
+		return Config{}, err
+	}
+	quotaDefaults := relay.DefaultQuotaConfig()
+	pendingRecipientCount, err := parseBoundedInt("PUNARO_RELAY_PENDING_RECIPIENT_COUNT", value("PUNARO_RELAY_PENDING_RECIPIENT_COUNT", strconv.Itoa(quotaDefaults.RecipientCount)), relay.QuotaCountMin, relay.QuotaCountMax)
+	if err != nil {
+		return Config{}, err
+	}
+	pendingRecipientBytes, err := parseBoundedInt64("PUNARO_RELAY_PENDING_RECIPIENT_BYTES", value("PUNARO_RELAY_PENDING_RECIPIENT_BYTES", strconv.FormatInt(quotaDefaults.RecipientBytes, 10)), relay.QuotaBytesMin, relay.QuotaBytesMax)
+	if err != nil {
+		return Config{}, err
+	}
+	pendingInstallationCount, err := parseBoundedInt("PUNARO_RELAY_PENDING_INSTALLATION_COUNT", value("PUNARO_RELAY_PENDING_INSTALLATION_COUNT", strconv.Itoa(quotaDefaults.InstallationCount)), relay.QuotaCountMin, relay.QuotaCountMax)
+	if err != nil {
+		return Config{}, err
+	}
+	pendingInstallationBytes, err := parseBoundedInt64("PUNARO_RELAY_PENDING_INSTALLATION_BYTES", value("PUNARO_RELAY_PENDING_INSTALLATION_BYTES", strconv.FormatInt(quotaDefaults.InstallationBytes, 10)), relay.QuotaBytesMin, relay.QuotaBytesMax)
+	if err != nil {
+		return Config{}, err
+	}
+	pendingRetryAfter, err := parseBoundedInt("PUNARO_RELAY_PENDING_RETRY_AFTER_SECONDS", value("PUNARO_RELAY_PENDING_RETRY_AFTER_SECONDS", strconv.Itoa(quotaDefaults.RetryAfterSeconds)), relay.RateLimitRetryAfterMin, relay.RateLimitRetryAfterMaxBound)
+	if err != nil {
+		return Config{}, err
+	}
+	retentionDefaults := relay.DefaultRetentionConfig()
+	pendingMaxAge, err := parseBoundedInt("PUNARO_RELAY_PENDING_MAX_AGE_SECONDS", value("PUNARO_RELAY_PENDING_MAX_AGE_SECONDS", strconv.Itoa(retentionDefaults.PendingMaxAgeSeconds)), relay.RetentionAgeMinSeconds, relay.RetentionAgeMaxSeconds)
+	if err != nil {
+		return Config{}, err
+	}
+	terminalRetention, err := parseBoundedInt("PUNARO_RELAY_TERMINAL_RETENTION_SECONDS", value("PUNARO_RELAY_TERMINAL_RETENTION_SECONDS", strconv.Itoa(retentionDefaults.TerminalRetentionSeconds)), relay.RetentionAgeMinSeconds, relay.RetentionAgeMaxSeconds)
+	if err != nil {
+		return Config{}, err
+	}
+	maintenanceBatch, err := parseBoundedInt("PUNARO_RELAY_DELIVERY_MAINTENANCE_BATCH", value("PUNARO_RELAY_DELIVERY_MAINTENANCE_BATCH", strconv.Itoa(retentionDefaults.MaintenanceBatch)), relay.RetentionBatchMin, relay.RetentionBatchMax)
+	if err != nil {
+		return Config{}, err
+	}
+	return Config{ListenAddr: listenAddr, HealthListenAddr: healthListenAddr, DataDir: dataDir, LogLevel: level, RelayEnabled: relayEnabled, RelayMachinesJSON: relayMachines, RelayStore: relayStore, AccessIssuer: accessIssuer, AccessAudience: accessAudience, AccessJWKSURL: accessJWKSURL, AccessJWKSFile: accessJWKSFile, PostgresEnabled: postgresEnabled, PostgresDSNFile: postgresDSNFile, DeviceAuthEnabled: deviceAuthEnabled, MemoryAPIEnabled: memoryAPIEnabled, MemoryMutationsEnabled: memoryMutationsEnabled, RemoteMCPMetadataEnabled: remoteMCPMetadataEnabled, RemoteMCPResourceURL: remoteMCPResourceURL, RemoteMCPAuthorizationServers: remoteMCPAuthorizationServers, RemoteMCPTokenValidationEnabled: remoteMCPTokenValidationEnabled, RemoteMCPIssuer: remoteMCPIssuer, RemoteMCPJWKSURL: remoteMCPJWKSURL, RemoteMCPSubjectBindingsJSON: remoteMCPSubjectBindingsJSON, MemoryOpenAIEmbeddingsURL: memoryOpenAIEmbeddingsURL, MemoryOpenAIAPIKeyFile: memoryOpenAIAPIKeyFile, TrustedAttachmentsEnabled: trustedAttachmentsEnabled, TrustedAttachmentBlobDir: trustedAttachmentBlobDir, CredentialTransitionEnabled: credentialTransitionEnabled, IngressMode: ingressMode, PublicURL: publicURL, TrustedLANCIDR: trustedLANCIDR, TrustedLANHTTP: trustedLANHTTP, RelaySenderRateBurst: senderBurst, RelaySenderRateRefillPerMinute: senderRefill, RelayConversationRateBurst: conversationBurst, RelayConversationRateRefillPerMinute: conversationRefill, RelayRateRetryAfterMaxSeconds: retryAfterMax, RelayPendingRecipientCount: pendingRecipientCount, RelayPendingRecipientBytes: pendingRecipientBytes, RelayPendingInstallationCount: pendingInstallationCount, RelayPendingInstallationBytes: pendingInstallationBytes, RelayPendingRetryAfterSeconds: pendingRetryAfter, RelayPendingMaxAgeSeconds: pendingMaxAge, RelayTerminalRetentionSeconds: terminalRetention, RelayDeliveryMaintenanceBatch: maintenanceBatch}, nil
+}
+
+func parseBoundedInt(name, raw string, minimum, maximum int) (int, error) {
+	n, err := strconv.Atoi(raw)
+	if err != nil || n < minimum || n > maximum {
+		return 0, fmt.Errorf("%s must be an integer between %d and %d", name, minimum, maximum)
+	}
+	return n, nil
+}
+
+func parseBoundedInt64(name, raw string, minimum, maximum int64) (int64, error) {
+	n, err := strconv.ParseInt(raw, 10, 64)
+	if err != nil || n < minimum || n > maximum {
+		return 0, fmt.Errorf("%s must be an integer between %d and %d", name, minimum, maximum)
+	}
+	return n, nil
+}
+
+// RelayRateLimits returns the startup-validated durable token-bucket policy.
+func (c Config) RelayRateLimits() relay.RateLimitConfig {
+	return relay.RateLimitConfig{
+		SenderBurst:                 c.RelaySenderRateBurst,
+		SenderRefillPerMinute:       c.RelaySenderRateRefillPerMinute,
+		ConversationBurst:           c.RelayConversationRateBurst,
+		ConversationRefillPerMinute: c.RelayConversationRateRefillPerMinute,
+		RetryAfterMaxSeconds:        c.RelayRateRetryAfterMaxSeconds,
+	}
+}
+
+// RelayQuotaLimits returns the startup-validated pending-delivery ceilings.
+func (c Config) RelayQuotaLimits() relay.QuotaConfig {
+	return relay.QuotaConfig{
+		RecipientCount:    c.RelayPendingRecipientCount,
+		RecipientBytes:    c.RelayPendingRecipientBytes,
+		InstallationCount: c.RelayPendingInstallationCount,
+		InstallationBytes: c.RelayPendingInstallationBytes,
+		RetryAfterSeconds: c.RelayPendingRetryAfterSeconds,
+	}
+}
+
+// RelayRetentionPolicy returns the startup-validated pending-age and terminal retention.
+func (c Config) RelayRetentionPolicy() relay.RetentionConfig {
+	return relay.RetentionConfig{
+		PendingMaxAgeSeconds:     c.RelayPendingMaxAgeSeconds,
+		TerminalRetentionSeconds: c.RelayTerminalRetentionSeconds,
+		MaintenanceBatch:         c.RelayDeliveryMaintenanceBatch,
+	}
 }
 
 func validRemoteMCPHTTPSURL(raw string, permitPath bool) bool {
@@ -366,16 +482,76 @@ func parseLogLevel(raw string) (string, error) {
 	}
 }
 
+// RetentionPolicyFromFile reads pending-age and terminal-retention keys from one
+// installation dotenv file. Process environment values do not override the file,
+// so host-local maintenance uses the daemon policy for that directory.
+func RetentionPolicyFromFile(path string) (relay.RetentionConfig, error) {
+	values, err := readDotEnvFile(path)
+	if err != nil {
+		return relay.RetentionConfig{}, err
+	}
+	defaults := relay.DefaultRetentionConfig()
+	lookup := func(key string, fallback int) (int, error) {
+		raw, ok := values[key]
+		if !ok {
+			return fallback, nil
+		}
+		return parseBoundedInt(key, raw, relay.RetentionAgeMinSeconds, relay.RetentionAgeMaxSeconds)
+	}
+	pendingMaxAge, err := lookup("PUNARO_RELAY_PENDING_MAX_AGE_SECONDS", defaults.PendingMaxAgeSeconds)
+	if err != nil {
+		return relay.RetentionConfig{}, err
+	}
+	terminalRetention, err := lookup("PUNARO_RELAY_TERMINAL_RETENTION_SECONDS", defaults.TerminalRetentionSeconds)
+	if err != nil {
+		return relay.RetentionConfig{}, err
+	}
+	maintenanceRaw, ok := values["PUNARO_RELAY_DELIVERY_MAINTENANCE_BATCH"]
+	maintenanceBatch := defaults.MaintenanceBatch
+	if ok {
+		maintenanceBatch, err = parseBoundedInt("PUNARO_RELAY_DELIVERY_MAINTENANCE_BATCH", maintenanceRaw, relay.RetentionBatchMin, relay.RetentionBatchMax)
+		if err != nil {
+			return relay.RetentionConfig{}, err
+		}
+	}
+	cfg := relay.RetentionConfig{
+		PendingMaxAgeSeconds:     pendingMaxAge,
+		TerminalRetentionSeconds: terminalRetention,
+		MaintenanceBatch:         maintenanceBatch,
+	}
+	if err := cfg.Validate(); err != nil {
+		return relay.RetentionConfig{}, err
+	}
+	return cfg, nil
+}
+
 // loadDotEnv supports the deliberately small KEY=VALUE subset needed for local
 // development. Existing process variables win over dotenv values.
 func loadDotEnv(path string) error {
+	values, err := readDotEnvFile(path)
+	if err != nil {
+		return err
+	}
+	for key, v := range values {
+		if _, present := os.LookupEnv(key); present {
+			continue
+		}
+		if err := os.Setenv(key, v); err != nil { // #nosec G703 -- dotenv values are operator-chosen local config
+			return fmt.Errorf("set dotenv value %s: %w", key, err)
+		}
+	}
+	return nil
+}
+
+func readDotEnvFile(path string) (map[string]string, error) {
 	// #nosec G304,G703 -- the operator explicitly chooses this local dotenv
 	// path via CLI or PUNARO_ENV_FILE; it is never derived from remote input.
 	file, err := os.Open(path)
 	if err != nil {
-		return fmt.Errorf("read dotenv file: %w", err)
+		return nil, fmt.Errorf("read dotenv file: %w", err)
 	}
 	defer func() { _ = file.Close() }()
+	values := make(map[string]string)
 	scanner := bufio.NewScanner(file)
 	for line := 1; scanner.Scan(); line++ {
 		raw := strings.TrimSpace(scanner.Text())
@@ -385,16 +561,15 @@ func loadDotEnv(path string) error {
 		key, v, found := strings.Cut(raw, "=")
 		key = strings.TrimSpace(strings.TrimPrefix(key, "export "))
 		if !found || key == "" || strings.ContainsAny(key, " \t") {
-			return fmt.Errorf("parse dotenv file line %d", line)
+			return nil, fmt.Errorf("parse dotenv file line %d", line)
 		}
-		if _, present := os.LookupEnv(key); !present {
-			if err := os.Setenv(key, strings.Trim(strings.TrimSpace(v), "\"'")); err != nil {
-				return fmt.Errorf("set dotenv value line %d: %w", line, err)
-			}
+		if _, exists := values[key]; exists {
+			continue
 		}
+		values[key] = strings.Trim(strings.TrimSpace(v), "\"'")
 	}
 	if err := scanner.Err(); err != nil {
-		return fmt.Errorf("scan dotenv file: %w", err)
+		return nil, fmt.Errorf("scan dotenv file: %w", err)
 	}
-	return nil
+	return values, nil
 }

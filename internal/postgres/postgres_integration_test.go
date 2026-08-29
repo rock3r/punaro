@@ -14,6 +14,7 @@ import (
 	"reflect"
 	"strconv"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -499,7 +500,8 @@ RETURNS boolean LANGUAGE plpgsql SECURITY DEFINER SET search_path=pg_catalog AS 
 	testTransactionalUpdateFenceIntegration(ctx, t, app, ownerDB)
 	testMailCutoverSubstrate(ctx, t, app, ownerDB)
 	testRelayMembershipControlSchemaDrift(ctx, t, app, ownerDB)
-	testRelayMembershipControlSchemaDrift(ctx, t, app, ownerDB)
+	testRelayRateLimitSchemaDrift(ctx, t, app, ownerDB)
+	testRelayPendingQuotaSchemaDrift(ctx, t, app, ownerDB)
 	testRelayIntegration(t, app)
 	if err := app.Close(); err != nil {
 		t.Fatal(err)
@@ -1282,6 +1284,9 @@ func testMailCutoverSubstrate(ctx context.Context, t *testing.T, app *Database, 
 			t.Fatalf("application cutover guard table=%s err=%v", table, err)
 		}
 	}
+	if _, err := app.relayPool().ExecContext(ctx, `INSERT INTO relay.mail_rate_buckets(kind,bucket_key,tokens,updated_at) VALUES ('sender','cutover-fence',1,statement_timestamp())`); !isMaintenanceError(err) {
+		t.Fatalf("application cutover guard table=mail_rate_buckets err=%v", err)
+	}
 	if err := app.ConsumeRequestNonce("cutover-fenced-machine", "cutover-fenced-nonce", time.Now().UTC(), time.Now().UTC().Add(time.Minute)); !errors.Is(err, relay.ErrMaintenance) {
 		t.Fatalf("application nonce write during cutover err=%v", err)
 	}
@@ -1582,10 +1587,328 @@ func testRelayIntegration(t *testing.T, app *Database) {
 	t.Helper()
 	contracttest.Run(t, app, "postgres-contract")
 	contracttest.RunRoleTargeting(t, app, "postgres-target")
+	contracttest.RunRoleProfiles(t, app, "postgres-profile")
+	contracttest.RunDirectMessages(t, app, "postgres-direct")
+	contracttest.RunDurableRoleAddressingE2E(t, app, "postgres-addressing")
+	contracttest.RunNamedOccupancy(t, app, "postgres-occupancy")
+	testPostgresTelegramClaimReserveOccupancy(t, app)
+	testPostgresTelegramClaimBindsEnsureKeyToExistingClaim(t, app)
+	testPostgresTelegramClaimConcurrentEnsureBind(t, app)
+	testPostgresTelegramClaimConcurrentSameKeyDifferentConversations(t, app)
+	testPostgresUserTelegramSendFromGatewayDoesNotChargeQuota(t, app)
 	testPostgresMembershipControls(t, app)
 	testRecipientCursorDoesNotCrossUncommittedAppend(t, app)
 	testEndpointAdvertisementUsesCanonicalLockOrder(t, app)
 	testDurableRoleRebindFencesPostgresDelivery(t, app)
+	testDirectSendLocksTargetProfileBeforeCommit(t, app)
+}
+
+func testPostgresTelegramClaimReserveOccupancy(t *testing.T, app *Database) {
+	t.Helper()
+	now := time.Date(2026, time.August, 16, 18, 0, 0, 0, time.UTC)
+	const (
+		machineA        = "postgres-claim-occ-a"
+		machineB        = "postgres-claim-occ-b"
+		machineTelegram = "postgres-claim-occ-telegram"
+		endpointA       = "agent/postgres-claim-occ/a"
+		endpointB       = "agent/postgres-claim-occ/b"
+	)
+	if err := app.AdvertiseEndpoints(machineA, []string{endpointA}, now, time.Hour); err != nil {
+		t.Fatal(err)
+	}
+	if err := app.AdvertiseEndpoints(machineB, []string{endpointB}, now, time.Hour); err != nil {
+		t.Fatal(err)
+	}
+	if err := app.AdvertiseEndpoints(machineTelegram, []string{relay.TelegramGatewayEndpoint}, now, time.Hour); err != nil {
+		t.Fatal(err)
+	}
+	namedA, err := app.CreateConversationIdempotent(relay.CreateConversationInput{
+		MachineID: machineA, IdempotencyKey: "postgres-claim-occ-a", CreatorEndpoint: endpointA,
+		DisplayName: "Room A", Members: []relay.Member{{Endpoint: endpointA, Capabilities: relay.CapSend | relay.CapReceive | relay.CapAdmin}}, Now: now,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	namedB, err := app.CreateConversationIdempotent(relay.CreateConversationInput{
+		MachineID: machineB, IdempotencyKey: "postgres-claim-occ-b", CreatorEndpoint: endpointB,
+		DisplayName: "Room B", Members: []relay.Member{{Endpoint: endpointB, Capabilities: relay.CapSend | relay.CapReceive | relay.CapAdmin}}, Now: now,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := app.ReserveTelegramClaim(relay.TelegramClaimInput{
+		ConversationID: namedA.ID, MachineID: machineTelegram, Endpoint: relay.TelegramGatewayEndpoint,
+		IdempotencyKey: "gateway-claim-a", Now: now,
+	}); err != nil {
+		t.Fatalf("gateway reserve of unoccupied named room err=%v", err)
+	}
+	if _, err := app.relayPool().ExecContext(context.Background(), `INSERT INTO relay.mail_memberships(conversation_id,endpoint,capabilities) VALUES($1::uuid,$2,$3)`, namedB.ID, endpointA, relay.CapReceive); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := app.ReserveTelegramClaim(relay.TelegramClaimInput{
+		ConversationID: namedB.ID, MachineID: machineB, Endpoint: endpointB,
+		IdempotencyKey: "claim-b", Now: now,
+	}); !errors.Is(err, relay.ErrConflict) {
+		t.Fatalf("postgres claim with occupant of another named room err=%v", err)
+	}
+	if _, _, err := app.ReserveTelegramClaim(relay.TelegramClaimInput{
+		ConversationID: namedB.ID, MachineID: machineTelegram, Endpoint: relay.TelegramGatewayEndpoint,
+		IdempotencyKey: "gateway-claim-a", Now: now.Add(time.Second),
+	}); !errors.Is(err, relay.ErrConflict) {
+		t.Fatalf("postgres same-key different conversation err=%v", err)
+	}
+	replay, duplicate, err := app.ReserveTelegramClaim(relay.TelegramClaimInput{
+		ConversationID: namedA.ID, MachineID: machineTelegram, Endpoint: relay.TelegramGatewayEndpoint,
+		IdempotencyKey: "gateway-claim-a", Now: now.Add(2 * time.Second),
+	})
+	if err != nil || !duplicate || replay.ConversationID != namedA.ID {
+		t.Fatalf("postgres same-key replay=%#v duplicate=%t err=%v", replay, duplicate, err)
+	}
+}
+
+func testPostgresTelegramClaimBindsEnsureKeyToExistingClaim(t *testing.T, app *Database) {
+	t.Helper()
+	now := time.Date(2026, time.August, 19, 17, 0, 0, 0, time.UTC)
+	const (
+		machineA        = "postgres-claim-ensure-a"
+		machineB        = "postgres-claim-ensure-b"
+		machineTelegram = "postgres-claim-ensure-telegram"
+		endpointA       = "agent/postgres-claim-ensure/a"
+		endpointB       = "agent/postgres-claim-ensure/b"
+	)
+	if err := app.AdvertiseEndpoints(machineA, []string{endpointA}, now, time.Hour); err != nil {
+		t.Fatal(err)
+	}
+	if err := app.AdvertiseEndpoints(machineB, []string{endpointB}, now, time.Hour); err != nil {
+		t.Fatal(err)
+	}
+	if err := app.AdvertiseEndpoints(machineTelegram, []string{relay.TelegramGatewayEndpoint}, now, time.Hour); err != nil {
+		t.Fatal(err)
+	}
+	firstRoom, err := app.CreateConversationIdempotent(relay.CreateConversationInput{
+		MachineID: machineA, IdempotencyKey: "postgres-claim-ensure-first", CreatorEndpoint: endpointA,
+		DisplayName: "Ensure first", Members: []relay.Member{{Endpoint: endpointA, Capabilities: relay.CapSend | relay.CapReceive | relay.CapAdmin}}, Now: now,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	secondRoom, err := app.CreateConversationIdempotent(relay.CreateConversationInput{
+		MachineID: machineB, IdempotencyKey: "postgres-claim-ensure-second", CreatorEndpoint: endpointB,
+		DisplayName: "Ensure second", Members: []relay.Member{{Endpoint: endpointB, Capabilities: relay.CapSend | relay.CapReceive | relay.CapAdmin}}, Now: now,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, duplicate, err := app.ReserveTelegramClaim(relay.TelegramClaimInput{
+		ConversationID: firstRoom.ID, MachineID: machineA, Endpoint: endpointA,
+		IdempotencyKey: "postgres-agent-claim", Now: now,
+	}); err != nil || duplicate {
+		t.Fatalf("postgres first reserve duplicate=%t err=%v", duplicate, err)
+	}
+	ensure, duplicate, err := app.ReserveTelegramClaim(relay.TelegramClaimInput{
+		ConversationID: firstRoom.ID, MachineID: machineTelegram, Endpoint: relay.TelegramGatewayEndpoint,
+		IdempotencyKey: "postgres-ensure-key", Now: now.Add(time.Second),
+	})
+	if err != nil || !duplicate || ensure.ConversationID != firstRoom.ID {
+		t.Fatalf("postgres ensure existing=%#v duplicate=%t err=%v", ensure, duplicate, err)
+	}
+	if _, _, err := app.ReserveTelegramClaim(relay.TelegramClaimInput{
+		ConversationID: secondRoom.ID, MachineID: machineTelegram, Endpoint: relay.TelegramGatewayEndpoint,
+		IdempotencyKey: "postgres-ensure-key", Now: now.Add(2 * time.Second),
+	}); !errors.Is(err, relay.ErrConflict) {
+		t.Fatalf("postgres ensure key reused on another conversation err=%v", err)
+	}
+	replay, duplicate, err := app.ReserveTelegramClaim(relay.TelegramClaimInput{
+		ConversationID: firstRoom.ID, MachineID: machineTelegram, Endpoint: relay.TelegramGatewayEndpoint,
+		IdempotencyKey: "postgres-ensure-key", Now: now.Add(3 * time.Second),
+	})
+	if err != nil || !duplicate || replay.ConversationID != firstRoom.ID {
+		t.Fatalf("postgres ensure-key replay=%#v duplicate=%t err=%v", replay, duplicate, err)
+	}
+}
+
+func testPostgresTelegramClaimConcurrentEnsureBind(t *testing.T, app *Database) {
+	t.Helper()
+	now := time.Date(2026, time.August, 19, 18, 0, 0, 0, time.UTC)
+	const (
+		machineA        = "postgres-claim-race-a"
+		machineTelegram = "postgres-claim-race-telegram"
+		endpointA       = "agent/postgres-claim-race/a"
+	)
+	if err := app.AdvertiseEndpoints(machineA, []string{endpointA}, now, time.Hour); err != nil {
+		t.Fatal(err)
+	}
+	if err := app.AdvertiseEndpoints(machineTelegram, []string{relay.TelegramGatewayEndpoint}, now, time.Hour); err != nil {
+		t.Fatal(err)
+	}
+	room, err := app.CreateConversationIdempotent(relay.CreateConversationInput{
+		MachineID: machineA, IdempotencyKey: "postgres-claim-race-named", CreatorEndpoint: endpointA,
+		DisplayName: "Ensure race", Members: []relay.Member{{Endpoint: endpointA, Capabilities: relay.CapSend | relay.CapReceive | relay.CapAdmin}}, Now: now,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, duplicate, err := app.ReserveTelegramClaim(relay.TelegramClaimInput{
+		ConversationID: room.ID, MachineID: machineA, Endpoint: endpointA,
+		IdempotencyKey: "postgres-claim-race-agent", Now: now,
+	}); err != nil || duplicate {
+		t.Fatalf("postgres race first reserve duplicate=%t err=%v", duplicate, err)
+	}
+	const workers = 8
+	type result struct {
+		claim     relay.TelegramClaim
+		duplicate bool
+		err       error
+	}
+	results := make([]result, workers)
+	var wg sync.WaitGroup
+	wg.Add(workers)
+	for i := 0; i < workers; i++ {
+		go func(i int) {
+			defer wg.Done()
+			claim, duplicate, err := app.ReserveTelegramClaim(relay.TelegramClaimInput{
+				ConversationID: room.ID, MachineID: machineTelegram, Endpoint: relay.TelegramGatewayEndpoint,
+				IdempotencyKey: "postgres-race-ensure", Now: now.Add(time.Duration(i+1) * time.Second),
+			})
+			results[i] = result{claim: claim, duplicate: duplicate, err: err}
+		}(i)
+	}
+	wg.Wait()
+	for i, got := range results {
+		if got.err != nil || !got.duplicate || got.claim.ConversationID != room.ID {
+			t.Fatalf("concurrent ensure %d claim=%#v duplicate=%t err=%v", i, got.claim, got.duplicate, got.err)
+		}
+	}
+}
+
+func testPostgresTelegramClaimConcurrentSameKeyDifferentConversations(t *testing.T, app *Database) {
+	t.Helper()
+	now := time.Date(2026, time.August, 19, 19, 0, 0, 0, time.UTC)
+	const (
+		machineA        = "postgres-claim-keyrace-a"
+		machineB        = "postgres-claim-keyrace-b"
+		machineTelegram = "postgres-claim-keyrace-telegram"
+		endpointA       = "agent/postgres-claim-keyrace/a"
+		endpointB       = "agent/postgres-claim-keyrace/b"
+	)
+	if err := app.AdvertiseEndpoints(machineA, []string{endpointA}, now, time.Hour); err != nil {
+		t.Fatal(err)
+	}
+	if err := app.AdvertiseEndpoints(machineB, []string{endpointB}, now, time.Hour); err != nil {
+		t.Fatal(err)
+	}
+	if err := app.AdvertiseEndpoints(machineTelegram, []string{relay.TelegramGatewayEndpoint}, now, time.Hour); err != nil {
+		t.Fatal(err)
+	}
+	firstRoom, err := app.CreateConversationIdempotent(relay.CreateConversationInput{
+		MachineID: machineA, IdempotencyKey: "postgres-claim-keyrace-first", CreatorEndpoint: endpointA,
+		DisplayName: "Key race first", Members: []relay.Member{{Endpoint: endpointA, Capabilities: relay.CapSend | relay.CapReceive | relay.CapAdmin}}, Now: now,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	secondRoom, err := app.CreateConversationIdempotent(relay.CreateConversationInput{
+		MachineID: machineB, IdempotencyKey: "postgres-claim-keyrace-second", CreatorEndpoint: endpointB,
+		DisplayName: "Key race second", Members: []relay.Member{{Endpoint: endpointB, Capabilities: relay.CapSend | relay.CapReceive | relay.CapAdmin}}, Now: now,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	rooms := []string{firstRoom.ID, secondRoom.ID}
+	type result struct {
+		claim     relay.TelegramClaim
+		duplicate bool
+		err       error
+	}
+	results := make([]result, 2)
+	var wg sync.WaitGroup
+	wg.Add(2)
+	for i := 0; i < 2; i++ {
+		go func(i int) {
+			defer wg.Done()
+			claim, duplicate, err := app.ReserveTelegramClaim(relay.TelegramClaimInput{
+				ConversationID: rooms[i], MachineID: machineTelegram, Endpoint: relay.TelegramGatewayEndpoint,
+				IdempotencyKey: "postgres-shared-key", Now: now.Add(time.Duration(i+1) * time.Second),
+			})
+			results[i] = result{claim: claim, duplicate: duplicate, err: err}
+		}(i)
+	}
+	wg.Wait()
+	var winner string
+	conflicts := 0
+	for i, got := range results {
+		if errors.Is(got.err, relay.ErrConflict) {
+			conflicts++
+			continue
+		}
+		if got.err != nil {
+			t.Fatalf("concurrent same-key different conversation %d err=%v", i, got.err)
+		}
+		if got.claim.ConversationID != rooms[i] {
+			t.Fatalf("concurrent same-key different conversation %d claimed=%s want=%s", i, got.claim.ConversationID, rooms[i])
+		}
+		if winner != "" && winner != got.claim.ConversationID {
+			t.Fatalf("both conversations reserved with the same key: %s and %s", winner, got.claim.ConversationID)
+		}
+		winner = got.claim.ConversationID
+	}
+	if winner == "" || conflicts != 1 {
+		t.Fatalf("same-key different conversation winner=%q conflicts=%d results=%#v", winner, conflicts, results)
+	}
+}
+
+func testPostgresUserTelegramSendFromGatewayDoesNotChargeQuota(t *testing.T, app *Database) {
+	t.Helper()
+	now := time.Date(2026, time.August, 19, 16, 0, 0, 0, time.UTC)
+	const (
+		machineA        = "postgres-quota-self-a"
+		machineTelegram = "postgres-quota-self-telegram"
+		endpointA       = "agent/postgres-quota-self/a"
+	)
+	if err := app.SetQuotaLimits(relay.QuotaConfig{RecipientCount: 1, RecipientBytes: 1024, InstallationCount: 8, InstallationBytes: 4096, RetryAfterSeconds: 9}); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = app.SetQuotaLimits(relay.DefaultQuotaConfig()) })
+	if err := app.AdvertiseEndpoints(machineA, []string{endpointA}, now, time.Hour); err != nil {
+		t.Fatal(err)
+	}
+	if err := app.AdvertiseEndpoints(machineTelegram, []string{relay.TelegramGatewayEndpoint}, now, time.Hour); err != nil {
+		t.Fatal(err)
+	}
+	conversation, err := app.CreateConversationIdempotent(relay.CreateConversationInput{
+		MachineID: machineA, IdempotencyKey: "postgres-quota-self-named", CreatorEndpoint: endpointA,
+		DisplayName: "Quota self", Members: []relay.Member{{Endpoint: endpointA, Capabilities: relay.CapSend | relay.CapReceive | relay.CapAdmin}}, Now: now,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := app.ReserveTelegramClaim(relay.TelegramClaimInput{
+		ConversationID: conversation.ID, MachineID: machineA, Endpoint: endpointA,
+		IdempotencyKey: "claim-" + conversation.ID, Now: now,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := app.CompleteTelegramClaim(relay.TelegramClaimCompleteInput{ConversationID: conversation.ID, MachineID: machineTelegram, Now: now}); err != nil {
+		t.Fatal(err)
+	}
+	message, duplicate, err := app.AppendMessage(relay.AppendInput{
+		ConversationID: conversation.ID, SenderMachineID: machineTelegram, FromEndpoint: relay.TelegramGatewayEndpoint,
+		TargetRole: relay.TelegramUserParticipant, Body: "self", IdempotencyKey: "gateway-to-user", Now: now,
+	})
+	if err != nil || duplicate {
+		t.Fatalf("postgres gateway user-telegram send=%#v duplicate=%t err=%v", message, duplicate, err)
+	}
+	var pendingCount int
+	if err := app.relayPool().QueryRowContext(context.Background(), `SELECT COALESCE((SELECT pending_count FROM relay.mail_pending_recipients WHERE recipient_endpoint=$1),0)`, relay.TelegramGatewayEndpoint).Scan(&pendingCount); err != nil || pendingCount != 0 {
+		t.Fatalf("postgres gateway self-send charged quota count=%d err=%v", pendingCount, err)
+	}
+	var deliveries int
+	if err := app.relayPool().QueryRowContext(context.Background(), `SELECT COUNT(*) FROM relay.mail_deliveries WHERE message_id=$1::uuid`, message.ID).Scan(&deliveries); err != nil || deliveries != 0 {
+		t.Fatalf("postgres gateway self-send deliveries=%d err=%v", deliveries, err)
+	}
+	if err := app.VerifyPendingQuota(context.Background()); err != nil {
+		t.Fatalf("postgres quota after gateway self-send: %v", err)
+	}
 }
 
 func testPostgresMembershipControls(t *testing.T, app *Database) {
@@ -1664,6 +1987,38 @@ func testRelayMembershipControlSchemaDrift(ctx context.Context, t *testing.T, ap
 	}
 	if err := app.Ready(ctx); err != nil {
 		t.Fatalf("membership-control constraint restoration did not recover readiness: %v", err)
+	}
+}
+
+func testRelayRateLimitSchemaDrift(ctx context.Context, t *testing.T, app *Database, ownerDB *sql.DB) {
+	t.Helper()
+	if _, err := ownerDB.ExecContext(ctx, `ALTER TABLE relay.mail_rate_buckets DROP CONSTRAINT mail_rate_buckets_tokens_check; ALTER TABLE relay.mail_rate_buckets ADD CONSTRAINT mail_rate_buckets_tokens_check CHECK (tokens IS NOT NULL)`); err != nil {
+		t.Fatal(err)
+	}
+	if drifted, err := app.SchemaState(ctx); err != nil || drifted.Classification != Incompatible {
+		t.Fatalf("permissive rate-limit tokens constraint state=%#v err=%v", drifted, err)
+	}
+	if _, err := ownerDB.ExecContext(ctx, `ALTER TABLE relay.mail_rate_buckets DROP CONSTRAINT mail_rate_buckets_tokens_check; ALTER TABLE relay.mail_rate_buckets ADD CONSTRAINT mail_rate_buckets_tokens_check CHECK (tokens >= 0)`); err != nil {
+		t.Fatal(err)
+	}
+	if restored, err := app.SchemaState(ctx); err != nil || restored.Classification != Compatible {
+		t.Fatalf("restored rate-limit tokens constraint state=%#v err=%v", restored, err)
+	}
+}
+
+func testRelayPendingQuotaSchemaDrift(ctx context.Context, t *testing.T, app *Database, ownerDB *sql.DB) {
+	t.Helper()
+	if _, err := ownerDB.ExecContext(ctx, `ALTER TABLE relay.mail_pending_install DROP CONSTRAINT mail_pending_install_pending_count_check; ALTER TABLE relay.mail_pending_install ADD CONSTRAINT mail_pending_install_pending_count_check CHECK (pending_count IS NOT NULL)`); err != nil {
+		t.Fatal(err)
+	}
+	if drifted, err := app.SchemaState(ctx); err != nil || drifted.Classification != Incompatible {
+		t.Fatalf("permissive pending-quota count constraint state=%#v err=%v", drifted, err)
+	}
+	if _, err := ownerDB.ExecContext(ctx, `ALTER TABLE relay.mail_pending_install DROP CONSTRAINT mail_pending_install_pending_count_check; ALTER TABLE relay.mail_pending_install ADD CONSTRAINT mail_pending_install_pending_count_check CHECK (pending_count >= 0)`); err != nil {
+		t.Fatal(err)
+	}
+	if restored, err := app.SchemaState(ctx); err != nil || restored.Classification != Compatible {
+		t.Fatalf("restored pending-quota count constraint state=%#v err=%v", restored, err)
 	}
 }
 
@@ -1782,6 +2137,98 @@ func testDurableRoleRebindFencesPostgresDelivery(t *testing.T, app *Database) {
 	}
 }
 
+func testDirectSendLocksTargetProfileBeforeCommit(t *testing.T, app *Database) {
+	t.Helper()
+	now := time.Date(2026, time.August, 18, 19, 0, 0, 0, time.UTC)
+	const (
+		machineA  = "postgres-direct-lock-a"
+		machineB  = "postgres-direct-lock-b"
+		endpointA = "agent/postgres-direct-lock/a"
+		endpointB = "agent/postgres-direct-lock/b"
+		fromRole  = "role/postgres-direct-lock-a/reviewer"
+		toRole    = "role/postgres-direct-lock-b/implementer"
+	)
+	if err := app.AdvertiseEndpoints(machineA, []string{endpointA}, now, time.Hour); err != nil {
+		t.Fatal(err)
+	}
+	if err := app.AdvertiseEndpoints(machineB, []string{endpointB}, now, time.Hour); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := app.RegisterRoleProfile(relay.RegisterRoleInput{MachineID: machineA, Role: fromRole, DirectAddressable: true, IdempotencyKey: "postgres-direct-lock-reg-a", Now: now}); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := app.RegisterRoleProfile(relay.RegisterRoleInput{MachineID: machineB, Role: toRole, DirectAddressable: true, IdempotencyKey: "postgres-direct-lock-reg-b", Now: now}); err != nil {
+		t.Fatal(err)
+	}
+	if err := app.BindRoleToSession(machineA, fromRole, endpointA, now, time.Hour); err != nil {
+		t.Fatal(err)
+	}
+	if err := app.BindRoleToSession(machineB, toRole, endpointB, now, time.Hour); err != nil {
+		t.Fatal(err)
+	}
+	blocker, blockerCancel, err := app.beginRelayTransaction(nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer blockerCancel()
+	defer func() { _ = blocker.Rollback() }()
+	if _, err := blocker.ExecContext(context.Background(), `SELECT pg_advisory_xact_lock(hashtextextended(jsonb_build_array('durable-role',$1::text)::text, 579001230609))`, toRole); err != nil {
+		t.Fatal(err)
+	}
+	var addressable bool
+	if err := blocker.QueryRowContext(context.Background(), `SELECT direct_addressable FROM relay.mail_role_profiles WHERE role=$1 FOR UPDATE`, toRole).Scan(&addressable); err != nil || !addressable {
+		t.Fatalf("lock target profile addressable=%t err=%v", addressable, err)
+	}
+	sendResult := make(chan error, 1)
+	go func() {
+		_, _, err := app.SendDirectMessage(relay.DirectMessageInput{
+			SenderMachineID: machineA, FromRole: fromRole, ToRole: toRole, Body: "must not land after revoke", IdempotencyKey: "postgres-direct-lock-send", Now: now.Add(time.Second),
+		})
+		sendResult <- err
+	}()
+	waitCtx, waitCancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer waitCancel()
+	for {
+		var waiting bool
+		err := app.relayPool().QueryRowContext(waitCtx, `SELECT EXISTS (
+			SELECT 1 FROM pg_stat_activity
+			WHERE datname=current_database() AND usename=current_user AND wait_event_type='Lock'
+			  AND (query LIKE '%durable-role%' OR query LIKE '%mail_role_profiles%FOR UPDATE%' OR query LIKE 'SELECT direct_addressable FROM relay.mail_role_profiles%')
+		)`).Scan(&waiting)
+		if err != nil {
+			t.Fatalf("inspect direct-send profile lock wait: %v", err)
+		}
+		if waiting {
+			break
+		}
+		select {
+		case sendErr := <-sendResult:
+			t.Fatalf("direct send escaped target profile lock: %v", sendErr)
+		case <-waitCtx.Done():
+			t.Fatal("direct send did not wait on the target profile lock")
+		case <-time.After(10 * time.Millisecond):
+		}
+	}
+	if _, err := blocker.ExecContext(context.Background(), `UPDATE relay.mail_role_profiles SET direct_addressable=false, updated_at=$1 WHERE role=$2`, now.Add(time.Second), toRole); err != nil {
+		t.Fatal(err)
+	}
+	if err := blocker.Commit(); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case err := <-sendResult:
+		if !errors.Is(err, relay.ErrForbidden) {
+			t.Fatalf("concurrent opt-out send err=%v, want forbidden", err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("direct send did not finish after profile opt-out")
+	}
+	rooms, err := app.ConversationsForMachine(machineA, now.Add(2*time.Second))
+	if err != nil || len(rooms) != 0 {
+		t.Fatalf("opt-out during send created a conversation: %#v err=%v", rooms, err)
+	}
+}
+
 func testRecipientCursorDoesNotCrossUncommittedAppend(t *testing.T, app *Database) {
 	t.Helper()
 	now := time.Date(2026, time.July, 20, 15, 0, 0, 0, time.UTC)
@@ -1822,6 +2269,9 @@ func testRecipientCursorDoesNotCrossUncommittedAppend(t *testing.T, app *Databas
 		t.Fatal(err)
 	}
 	if _, err := appendTx.ExecContext(context.Background(), `INSERT INTO relay.mail_deliveries(message_id,recipient_endpoint) VALUES($1::uuid,$2)`, messageID, endpointB); err != nil {
+		t.Fatal(err)
+	}
+	if err := app.consumeQuota(appendTx, []string{endpointB}, int64(len("must remain pending"))); err != nil {
 		t.Fatal(err)
 	}
 	cursorTx, cursorCancel, err := app.beginRelayTransaction(nil)

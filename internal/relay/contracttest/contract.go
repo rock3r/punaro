@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"sort"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -242,6 +243,438 @@ func Run(t *testing.T, backend relay.Backend, namespace string) {
 		t.Fatalf("replayed nonce err=%v", err)
 	}
 	runLeasePageContract(t, backend, namespace, now)
+	RunRateLimits(t, backend, namespace+"-rate")
+	RunPendingQuota(t, backend, namespace+"-quota")
+	RunDeliveryRetention(t, backend, namespace+"-retain")
+}
+
+// RateLimitSetter is implemented by durable stores that keep token-bucket
+// policy in process and token state in the database.
+type RateLimitSetter interface {
+	relay.Backend
+	SetRateLimits(relay.RateLimitConfig) error
+}
+
+// RunRateLimits proves the same durable sender/conversation token-bucket
+// contract against every backend.
+func RunRateLimits(t *testing.T, backend relay.Backend, namespace string) {
+	t.Helper()
+	limiter, ok := backend.(RateLimitSetter)
+	if !ok {
+		t.Fatal("backend does not expose durable rate limits")
+	}
+	if err := limiter.SetRateLimits(relay.DefaultRateLimitConfig()); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		_ = limiter.SetRateLimits(relay.DefaultRateLimitConfig())
+	})
+	now := time.Date(2026, time.August, 18, 17, 0, 0, 0, time.UTC)
+	cfg := relay.RateLimitConfig{SenderBurst: 1, SenderRefillPerMinute: 60, ConversationBurst: 8, ConversationRefillPerMinute: 60, RetryAfterMaxSeconds: 60}
+	if err := limiter.SetRateLimits(cfg); err != nil {
+		t.Fatal(err)
+	}
+	machineA, machineB, machineC := namespace+"-a", namespace+"-b", namespace+"-c"
+	endpointA, endpointA2, endpointB, endpointC := "agent/"+namespace+"/a", "agent/"+namespace+"/a2", "agent/"+namespace+"/b", "agent/"+namespace+"/c"
+	if err := backend.AdvertiseEndpoints(machineA, []string{endpointA, endpointA2}, now, time.Hour); err != nil {
+		t.Fatal(err)
+	}
+	if err := backend.AdvertiseEndpoints(machineB, []string{endpointB}, now, time.Hour); err != nil {
+		t.Fatal(err)
+	}
+	if err := backend.AdvertiseEndpoints(machineC, []string{endpointC}, now, time.Hour); err != nil {
+		t.Fatal(err)
+	}
+	first, err := backend.CreateConversationIdempotent(relay.CreateConversationInput{
+		MachineID: machineA, IdempotencyKey: namespace + "-create-1", CreatorEndpoint: endpointA, Now: now,
+		Members: []relay.Member{
+			{Endpoint: endpointA, Capabilities: relay.CapSend | relay.CapReceive | relay.CapAdmin},
+			{Endpoint: endpointB, Capabilities: relay.CapReceive},
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	second, err := backend.CreateConversationIdempotent(relay.CreateConversationInput{
+		MachineID: machineA, IdempotencyKey: namespace + "-create-2", CreatorEndpoint: endpointA2, Now: now,
+		Members: []relay.Member{
+			{Endpoint: endpointA2, Capabilities: relay.CapSend | relay.CapReceive | relay.CapAdmin},
+			{Endpoint: endpointC, Capabilities: relay.CapReceive},
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := backend.AppendMessage(relay.AppendInput{ConversationID: first.ID, SenderMachineID: machineA, FromEndpoint: endpointA, Body: "one", IdempotencyKey: namespace + "-a-1", Now: now}); err != nil {
+		t.Fatal(err)
+	}
+	_, _, err = backend.AppendMessage(relay.AppendInput{ConversationID: second.ID, SenderMachineID: machineA, FromEndpoint: endpointA2, Body: "two", IdempotencyKey: namespace + "-a-2", Now: now})
+	if !errors.Is(err, relay.ErrRateLimited) {
+		t.Fatalf("sender exhaustion err=%v", err)
+	}
+	replay, duplicate, err := backend.AppendMessage(relay.AppendInput{ConversationID: first.ID, SenderMachineID: machineA, FromEndpoint: endpointA, Body: "one", IdempotencyKey: namespace + "-a-1", Now: now})
+	if err != nil || !duplicate || replay.Sequence != 1 {
+		t.Fatalf("committed retry message=%#v duplicate=%t err=%v", replay, duplicate, err)
+	}
+	changed := relay.AppendInput{ConversationID: first.ID, SenderMachineID: machineA, FromEndpoint: endpointA, Body: "changed", IdempotencyKey: namespace + "-a-1", Now: now}
+	if _, _, err := backend.AppendMessage(changed); !errors.Is(err, relay.ErrConflict) {
+		t.Fatalf("changed-body err=%v, want conflict", err)
+	}
+	if _, _, err := backend.AppendMessage(relay.AppendInput{ConversationID: first.ID, SenderMachineID: machineA, FromEndpoint: endpointA, Body: "later", IdempotencyKey: namespace + "-a-later", Now: now.Add(time.Second)}); err != nil {
+		t.Fatal(err)
+	}
+
+	cfg.SenderBurst = 8
+	cfg.ConversationBurst = 1
+	if err := limiter.SetRateLimits(cfg); err != nil {
+		t.Fatal(err)
+	}
+	shared, err := backend.CreateConversationIdempotent(relay.CreateConversationInput{
+		MachineID: machineB, IdempotencyKey: namespace + "-create-shared", CreatorEndpoint: endpointB, Now: now.Add(2 * time.Second),
+		Members: []relay.Member{
+			{Endpoint: endpointB, Capabilities: relay.CapSend | relay.CapReceive | relay.CapAdmin},
+			{Endpoint: endpointC, Capabilities: relay.CapSend | relay.CapReceive},
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := backend.AppendMessage(relay.AppendInput{ConversationID: shared.ID, SenderMachineID: machineB, FromEndpoint: endpointB, Body: "b", IdempotencyKey: namespace + "-b-1", Now: now.Add(2 * time.Second)}); err != nil {
+		t.Fatal(err)
+	}
+	_, _, err = backend.AppendMessage(relay.AppendInput{ConversationID: shared.ID, SenderMachineID: machineC, FromEndpoint: endpointC, Body: "c", IdempotencyKey: namespace + "-c-1", Now: now.Add(2 * time.Second)})
+	if !errors.Is(err, relay.ErrRateLimited) {
+		t.Fatalf("conversation exhaustion err=%v", err)
+	}
+
+	cfg.SenderBurst = 1
+	cfg.ConversationBurst = 1
+	if err := limiter.SetRateLimits(cfg); err != nil {
+		t.Fatal(err)
+	}
+	concurrent, err := backend.CreateConversationIdempotent(relay.CreateConversationInput{
+		MachineID: machineB, IdempotencyKey: namespace + "-create-concurrent", CreatorEndpoint: endpointB, Now: now.Add(3 * time.Second),
+		Members: []relay.Member{
+			{Endpoint: endpointB, Capabilities: relay.CapSend | relay.CapReceive | relay.CapAdmin},
+			{Endpoint: endpointC, Capabilities: relay.CapReceive},
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	const workers = 6
+	var started, running sync.WaitGroup
+	started.Add(workers)
+	running.Add(workers)
+	results := make(chan error, workers)
+	for index := 0; index < workers; index++ {
+		go func(index int) {
+			defer running.Done()
+			started.Done()
+			started.Wait()
+			_, _, err := backend.AppendMessage(relay.AppendInput{
+				ConversationID: concurrent.ID, SenderMachineID: machineB, FromEndpoint: endpointB,
+				Body: fmt.Sprintf("concurrent-%d", index), IdempotencyKey: fmt.Sprintf("%s-conc-%d", namespace, index),
+				Now: now.Add(3 * time.Second),
+			})
+			results <- err
+		}(index)
+	}
+	running.Wait()
+	close(results)
+	var accepted, limited int
+	for err := range results {
+		switch {
+		case err == nil:
+			accepted++
+		case errors.Is(err, relay.ErrRateLimited):
+			limited++
+		default:
+			t.Fatalf("concurrent append err=%v", err)
+		}
+	}
+	if accepted != 1 || limited != workers-1 {
+		t.Fatalf("concurrent accepted=%d limited=%d", accepted, limited)
+	}
+	if err := limiter.SetRateLimits(relay.DefaultRateLimitConfig()); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// QuotaSetter is implemented by durable stores that keep pending-delivery
+// ceilings in process and explicit counters in the database.
+type QuotaSetter interface {
+	relay.Backend
+	SetQuotaLimits(relay.QuotaConfig) error
+}
+
+// RunPendingQuota proves the same recipient and fan-out capacity contract
+// against every backend. Installation-wide ceilings are covered by store tests
+// because this shared namespace may already hold pending deliveries.
+func RunPendingQuota(t *testing.T, backend relay.Backend, namespace string) {
+	t.Helper()
+	limiter, ok := backend.(QuotaSetter)
+	if !ok {
+		t.Fatal("backend does not expose durable pending quota")
+	}
+	if err := limiter.SetQuotaLimits(relay.DefaultQuotaConfig()); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		_ = limiter.SetQuotaLimits(relay.DefaultQuotaConfig())
+	})
+	now := time.Date(2026, time.August, 18, 19, 0, 0, 0, time.UTC)
+	cfg := relay.QuotaConfig{RecipientCount: 1, RecipientBytes: 1024, InstallationCount: 10_000_000, InstallationBytes: 64 << 30, RetryAfterSeconds: 9}
+	if err := limiter.SetQuotaLimits(cfg); err != nil {
+		t.Fatal(err)
+	}
+	machineA, machineB := namespace+"-a", namespace+"-b"
+	endpointA, endpointB := "agent/"+namespace+"/a", "agent/"+namespace+"/b"
+	if err := backend.AdvertiseEndpoints(machineA, []string{endpointA}, now, time.Hour); err != nil {
+		t.Fatal(err)
+	}
+	if err := backend.AdvertiseEndpoints(machineB, []string{endpointB}, now, time.Hour); err != nil {
+		t.Fatal(err)
+	}
+	conversation, err := backend.CreateConversationIdempotent(relay.CreateConversationInput{
+		MachineID: machineA, IdempotencyKey: namespace + "-create", CreatorEndpoint: endpointA, Now: now,
+		Members: []relay.Member{
+			{Endpoint: endpointA, Capabilities: relay.CapSend | relay.CapReceive | relay.CapAdmin},
+			{Endpoint: endpointB, Capabilities: relay.CapReceive},
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	first, duplicate, err := backend.AppendMessage(relay.AppendInput{ConversationID: conversation.ID, SenderMachineID: machineA, FromEndpoint: endpointA, Body: "one", IdempotencyKey: namespace + "-1", Now: now})
+	if err != nil || duplicate {
+		t.Fatalf("first append message=%#v duplicate=%t err=%v", first, duplicate, err)
+	}
+	_, _, err = backend.AppendMessage(relay.AppendInput{ConversationID: conversation.ID, SenderMachineID: machineA, FromEndpoint: endpointA, Body: "two", IdempotencyKey: namespace + "-2", Now: now})
+	if !errors.Is(err, relay.ErrCapacityExceeded) {
+		t.Fatalf("recipient exhaustion err=%v", err)
+	}
+	replay, duplicate, err := backend.AppendMessage(relay.AppendInput{ConversationID: conversation.ID, SenderMachineID: machineA, FromEndpoint: endpointA, Body: "one", IdempotencyKey: namespace + "-1", Now: now})
+	if err != nil || !duplicate || replay.ID != first.ID {
+		t.Fatalf("committed retry message=%#v duplicate=%t err=%v", replay, duplicate, err)
+	}
+	page, err := backend.LeaseDeliveries(machineB, namespace+"-consumer", endpointB, conversation.ID, now, time.Minute, 10)
+	if err != nil || len(page.Deliveries) != 1 {
+		t.Fatalf("lease=%#v err=%v", page, err)
+	}
+	if err := backend.AckDelivery(machineB, endpointB, page.Deliveries[0].ID, page.Deliveries[0].LeaseToken, page.Deliveries[0].LeaseGeneration, now); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := backend.AppendMessage(relay.AppendInput{ConversationID: conversation.ID, SenderMachineID: machineA, FromEndpoint: endpointA, Body: "three", IdempotencyKey: namespace + "-3", Now: now}); err != nil {
+		t.Fatal(err)
+	}
+
+	cfg.RecipientCount = 8
+	cfg.RecipientBytes = 3
+	if err := limiter.SetQuotaLimits(cfg); err != nil {
+		t.Fatal(err)
+	}
+	machineC := namespace + "-c"
+	endpointC := "agent/" + namespace + "/c"
+	if err := backend.AdvertiseEndpoints(machineC, []string{endpointC}, now, time.Hour); err != nil {
+		t.Fatal(err)
+	}
+	bytesConversation, err := backend.CreateConversationIdempotent(relay.CreateConversationInput{
+		MachineID: machineA, IdempotencyKey: namespace + "-create-bytes", CreatorEndpoint: endpointA, Now: now,
+		Members: []relay.Member{
+			{Endpoint: endpointA, Capabilities: relay.CapSend | relay.CapReceive | relay.CapAdmin},
+			{Endpoint: endpointC, Capabilities: relay.CapReceive},
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := backend.AppendMessage(relay.AppendInput{ConversationID: bytesConversation.ID, SenderMachineID: machineA, FromEndpoint: endpointA, Body: "one", IdempotencyKey: namespace + "-bytes-1", Now: now}); err != nil {
+		t.Fatal(err)
+	}
+	_, _, err = backend.AppendMessage(relay.AppendInput{ConversationID: bytesConversation.ID, SenderMachineID: machineA, FromEndpoint: endpointA, Body: "two", IdempotencyKey: namespace + "-bytes-2", Now: now})
+	if !errors.Is(err, relay.ErrCapacityExceeded) {
+		t.Fatalf("recipient byte exhaustion err=%v", err)
+	}
+
+	cfg.RecipientCount = 1
+	cfg.RecipientBytes = 1024
+	if err := limiter.SetQuotaLimits(cfg); err != nil {
+		t.Fatal(err)
+	}
+	machineD := namespace + "-d"
+	endpointD := "agent/" + namespace + "/d"
+	if err := backend.AdvertiseEndpoints(machineD, []string{endpointD}, now, time.Hour); err != nil {
+		t.Fatal(err)
+	}
+	broadcast, err := backend.CreateConversationIdempotent(relay.CreateConversationInput{
+		MachineID: machineA, IdempotencyKey: namespace + "-create-broadcast", CreatorEndpoint: endpointA, Now: now,
+		Members: []relay.Member{
+			{Endpoint: endpointA, Capabilities: relay.CapSend | relay.CapReceive | relay.CapAdmin},
+			{Endpoint: endpointB, Capabilities: relay.CapReceive},
+			{Endpoint: endpointD, Capabilities: relay.CapReceive},
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, _, err = backend.AppendMessage(relay.AppendInput{ConversationID: broadcast.ID, SenderMachineID: machineA, FromEndpoint: endpointA, Body: "fan", IdempotencyKey: namespace + "-fan", Now: now})
+	if !errors.Is(err, relay.ErrCapacityExceeded) {
+		t.Fatalf("broadcast atomic denial err=%v", err)
+	}
+	held, err := backend.LeaseDeliveries(machineB, namespace+"-consumer", endpointB, conversation.ID, now, time.Minute, 10)
+	if err != nil || len(held.Deliveries) != 1 {
+		t.Fatalf("held lease=%#v err=%v", held, err)
+	}
+	if err := backend.AckDelivery(machineB, endpointB, held.Deliveries[0].ID, held.Deliveries[0].LeaseToken, held.Deliveries[0].LeaseGeneration, now); err != nil {
+		t.Fatal(err)
+	}
+
+	const workers = 6
+	var started, running sync.WaitGroup
+	started.Add(workers)
+	running.Add(workers)
+	results := make(chan error, workers)
+	concurrentNow := now.Add(time.Second)
+	for index := 0; index < workers; index++ {
+		go func(index int) {
+			defer running.Done()
+			started.Done()
+			started.Wait()
+			_, _, err := backend.AppendMessage(relay.AppendInput{
+				ConversationID: conversation.ID, SenderMachineID: machineA, FromEndpoint: endpointA,
+				Body: fmt.Sprintf("conc-%d", index), IdempotencyKey: fmt.Sprintf("%s-conc-%d", namespace, index),
+				Now: concurrentNow,
+			})
+			results <- err
+		}(index)
+	}
+	running.Wait()
+	close(results)
+	var accepted, limited int
+	for err := range results {
+		switch {
+		case err == nil:
+			accepted++
+		case errors.Is(err, relay.ErrCapacityExceeded):
+			limited++
+		default:
+			t.Fatalf("concurrent append err=%v", err)
+		}
+	}
+	if accepted != 1 || limited != workers-1 {
+		t.Fatalf("concurrent accepted=%d limited=%d", accepted, limited)
+	}
+	if err := limiter.SetQuotaLimits(relay.DefaultQuotaConfig()); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// RetentionSetter is implemented by durable stores that expire pending
+// deliveries and retain content-free terminal metadata.
+type RetentionSetter interface {
+	relay.Backend
+	SetRetentionPolicy(relay.RetentionConfig) error
+	MaintainDeliveries(time.Time) (relay.MaintenanceResult, error)
+	ListTerminalDeliveries(string, int) (relay.TerminalPage, error)
+}
+
+// RunDeliveryRetention proves pending-age expiry, exact-once capacity release,
+// and contiguous cursor advancement against every backend.
+func RunDeliveryRetention(t *testing.T, backend relay.Backend, namespace string) {
+	t.Helper()
+	store, ok := backend.(RetentionSetter)
+	if !ok {
+		t.Fatal("backend does not expose delivery retention")
+	}
+	if err := store.SetRetentionPolicy(relay.DefaultRetentionConfig()); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		_ = store.SetRetentionPolicy(relay.DefaultRetentionConfig())
+	})
+	now := time.Date(2026, time.August, 18, 21, 0, 0, 0, time.UTC)
+	cfg := relay.RetentionConfig{PendingMaxAgeSeconds: 60, TerminalRetentionSeconds: relay.RetentionAgeMaxSeconds, MaintenanceBatch: 100}
+	if err := store.SetRetentionPolicy(cfg); err != nil {
+		t.Fatal(err)
+	}
+	for i := 0; i < 32; i++ {
+		result, err := store.MaintainDeliveries(now)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if result.Expired == 0 && result.Pruned == 0 {
+			break
+		}
+	}
+	machineA, machineB := namespace+"-a", namespace+"-b"
+	endpointA, endpointB := "agent/"+namespace+"/a", "agent/"+namespace+"/b"
+	if err := backend.AdvertiseEndpoints(machineA, []string{endpointA}, now, time.Hour); err != nil {
+		t.Fatal(err)
+	}
+	if err := backend.AdvertiseEndpoints(machineB, []string{endpointB}, now, time.Hour); err != nil {
+		t.Fatal(err)
+	}
+	conversation, err := backend.CreateConversationIdempotent(relay.CreateConversationInput{
+		MachineID: machineA, IdempotencyKey: namespace + "-create", CreatorEndpoint: endpointA, Now: now,
+		Members: []relay.Member{
+			{Endpoint: endpointA, Capabilities: relay.CapSend | relay.CapReceive | relay.CapAdmin},
+			{Endpoint: endpointB, Capabilities: relay.CapReceive},
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	first, _, err := backend.AppendMessage(relay.AppendInput{ConversationID: conversation.ID, SenderMachineID: machineA, FromEndpoint: endpointA, Body: "one", IdempotencyKey: namespace + "-1", Now: now})
+	if err != nil {
+		t.Fatal(err)
+	}
+	second, _, err := backend.AppendMessage(relay.AppendInput{ConversationID: conversation.ID, SenderMachineID: machineA, FromEndpoint: endpointA, Body: "two", IdempotencyKey: namespace + "-2", Now: now.Add(30 * time.Second)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	page, err := backend.LeaseDeliveries(machineB, namespace+"-consumer", endpointB, conversation.ID, now, time.Minute, 10)
+	if err != nil || len(page.Deliveries) != 2 {
+		t.Fatalf("lease=%#v err=%v", page, err)
+	}
+	before := now.Add(59 * time.Second)
+	if result, err := store.MaintainDeliveries(before); err != nil || result.Expired != 0 {
+		t.Fatalf("before expiry=%#v err=%v", result, err)
+	}
+	expireAt := now.Add(60 * time.Second)
+	result, err := store.MaintainDeliveries(expireAt)
+	if err != nil || result.Expired != 1 {
+		t.Fatalf("at expiry=%#v err=%v", result, err)
+	}
+	if err := backend.AckDelivery(machineB, endpointB, page.Deliveries[0].ID, page.Deliveries[0].LeaseToken, page.Deliveries[0].LeaseGeneration, expireAt); !errors.Is(err, relay.ErrForbidden) {
+		t.Fatalf("expired lease ack err=%v", err)
+	}
+	cursor, err := backend.RecipientCursor(machineB, endpointB, conversation.ID, expireAt)
+	if err != nil || cursor != first.Sequence {
+		t.Fatalf("cursor after expiry=%d want=%d err=%v", cursor, first.Sequence, err)
+	}
+	remaining, err := backend.LeaseDeliveries(machineB, namespace+"-consumer", endpointB, conversation.ID, expireAt, time.Minute, 10)
+	if err != nil || len(remaining.Deliveries) != 1 || remaining.Deliveries[0].Message.ID != second.ID {
+		t.Fatalf("remaining=%#v err=%v", remaining, err)
+	}
+	if err := backend.AckDelivery(machineB, endpointB, remaining.Deliveries[0].ID, remaining.Deliveries[0].LeaseToken, remaining.Deliveries[0].LeaseGeneration, expireAt); err != nil {
+		t.Fatal(err)
+	}
+	cursor, err = backend.RecipientCursor(machineB, endpointB, conversation.ID, expireAt)
+	if err != nil || cursor != second.Sequence {
+		t.Fatalf("cursor after ack across expiry=%d want=%d err=%v", cursor, second.Sequence, err)
+	}
+	listed, err := store.ListTerminalDeliveries("", 10)
+	if err != nil || len(listed.Terminals) < 1 {
+		t.Fatalf("terminals=%#v err=%v", listed, err)
+	}
+	encoded := fmt.Sprintf("%#v", listed)
+	if strings.Contains(encoded, "one") || strings.Contains(encoded, "two") {
+		t.Fatalf("terminal listing leaked body: %s", encoded)
+	}
+	if err := store.SetRetentionPolicy(relay.DefaultRetentionConfig()); err != nil {
+		t.Fatal(err)
+	}
 }
 
 // RunRoleTargeting proves the same targeted-role and compatible-broadcast
@@ -329,6 +762,431 @@ func RunRoleTargeting(t *testing.T, backend relay.Backend, namespace string) {
 	}
 }
 
+// RunRoleProfiles proves opt-in canonical role registration, idempotency,
+// ownership, and hidden legacy roles against every durable backend.
+func RunRoleProfiles(t *testing.T, backend relay.Backend, namespace string) {
+	t.Helper()
+	store, ok := backend.(relay.RoleProfileBackend)
+	if !ok {
+		t.Fatal("backend does not implement durable role profiles")
+	}
+	now := time.Date(2026, time.August, 18, 16, 0, 0, 0, time.UTC)
+	machineA, machineB := namespace+"-a", namespace+"-b"
+	role := "role/" + machineA + "/reviewer"
+	input := relay.RegisterRoleInput{
+		MachineID: machineA, Role: role, DisplayName: "  Reviewer  ", IdempotencyKey: namespace + "-register", Now: now,
+	}
+	first, created, err := store.RegisterRoleProfile(input)
+	if err != nil || !created {
+		t.Fatalf("first register=%#v created=%t err=%v", first, created, err)
+	}
+	if first.Role != role || first.DisplayName != "Reviewer" || first.DirectAddressable || !first.UpdatedAt.Equal(now) {
+		t.Fatalf("first profile=%#v", first)
+	}
+	retry, created, err := store.RegisterRoleProfile(input)
+	if err != nil || created || !sameRoleProfile(retry, first) {
+		t.Fatalf("retry=%#v created=%t err=%v", retry, created, err)
+	}
+	changed := input
+	changed.DisplayName = "Other"
+	if _, _, err := store.RegisterRoleProfile(changed); !errors.Is(err, relay.ErrConflict) {
+		t.Fatalf("changed-body retry err=%v", err)
+	}
+	read, err := store.RoleProfile(role)
+	if err != nil || !sameRoleProfile(read, first) {
+		t.Fatalf("read=%#v err=%v", read, err)
+	}
+	for _, invalid := range []relay.RegisterRoleInput{
+		{MachineID: machineA, Role: "role/" + machineB + "/reviewer", IdempotencyKey: namespace + "-prefix", Now: now},
+		{MachineID: namespace, Role: "role/" + machineA + "/reviewer", IdempotencyKey: namespace + "-overlap", Now: now},
+		{MachineID: machineA, Role: "role/plan-reviewer", IdempotencyKey: namespace + "-legacy", Now: now},
+		{MachineID: machineA, Role: "role/" + machineA + "/Reviewer", IdempotencyKey: namespace + "-slug", Now: now},
+		{MachineID: machineA, Role: "role/" + machineA + "/_bad", IdempotencyKey: namespace + "-invalid", Now: now},
+		{MachineID: machineA, Role: role, DisplayName: strings.Repeat("n", 129), IdempotencyKey: namespace + "-display", Now: now},
+	} {
+		if _, _, err := store.RegisterRoleProfile(invalid); err == nil || errors.Is(err, relay.ErrForbidden) || errors.Is(err, relay.ErrConflict) {
+			t.Fatalf("invalid register %q err=%v", invalid.Role, err)
+		}
+	}
+	endpointA, endpointB := "agent/"+namespace+"/a", "agent/"+namespace+"/b"
+	if err := backend.AdvertiseEndpoints(machineA, []string{endpointA}, now, time.Hour); err != nil {
+		t.Fatal(err)
+	}
+	if err := backend.AdvertiseEndpoints(machineB, []string{endpointB}, now, time.Hour); err != nil {
+		t.Fatal(err)
+	}
+	takeoverRole := "role/" + machineA + "/taken"
+	if _, err := backend.CreateConversationIdempotent(relay.CreateConversationInput{
+		MachineID: machineA, CreatorEndpoint: endpointA, IdempotencyKey: namespace + "-takeover-create", Now: now,
+		Members: []relay.Member{
+			{Endpoint: endpointA, Capabilities: relay.CapSend | relay.CapReceive | relay.CapAdmin},
+			{Role: takeoverRole, RoleMachineID: machineB, Capabilities: relay.CapReceive},
+		},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := store.RegisterRoleProfile(relay.RegisterRoleInput{
+		MachineID: machineA, Role: takeoverRole, IdempotencyKey: namespace + "-takeover", Now: now,
+	}); !errors.Is(err, relay.ErrForbidden) {
+		t.Fatalf("takeover err=%v", err)
+	}
+	if _, err := store.RoleProfile(takeoverRole); !errors.Is(err, relay.ErrForbidden) {
+		t.Fatalf("unregistered takeover target was visible: %v", err)
+	}
+	later := now.Add(time.Minute)
+	updated, created, err := store.RegisterRoleProfile(relay.RegisterRoleInput{
+		MachineID: machineA, Role: role, DisplayName: "Lead Reviewer", DirectAddressable: true, IdempotencyKey: namespace + "-update", Now: later,
+	})
+	if err != nil || created {
+		t.Fatalf("update=%#v created=%t err=%v", updated, created, err)
+	}
+	if updated.Role != first.Role || updated.DisplayName != "Lead Reviewer" || !updated.DirectAddressable || !updated.UpdatedAt.Equal(later) {
+		t.Fatalf("updated=%#v first=%#v", updated, first)
+	}
+	disabled, _, err := store.RegisterRoleProfile(relay.RegisterRoleInput{
+		MachineID: machineA, Role: role, DirectAddressable: false, IdempotencyKey: namespace + "-disable", Now: later.Add(time.Second),
+	})
+	if err != nil || disabled.DirectAddressable {
+		t.Fatalf("disabled=%#v err=%v", disabled, err)
+	}
+	legacyRole := "role/" + namespace + "-legacy"
+	if _, err := backend.CreateConversationIdempotent(relay.CreateConversationInput{
+		MachineID: machineA, CreatorEndpoint: endpointA, IdempotencyKey: namespace + "-legacy-create", Now: now,
+		Members: []relay.Member{
+			{Endpoint: endpointA, Capabilities: relay.CapSend | relay.CapReceive | relay.CapAdmin},
+			{Role: legacyRole, RoleMachineID: machineB, Capabilities: relay.CapReceive},
+		},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.RoleProfile(legacyRole); !errors.Is(err, relay.ErrForbidden) {
+		t.Fatalf("legacy role was visible before registration: %v", err)
+	}
+	roleBackend, ok := backend.(relay.RoleBindingBackend)
+	if !ok {
+		t.Fatal("backend does not implement durable role bindings")
+	}
+	if err := roleBackend.BindRoleToSession(machineB, legacyRole, endpointB, now, time.Hour); err != nil {
+		t.Fatalf("legacy role binding: %v", err)
+	}
+	canonical, created, err := store.RegisterRoleProfile(relay.RegisterRoleInput{
+		MachineID: machineB, Role: "role/" + machineB + "/reviewer", DirectAddressable: true, IdempotencyKey: namespace + "-canonical", Now: now,
+	})
+	if err != nil || !created || canonical.Role != "role/"+machineB+"/reviewer" {
+		t.Fatalf("canonical register=%#v created=%t err=%v", canonical, created, err)
+	}
+	if _, err := store.RoleProfile(legacyRole); !errors.Is(err, relay.ErrForbidden) {
+		t.Fatalf("legacy role was renamed or exposed: %v", err)
+	}
+	bodyConversation, err := backend.CreateConversationIdempotent(relay.CreateConversationInput{
+		MachineID: machineA, CreatorEndpoint: endpointA, IdempotencyKey: namespace + "-body-create", Now: now,
+		Members: []relay.Member{{Endpoint: endpointA, Capabilities: relay.CapSend | relay.CapReceive | relay.CapAdmin}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	invented := "role/" + machineA + "/from-body"
+	if _, _, err := backend.AppendMessage(relay.AppendInput{
+		ConversationID: bodyConversation.ID, SenderMachineID: machineA, FromEndpoint: endpointA,
+		Body: "register " + invented, IdempotencyKey: namespace + "-body", Now: now.Add(2 * time.Minute),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.RoleProfile(invented); !errors.Is(err, relay.ErrForbidden) {
+		t.Fatalf("message body created a role profile: %v", err)
+	}
+	preciseNow := now.Add(4 * time.Minute).Add(123456789 * time.Nanosecond)
+	preciseRole := "role/" + machineA + "/precise"
+	precise, created, err := store.RegisterRoleProfile(relay.RegisterRoleInput{
+		MachineID: machineA, Role: preciseRole, DisplayName: "Precise", IdempotencyKey: namespace + "-precise", Now: preciseNow,
+	})
+	if err != nil || !created || !precise.UpdatedAt.Equal(preciseNow.UTC().Truncate(time.Millisecond)) {
+		t.Fatalf("precise register=%#v created=%t err=%v", precise, created, err)
+	}
+	preciseRetry, created, err := store.RegisterRoleProfile(relay.RegisterRoleInput{
+		MachineID: machineA, Role: preciseRole, DisplayName: "Precise", IdempotencyKey: namespace + "-precise", Now: preciseNow.Add(time.Hour),
+	})
+	if err != nil || created || !sameRoleProfile(preciseRetry, precise) {
+		t.Fatalf("precise retry=%#v created=%t err=%v", preciseRetry, created, err)
+	}
+	concurrentRole := "role/" + machineA + "/concurrent"
+	concurrentInput := relay.RegisterRoleInput{
+		MachineID: machineA, Role: concurrentRole, DisplayName: "Concurrent", IdempotencyKey: namespace + "-concurrent", Now: now.Add(5 * time.Minute),
+	}
+	const workers = 8
+	profiles := make([]relay.RoleProfile, workers)
+	createdFlags := make([]bool, workers)
+	errs := make([]error, workers)
+	var started, done sync.WaitGroup
+	started.Add(workers)
+	done.Add(workers)
+	for i := 0; i < workers; i++ {
+		go func(i int) {
+			defer done.Done()
+			started.Done()
+			started.Wait()
+			profiles[i], createdFlags[i], errs[i] = store.RegisterRoleProfile(concurrentInput)
+		}(i)
+	}
+	done.Wait()
+	var concurrentFirst relay.RoleProfile
+	createdCount := 0
+	for i, err := range errs {
+		if err != nil {
+			t.Fatalf("concurrent worker %d err=%v", i, err)
+		}
+		if createdFlags[i] {
+			createdCount++
+			concurrentFirst = profiles[i]
+		}
+	}
+	if createdCount != 1 {
+		t.Fatalf("concurrent created=%d want 1", createdCount)
+	}
+	for i, profile := range profiles {
+		if !sameRoleProfile(profile, concurrentFirst) {
+			t.Fatalf("concurrent worker %d profile=%#v want=%#v", i, profile, concurrentFirst)
+		}
+	}
+	if _, _, err := store.RegisterRoleProfile(relay.RegisterRoleInput{
+		MachineID: machineA, Role: role, DirectAddressable: true, IdempotencyKey: namespace + "-list-enable", Now: now.Add(6 * time.Minute),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	listed, err := store.ListAddressableRoles(relay.RoleListInput{Limit: 50, Now: now.Add(6 * time.Minute)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	found := map[string]bool{}
+	for _, contact := range listed.Roles {
+		found[contact.Role] = true
+		if contact.Role == role && contact.Online {
+			t.Fatalf("unbound listed role was online: %#v", contact)
+		}
+	}
+	if !found[role] || !found["role/"+machineB+"/reviewer"] || found[legacyRole] || found[preciseRole] {
+		t.Fatalf("directory visibility=%v page=%#v", found, listed)
+	}
+	exact, err := store.ResolveAddressableRole(relay.RoleResolveInput{Name: role, Now: now.Add(6 * time.Minute)})
+	if err != nil || exact.Status != relay.RoleResolveResolved || exact.Role != role {
+		t.Fatalf("exact resolve=%#v err=%v", exact, err)
+	}
+	ambiguous, err := store.ResolveAddressableRole(relay.RoleResolveInput{Name: "reviewer", Now: now.Add(6 * time.Minute)})
+	if err != nil || ambiguous.Status != relay.RoleResolveAmbiguous || len(ambiguous.Matches) < 2 {
+		t.Fatalf("ambiguous resolve=%#v err=%v", ambiguous, err)
+	}
+	missing, err := store.ResolveAddressableRole(relay.RoleResolveInput{Name: legacyRole, Now: now.Add(6 * time.Minute)})
+	if err != nil || missing.Status != relay.RoleResolveNotFound {
+		t.Fatalf("legacy resolve=%#v err=%v", missing, err)
+	}
+}
+
+func sameRoleProfile(got, want relay.RoleProfile) bool {
+	return got.Role == want.Role && got.DisplayName == want.DisplayName && got.DirectAddressable == want.DirectAddressable && got.UpdatedAt.Equal(want.UpdatedAt)
+}
+
+// RunNamedOccupancy proves unnamed rooms stay many-to-many while a session
+// occupies at most one named conversation. telegram/primary is exempt.
+func RunNamedOccupancy(t *testing.T, backend relay.Backend, namespace string) {
+	t.Helper()
+	now := time.Date(2026, time.August, 16, 15, 0, 0, 0, time.UTC)
+	machineA, machineB, machineGateway := namespace+"-occ-a", namespace+"-occ-b", namespace+"-occ-telegram"
+	endpointA, endpointB := "agent/"+namespace+"/occ-a", "agent/"+namespace+"/occ-b"
+	if err := backend.AdvertiseEndpoints(machineA, []string{endpointA}, now, time.Hour); err != nil {
+		t.Fatal(err)
+	}
+	if err := backend.AdvertiseEndpoints(machineB, []string{endpointB}, now, time.Hour); err != nil {
+		t.Fatal(err)
+	}
+	if err := backend.AdvertiseEndpoints(machineGateway, []string{relay.TelegramPrimaryEndpoint}, now, time.Hour); err != nil {
+		t.Fatal(err)
+	}
+	unnamedMembers := []relay.Member{
+		{Endpoint: endpointA, Capabilities: relay.CapSend | relay.CapReceive | relay.CapAdmin},
+		{Endpoint: endpointB, Capabilities: relay.CapReceive},
+	}
+	firstUnnamed, err := backend.CreateConversationIdempotent(relay.CreateConversationInput{
+		MachineID: machineA, IdempotencyKey: namespace + "-unnamed-1", CreatorEndpoint: endpointA, Members: unnamedMembers, Now: now,
+	})
+	if err != nil || firstUnnamed.DisplayName != "" {
+		t.Fatalf("first unnamed=%#v err=%v", firstUnnamed, err)
+	}
+	secondUnnamed, err := backend.CreateConversationIdempotent(relay.CreateConversationInput{
+		MachineID: machineA, IdempotencyKey: namespace + "-unnamed-2", CreatorEndpoint: endpointA, Members: unnamedMembers, Now: now,
+	})
+	if err != nil || secondUnnamed.ID == firstUnnamed.ID {
+		t.Fatalf("second unnamed=%#v first=%#v err=%v", secondUnnamed, firstUnnamed, err)
+	}
+	named, err := backend.CreateConversationIdempotent(relay.CreateConversationInput{
+		MachineID: machineA, IdempotencyKey: namespace + "-named-1", CreatorEndpoint: endpointA,
+		DisplayName: "Occupancy A", Members: []relay.Member{
+			{Endpoint: endpointA, Capabilities: relay.CapSend | relay.CapReceive | relay.CapAdmin},
+		}, Now: now,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := backend.CreateConversationIdempotent(relay.CreateConversationInput{
+		MachineID: machineA, IdempotencyKey: namespace + "-named-2", CreatorEndpoint: endpointA,
+		DisplayName: "Occupancy B", Members: []relay.Member{
+			{Endpoint: endpointA, Capabilities: relay.CapSend | relay.CapReceive | relay.CapAdmin},
+		}, Now: now,
+	}); !errors.Is(err, relay.ErrConflict) {
+		t.Fatalf("second named join err=%v", err)
+	}
+	telegramRoom, err := backend.CreateConversationIdempotent(relay.CreateConversationInput{
+		MachineID: machineB, IdempotencyKey: namespace + "-named-telegram", CreatorEndpoint: endpointB,
+		DisplayName: "Occupancy Telegram", Members: []relay.Member{
+			{Endpoint: endpointB, Capabilities: relay.CapSend | relay.CapReceive | relay.CapAdmin},
+		}, Now: now,
+	})
+	if err != nil {
+		t.Fatalf("second named room err=%v", err)
+	}
+	mustClaimConversation(t, backend, telegramRoom.ID, machineB, endpointB, machineGateway, now)
+	mustClaimConversation(t, backend, named.ID, machineA, endpointA, machineGateway, now.Add(time.Second))
+	if names, ok := backend.(relay.DisplayNameBackend); ok {
+		if _, _, err := names.SetConversationDisplayName(relay.SetDisplayNameInput{
+			ConversationID: firstUnnamed.ID, ActorMachineID: machineA, ActorEndpoint: endpointA,
+			DisplayName: "Should conflict", IdempotencyKey: namespace + "-rename-occupied", Now: now,
+		}); !errors.Is(err, relay.ErrConflict) {
+			t.Fatalf("rename while occupying named room err=%v", err)
+		}
+	}
+	control, ok := backend.(relay.ControlBackend)
+	if !ok {
+		t.Fatal("backend does not implement membership controls")
+	}
+	machineC, machineExtra, machineCreator, machineRole, machineFree := namespace+"-occ-c", namespace+"-occ-extra", namespace+"-occ-creator", namespace+"-occ-role", namespace+"-occ-free"
+	endpointC, endpointExtra, endpointCreator, endpointRole, endpointRole2, endpointFree := "agent/"+namespace+"/occ-c", "agent/"+namespace+"/occ-extra", "agent/"+namespace+"/occ-creator", "agent/"+namespace+"/occ-role", "agent/"+namespace+"/occ-role-2", "agent/"+namespace+"/occ-free"
+	for machine, endpoints := range map[string][]string{
+		machineC:       {endpointC},
+		machineExtra:   {endpointExtra},
+		machineCreator: {endpointCreator},
+		machineRole:    {endpointRole, endpointRole2},
+		machineFree:    {endpointFree},
+	} {
+		if err := backend.AdvertiseEndpoints(machine, endpoints, now, time.Hour); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if _, _, err := control.ApplyControl(relay.ControlInput{
+		ConversationID: telegramRoom.ID, ActorMachineID: machineB, ActorEndpoint: endpointB,
+		Operation: relay.ControlUpsertMember, Member: relay.Member{Endpoint: endpointA, Capabilities: relay.CapReceive},
+		IdempotencyKey: namespace + "-upsert-occupied", Now: now,
+	}); !errors.Is(err, relay.ErrConflict) {
+		t.Fatalf("control upsert into second named room err=%v", err)
+	}
+	if _, _, err := control.ApplyControl(relay.ControlInput{
+		ConversationID: named.ID, ActorMachineID: machineA, ActorEndpoint: endpointA,
+		Operation: relay.ControlUpsertMember, Member: relay.Member{Endpoint: endpointC, Capabilities: relay.CapReceive},
+		IdempotencyKey: namespace + "-upsert-free", Now: now,
+	}); err != nil {
+		t.Fatalf("control upsert unoccupied session err=%v", err)
+	}
+	if _, _, err := control.ApplyControl(relay.ControlInput{
+		ConversationID: named.ID, ActorMachineID: machineA, ActorEndpoint: endpointA,
+		Operation: relay.ControlUpsertMember, Member: relay.Member{Endpoint: relay.TelegramPrimaryEndpoint, Capabilities: relay.CapReceive},
+		IdempotencyKey: namespace + "-upsert-telegram-existing", Now: now,
+	}); !errors.Is(err, relay.ErrForbidden) {
+		t.Fatalf("control upsert telegram/primary err=%v", err)
+	}
+	extraNamed, err := backend.CreateConversationIdempotent(relay.CreateConversationInput{
+		MachineID: machineExtra, IdempotencyKey: namespace + "-named-extra", CreatorEndpoint: endpointExtra,
+		DisplayName: "Extra room", Members: []relay.Member{
+			{Endpoint: endpointExtra, Capabilities: relay.CapSend | relay.CapReceive | relay.CapAdmin},
+		}, Now: now,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	mustClaimConversation(t, backend, extraNamed.ID, machineExtra, endpointExtra, machineGateway, now.Add(2*time.Second))
+	roleBackend, ok := backend.(relay.RoleBindingBackend)
+	if !ok {
+		t.Fatal("backend does not implement durable role bindings")
+	}
+	reviewerRole, otherRole, unnamedRole := "role/"+namespace+"/reviewer", "role/"+namespace+"/other", "role/"+namespace+"/unnamed"
+	if _, err := backend.CreateConversationIdempotent(relay.CreateConversationInput{
+		MachineID: machineCreator, IdempotencyKey: namespace + "-named-role-a", CreatorEndpoint: endpointCreator,
+		DisplayName: "Role room A", Members: []relay.Member{
+			{Endpoint: endpointCreator, Capabilities: relay.CapSend | relay.CapReceive | relay.CapAdmin},
+			{Role: reviewerRole, RoleMachineID: machineRole, Capabilities: relay.CapReceive},
+		}, Now: now,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := backend.CreateConversationIdempotent(relay.CreateConversationInput{
+		MachineID: machineRole, IdempotencyKey: namespace + "-named-role-2", CreatorEndpoint: endpointRole2,
+		DisplayName: "Role session 2", Members: []relay.Member{
+			{Endpoint: endpointRole2, Capabilities: relay.CapSend | relay.CapReceive | relay.CapAdmin},
+		}, Now: now,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := roleBackend.BindRoleToSession(machineRole, reviewerRole, endpointRole, now, time.Hour); err != nil {
+		t.Fatal(err)
+	}
+	if err := roleBackend.BindRoleToSession(machineRole, reviewerRole, endpointRole, now.Add(time.Second), time.Hour); err != nil {
+		t.Fatalf("renew bind onto the same named room err=%v", err)
+	}
+	if err := roleBackend.BindRoleToSession(machineRole, reviewerRole, endpointRole2, now.Add(2*time.Second), time.Hour); !errors.Is(err, relay.ErrConflict) {
+		t.Fatalf("bind named role onto session occupying another named room err=%v", err)
+	}
+	if _, err := backend.CreateConversationIdempotent(relay.CreateConversationInput{
+		MachineID: machineFree, IdempotencyKey: namespace + "-named-role-conflict", CreatorEndpoint: endpointFree,
+		DisplayName: "Role room B", Members: []relay.Member{
+			{Endpoint: endpointFree, Capabilities: relay.CapSend | relay.CapReceive | relay.CapAdmin},
+			{Role: reviewerRole, RoleMachineID: machineRole, Capabilities: relay.CapReceive},
+		}, Now: now,
+	}); !errors.Is(err, relay.ErrConflict) {
+		t.Fatalf("named role membership for occupied session err=%v", err)
+	}
+	if _, err := backend.CreateConversationIdempotent(relay.CreateConversationInput{
+		MachineID: machineFree, IdempotencyKey: namespace + "-named-other-role", CreatorEndpoint: endpointFree,
+		DisplayName: "Other role room", Members: []relay.Member{
+			{Endpoint: endpointFree, Capabilities: relay.CapSend | relay.CapReceive | relay.CapAdmin},
+			{Role: otherRole, RoleMachineID: machineRole, Capabilities: relay.CapReceive},
+		}, Now: now,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := roleBackend.BindRoleToSession(machineRole, otherRole, endpointRole, now.Add(3*time.Second), time.Hour); !errors.Is(err, relay.ErrConflict) {
+		t.Fatalf("bind role into second named room err=%v", err)
+	}
+	unnamedRoleRoom, err := backend.CreateConversationIdempotent(relay.CreateConversationInput{
+		MachineID: machineCreator, IdempotencyKey: namespace + "-unnamed-role", CreatorEndpoint: endpointCreator,
+		Members: []relay.Member{
+			{Endpoint: endpointCreator, Capabilities: relay.CapSend | relay.CapReceive | relay.CapAdmin},
+			{Role: unnamedRole, RoleMachineID: machineRole, Capabilities: relay.CapReceive},
+		}, Now: now,
+	})
+	if err != nil || unnamedRoleRoom.DisplayName != "" {
+		t.Fatalf("unnamed role room=%#v err=%v", unnamedRoleRoom, err)
+	}
+	if err := roleBackend.BindRoleToSession(machineRole, unnamedRole, endpointRole, now.Add(4*time.Second), time.Hour); err != nil {
+		t.Fatalf("bind unnamed role while occupying one named room err=%v", err)
+	}
+}
+
+func mustClaimConversation(t *testing.T, backend relay.Backend, conversationID, actorMachine, actorEndpoint, gatewayMachine string, now time.Time) {
+	t.Helper()
+	claims, ok := backend.(relay.TelegramClaimBackend)
+	if !ok {
+		t.Fatal("backend does not implement telegram claims")
+	}
+	if _, _, err := claims.ReserveTelegramClaim(relay.TelegramClaimInput{
+		ConversationID: conversationID, MachineID: actorMachine, Endpoint: actorEndpoint,
+		IdempotencyKey: "claim-" + conversationID, Now: now,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := claims.CompleteTelegramClaim(relay.TelegramClaimCompleteInput{
+		ConversationID: conversationID, MachineID: gatewayMachine, Now: now,
+	}); err != nil {
+		t.Fatal(err)
+	}
+}
+
 func runLeasePageContract(t *testing.T, backend relay.Backend, namespace string, now time.Time) {
 	t.Helper()
 	senderMachine, recipientMachine := namespace+"-page-sender", namespace+"-page-recipient"
@@ -408,5 +1266,240 @@ func runLeasePageContract(t *testing.T, backend relay.Backend, namespace string,
 		if page.Cursors[page.Deliveries[index].Message.ConversationID] != 0 {
 			t.Fatalf("lease page cursors=%#v", page.Cursors)
 		}
+	}
+}
+
+// RunDirectMessages proves idempotent unordered-role send, targeted delivery,
+// and sender-role envelopes against every durable backend.
+func RunDirectMessages(t *testing.T, backend relay.Backend, namespace string) {
+	t.Helper()
+	store, ok := backend.(relay.DirectMessageBackend)
+	if !ok {
+		t.Fatal("backend does not implement direct messages")
+	}
+	profiles, ok := backend.(relay.RoleProfileBackend)
+	if !ok {
+		t.Fatal("backend does not implement durable role profiles")
+	}
+	bindings, ok := backend.(relay.RoleBindingBackend)
+	if !ok {
+		t.Fatal("backend does not implement durable role bindings")
+	}
+	now := time.Date(2026, time.August, 18, 18, 0, 0, 0, time.UTC)
+	machineA, machineB := namespace+"-a", namespace+"-b"
+	endpointA, endpointB := "agent/"+namespace+"/a", "agent/"+namespace+"/b"
+	fromRole := "role/" + machineA + "/reviewer"
+	toRole := "role/" + machineB + "/implementer"
+	if err := backend.AdvertiseEndpoints(machineA, []string{endpointA}, now, time.Hour); err != nil {
+		t.Fatal(err)
+	}
+	if err := backend.AdvertiseEndpoints(machineB, []string{endpointB}, now, time.Hour); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := profiles.RegisterRoleProfile(relay.RegisterRoleInput{MachineID: machineA, Role: fromRole, DirectAddressable: true, IdempotencyKey: namespace + "-reg-a", Now: now}); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := profiles.RegisterRoleProfile(relay.RegisterRoleInput{MachineID: machineB, Role: toRole, DirectAddressable: true, IdempotencyKey: namespace + "-reg-b", Now: now}); err != nil {
+		t.Fatal(err)
+	}
+	if err := bindings.BindRoleToSession(machineA, fromRole, endpointA, now, time.Hour); err != nil {
+		t.Fatal(err)
+	}
+	if err := bindings.BindRoleToSession(machineB, toRole, endpointB, now, time.Hour); err != nil {
+		t.Fatal(err)
+	}
+	first, duplicate, err := store.SendDirectMessage(relay.DirectMessageInput{
+		SenderMachineID: machineA, FromRole: fromRole, ToRole: toRole, Body: "please review", IdempotencyKey: namespace + "-dm", Now: now,
+	})
+	if err != nil || duplicate || first.FromRole != fromRole || first.FromEndpoint != "" || first.ConversationID == "" {
+		t.Fatalf("first=%#v duplicate=%t err=%v", first, duplicate, err)
+	}
+	retry, duplicate, err := store.SendDirectMessage(relay.DirectMessageInput{
+		SenderMachineID: machineA, FromRole: fromRole, ToRole: toRole, Body: "please review", IdempotencyKey: namespace + "-dm", Now: now.Add(time.Second),
+	})
+	if err != nil || !duplicate || retry.ID != first.ID || retry.ConversationID != first.ConversationID {
+		t.Fatalf("retry=%#v duplicate=%t err=%v", retry, duplicate, err)
+	}
+	changed := relay.DirectMessageInput{SenderMachineID: machineA, FromRole: fromRole, ToRole: toRole, Body: "other", IdempotencyKey: namespace + "-dm", Now: now}
+	if _, _, err := store.SendDirectMessage(changed); !errors.Is(err, relay.ErrConflict) {
+		t.Fatalf("changed body err=%v", err)
+	}
+	reply, duplicate, err := store.SendDirectMessage(relay.DirectMessageInput{
+		SenderMachineID: machineB, FromRole: toRole, ToRole: fromRole, Body: "done", IdempotencyKey: namespace + "-reply", Now: now.Add(2 * time.Second),
+	})
+	if err != nil || duplicate || reply.ConversationID != first.ConversationID {
+		t.Fatalf("reply=%#v duplicate=%t err=%v", reply, duplicate, err)
+	}
+	page, err := backend.LeaseDeliveries(machineB, namespace+"-consumer-b", endpointB, first.ConversationID, now.Add(2*time.Second), time.Minute, 10)
+	if err != nil || len(page.Deliveries) != 1 || page.Deliveries[0].Message.ID != first.ID || page.Deliveries[0].Message.FromRole != fromRole || page.Deliveries[0].Message.FromEndpoint != "" {
+		t.Fatalf("target page=%#v err=%v", page, err)
+	}
+	if _, _, err := store.SendDirectMessage(relay.DirectMessageInput{
+		SenderMachineID: machineA, FromRole: fromRole, ToRole: fromRole, Body: "self", IdempotencyKey: namespace + "-self", Now: now,
+	}); err == nil || errors.Is(err, relay.ErrForbidden) || errors.Is(err, relay.ErrConflict) {
+		t.Fatalf("self-send err=%v", err)
+	}
+	named, err := backend.CreateConversationIdempotent(relay.CreateConversationInput{
+		MachineID: machineA, IdempotencyKey: namespace + "-named", CreatorEndpoint: endpointA, Now: now,
+		Members: []relay.Member{
+			{Endpoint: endpointA, Capabilities: relay.CapSend | relay.CapReceive | relay.CapAdmin},
+			{Endpoint: endpointB, Capabilities: relay.CapSend | relay.CapReceive},
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := backend.AppendMessage(relay.AppendInput{
+		ConversationID: first.ConversationID, SenderMachineID: machineA, FromEndpoint: endpointA, Body: "generic bypass", IdempotencyKey: namespace + "-append-direct", Now: now.Add(3 * time.Second),
+	}); !errors.Is(err, relay.ErrForbidden) {
+		t.Fatalf("generic append on direct room err=%v", err)
+	}
+	if _, _, err := backend.AppendMessage(relay.AppendInput{
+		ConversationID: first.ConversationID, SenderMachineID: machineA, FromEndpoint: endpointA, TargetRole: toRole, Body: "targeted bypass", IdempotencyKey: namespace + "-append-direct-target", Now: now.Add(3 * time.Second),
+	}); !errors.Is(err, relay.ErrForbidden) {
+		t.Fatalf("targeted append on direct room err=%v", err)
+	}
+	if err := backend.AuthorizeSender(first.ConversationID, machineA, endpointA, now.Add(3*time.Second)); !errors.Is(err, relay.ErrForbidden) {
+		t.Fatalf("authorize sender on direct room err=%v", err)
+	}
+	if _, _, err := profiles.RegisterRoleProfile(relay.RegisterRoleInput{
+		MachineID: machineB, Role: toRole, DirectAddressable: false, IdempotencyKey: namespace + "-opt-out", Now: now.Add(4 * time.Second),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := backend.AppendMessage(relay.AppendInput{
+		ConversationID: first.ConversationID, SenderMachineID: machineA, FromEndpoint: endpointA, Body: "after opt-out", IdempotencyKey: namespace + "-append-opt-out", Now: now.Add(4 * time.Second),
+	}); !errors.Is(err, relay.ErrForbidden) {
+		t.Fatalf("generic append after opt-out err=%v", err)
+	}
+	namedMessage, duplicate, err := backend.AppendMessage(relay.AppendInput{
+		ConversationID: named.ID, SenderMachineID: machineA, FromEndpoint: endpointA, Body: "named room still works", IdempotencyKey: namespace + "-append-named", Now: now.Add(4 * time.Second),
+	})
+	if err != nil || duplicate || namedMessage.Body != "named room still works" {
+		t.Fatalf("named append=%#v duplicate=%t err=%v", namedMessage, duplicate, err)
+	}
+}
+
+// RunDurableRoleAddressingE2E proves the parent #143 discover, resolve,
+// offline send, receive, and rebind outcome against every durable backend.
+func RunDurableRoleAddressingE2E(t *testing.T, backend relay.Backend, namespace string) {
+	t.Helper()
+	profiles, ok := backend.(relay.RoleProfileBackend)
+	if !ok {
+		t.Fatal("backend does not implement durable role profiles")
+	}
+	bindings, ok := backend.(relay.RoleBindingBackend)
+	if !ok {
+		t.Fatal("backend does not implement durable role bindings")
+	}
+	direct, ok := backend.(relay.DirectMessageBackend)
+	if !ok {
+		t.Fatal("backend does not implement direct messages")
+	}
+	now := time.Date(2026, time.August, 23, 10, 0, 0, 0, time.UTC)
+	machineA, machineB := namespace+"-a", namespace+"-b"
+	machineC, machineD := namespace+"-c", namespace+"-d"
+	endpointA := "agent/" + namespace + "/reviewer"
+	endpointB1, endpointB2 := "agent/"+namespace+"/implementer-1", "agent/"+namespace+"/implementer-2"
+	fromRole := "role/" + machineA + "/source-e2e"
+	toRole := "role/" + machineB + "/target-e2e"
+	ambiguousRole := "role/" + machineC + "/target-e2e"
+	hiddenRole := "role/" + machineD + "/hidden"
+	if err := backend.AdvertiseEndpoints(machineA, []string{endpointA}, now, time.Hour); err != nil {
+		t.Fatal(err)
+	}
+	registrations := []relay.RegisterRoleInput{
+		{MachineID: machineA, Role: fromRole, DisplayName: "Reviewer", DirectAddressable: true, IdempotencyKey: namespace + "-register-a", Now: now},
+		{MachineID: machineB, Role: toRole, DisplayName: "Implementer", DirectAddressable: true, IdempotencyKey: namespace + "-register-b", Now: now},
+		{MachineID: machineC, Role: ambiguousRole, DisplayName: "Other implementer", DirectAddressable: true, IdempotencyKey: namespace + "-register-c", Now: now},
+		{MachineID: machineD, Role: hiddenRole, DisplayName: "Hidden", DirectAddressable: false, IdempotencyKey: namespace + "-register-d", Now: now},
+	}
+	for _, input := range registrations {
+		if _, created, err := profiles.RegisterRoleProfile(input); err != nil || !created {
+			t.Fatalf("register role %q created=%t err=%v", input.Role, created, err)
+		}
+	}
+	if err := bindings.BindRoleToSession(machineA, fromRole, endpointA, now, time.Hour); err != nil {
+		t.Fatal(err)
+	}
+
+	page, err := profiles.ListAddressableRoles(relay.RoleListInput{Limit: 50, Now: now})
+	if err != nil || len(page.Roles) < 3 || page.NextCursor != "" {
+		t.Fatalf("addressable roles=%#v err=%v", page, err)
+	}
+	listed := make(map[string]relay.RoleContact, len(page.Roles))
+	for _, contact := range page.Roles {
+		listed[contact.Role] = contact
+	}
+	if listed[fromRole].Role == "" || !listed[fromRole].Online || listed[toRole].Role == "" || listed[toRole].Online || listed[ambiguousRole].Role == "" {
+		t.Fatalf("addressable roles=%#v", page.Roles)
+	}
+	if _, found := listed[hiddenRole]; found {
+		t.Fatalf("opted-out role was listed: %#v", page.Roles)
+	}
+	qualified, err := profiles.ResolveAddressableRole(relay.RoleResolveInput{Name: toRole, Now: now})
+	if err != nil || qualified.Status != relay.RoleResolveResolved || qualified.Role != toRole || qualified.Online {
+		t.Fatalf("qualified resolve=%#v err=%v", qualified, err)
+	}
+	unique, err := profiles.ResolveAddressableRole(relay.RoleResolveInput{Name: "source-e2e", Now: now})
+	if err != nil || unique.Status != relay.RoleResolveResolved || unique.Role != fromRole || !unique.Online {
+		t.Fatalf("unique resolve=%#v err=%v", unique, err)
+	}
+	ambiguous, err := profiles.ResolveAddressableRole(relay.RoleResolveInput{Name: "target-e2e", Now: now})
+	if err != nil || ambiguous.Status != relay.RoleResolveAmbiguous || len(ambiguous.Matches) != 2 {
+		t.Fatalf("ambiguous resolve=%#v err=%v", ambiguous, err)
+	}
+	hidden, err := profiles.ResolveAddressableRole(relay.RoleResolveInput{Name: hiddenRole, Now: now})
+	if err != nil || hidden.Status != relay.RoleResolveNotFound {
+		t.Fatalf("hidden resolve=%#v err=%v", hidden, err)
+	}
+	if _, _, err := direct.SendDirectMessage(relay.DirectMessageInput{
+		SenderMachineID: machineA, FromRole: fromRole, ToRole: hiddenRole, Body: "must fail", IdempotencyKey: namespace + "-hidden-send", Now: now,
+	}); !errors.Is(err, relay.ErrForbidden) {
+		t.Fatalf("opted-out direct send err=%v", err)
+	}
+
+	first, duplicate, err := direct.SendDirectMessage(relay.DirectMessageInput{
+		SenderMachineID: machineA, FromRole: fromRole, ToRole: toRole, Body: "sent while offline", IdempotencyKey: namespace + "-offline-send", Now: now,
+	})
+	if err != nil || duplicate || first.ConversationID == "" {
+		t.Fatalf("offline send=%#v duplicate=%t err=%v", first, duplicate, err)
+	}
+	boundAt := now.Add(time.Minute)
+	if err := backend.AdvertiseEndpoints(machineB, []string{endpointB1}, boundAt, time.Hour); err != nil {
+		t.Fatal(err)
+	}
+	if err := bindings.BindRoleToSession(machineB, toRole, endpointB1, boundAt, time.Hour); err != nil {
+		t.Fatal(err)
+	}
+	firstPage, err := backend.LeaseDeliveries(machineB, namespace+"-consumer-1", endpointB1, first.ConversationID, boundAt, time.Minute, 10)
+	if err != nil || len(firstPage.Deliveries) != 1 || firstPage.Deliveries[0].Message.ID != first.ID || firstPage.Deliveries[0].RecipientRole != toRole {
+		t.Fatalf("offline receive=%#v err=%v", firstPage, err)
+	}
+	firstDelivery := firstPage.Deliveries[0]
+	if err := backend.AckDelivery(machineB, endpointB1, firstDelivery.ID, firstDelivery.LeaseToken, firstDelivery.LeaseGeneration, boundAt); err != nil {
+		t.Fatal(err)
+	}
+
+	reboundAt := boundAt.Add(2 * time.Minute)
+	if err := backend.AdvertiseEndpoints(machineB, []string{endpointB2}, reboundAt, time.Hour); err != nil {
+		t.Fatal(err)
+	}
+	if err := bindings.BindRoleToSession(machineB, toRole, endpointB2, reboundAt, time.Hour); err != nil {
+		t.Fatal(err)
+	}
+	second, duplicate, err := direct.SendDirectMessage(relay.DirectMessageInput{
+		SenderMachineID: machineA, FromRole: fromRole, ToRole: toRole, Body: "same address after rebind", IdempotencyKey: namespace + "-rebound-send", Now: reboundAt,
+	})
+	if err != nil || duplicate || second.ConversationID != first.ConversationID {
+		t.Fatalf("rebound send=%#v first=%#v duplicate=%t err=%v", second, first, duplicate, err)
+	}
+	secondPage, err := backend.LeaseDeliveries(machineB, namespace+"-consumer-2", endpointB2, second.ConversationID, reboundAt, time.Minute, 10)
+	if err != nil || len(secondPage.Deliveries) != 1 || secondPage.Deliveries[0].Message.ID != second.ID || secondPage.Deliveries[0].RecipientRole != toRole {
+		t.Fatalf("rebound receive=%#v err=%v", secondPage, err)
+	}
+	secondDelivery := secondPage.Deliveries[0]
+	if err := backend.AckDelivery(machineB, endpointB2, secondDelivery.ID, secondDelivery.LeaseToken, secondDelivery.LeaseGeneration, reboundAt); err != nil {
+		t.Fatalf("ack rebound delivery: %v", err)
 	}
 }

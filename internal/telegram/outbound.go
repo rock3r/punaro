@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"html"
 	"strings"
+	"time"
 	"unicode/utf8"
 
 	"github.com/rock3r/punaro/internal/relay"
@@ -12,17 +13,28 @@ import (
 
 // RichSender posts one already-rendered, topic-bound rich Telegram message.
 type RichSender interface {
-	SendRichMessage(ctx context.Context, chatID, threadID int64, html string) error
+	SendRichMessage(ctx context.Context, chatID, threadID int64, html string) (int64, error)
 }
+
+type permanentTelegramDeliveryError struct {
+	reason string
+}
+
+func (e permanentTelegramDeliveryError) Error() string                { return e.reason }
+func (permanentTelegramDeliveryError) PermanentTelegramFailure() bool { return true }
 
 // SendDelivery renders an opaque agent reply as inert rich HTML and sends it
 // only to the exact topic bound to the delivery's conversation. Telegram has
 // no idempotency key for sendRichMessage, so callers must acknowledge the
 // relay delivery only after this function succeeds; a crash can result in an
 // explicit at-least-once duplicate rather than silent loss.
-func SendDelivery(ctx context.Context, state *State, sender RichSender, delivery relay.Delivery) error {
-	if state == nil || sender == nil || strings.TrimSpace(delivery.Message.ConversationID) == "" || strings.TrimSpace(delivery.Message.FromEndpoint) == "" || delivery.Message.Body == "" {
-		return fmt.Errorf("invalid Telegram delivery")
+func SendDelivery(ctx context.Context, state *State, sender RichSender, delivery relay.Delivery, allowedUserID int64) error {
+	from := delivery.Message.FromEndpoint
+	if from == "" {
+		from = delivery.Message.FromRole
+	}
+	if state == nil || sender == nil || strings.TrimSpace(delivery.Message.ConversationID) == "" || strings.TrimSpace(from) == "" || delivery.Message.Body == "" {
+		return permanentTelegramDeliveryError{reason: "invalid Telegram delivery"}
 	}
 	chatID, threadID, found, err := state.RouteForConversation(delivery.Message.ConversationID)
 	if err != nil {
@@ -31,9 +43,16 @@ func SendDelivery(ctx context.Context, state *State, sender RichSender, delivery
 	if !found {
 		return fmt.Errorf("telegram conversation route is missing")
 	}
-	for _, rendered := range renderDelivery(delivery.Message.FromEndpoint, delivery.Message.Body) {
-		if err := sender.SendRichMessage(ctx, chatID, threadID, rendered); err != nil {
+	if allowedUserID == 0 || chatID != allowedUserID {
+		return fmt.Errorf("telegram conversation route is not the configured chat")
+	}
+	for _, rendered := range renderDelivery(from, delivery.Message.Body) {
+		messageID, err := sender.SendRichMessage(ctx, chatID, threadID, rendered)
+		if err != nil {
 			return err
+		}
+		if err := state.RecordOutbound(chatID, messageID, delivery.Message.ConversationID, delivery.Message.ID, delivery.Message.FromEndpoint, time.Now().UTC()); err != nil {
+			return fmt.Errorf("record telegram outbound map: %w", err)
 		}
 	}
 	return nil

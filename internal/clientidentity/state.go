@@ -18,12 +18,12 @@ import (
 	"golang.org/x/net/idna"
 )
 
-// Version is the current compatible client identity state schema.
+// Version is the current HTTPS or literal-loopback client identity state schema.
 const Version = 1
 
 // LANVersion adds the explicit client-side plaintext acknowledgement and
 // pinned CIDR required for a trusted-LAN origin. Version one remains the
-// canonical HTTPS identity shape.
+// canonical zero-policy identity shape for HTTPS and literal loopback HTTP.
 const LANVersion = 2
 
 var (
@@ -44,7 +44,7 @@ type State struct {
 	TrustedLANCIDR  string
 }
 
-// Parse accepts only the defined HTTPS and trusted-LAN schema versions and
+// Parse accepts only the defined zero-policy and trusted-LAN schema versions and
 // rejects ambiguous JSON before any client uses its local routing or migration
 // relationship.
 func Parse(raw []byte) (State, error) {
@@ -127,7 +127,7 @@ func (s State) Encode() ([]byte, error) {
 // identity. It deliberately exposes no stored values in mismatch errors.
 func (s State) Match(origin, clientBinding, legacyMachineID string) error {
 	canonicalOrigin, ok := canonicalOriginForPolicy(origin, s.TransportPolicy())
-	if s.validate() != nil || !ok || !validBinding(clientBinding) || (legacyMachineID != "" && !validLegacyMachineID(legacyMachineID)) || s.Origin != canonicalOrigin || s.ClientBinding != clientBinding || (s.LegacyMachineID != "" && s.LegacyMachineID != legacyMachineID) {
+	if s.validate() != nil || !ok || !validBinding(clientBinding) || (legacyMachineID != "" && !validLegacyMachineID(legacyMachineID)) || s.Origin != canonicalOrigin || s.ClientBinding != clientBinding || s.LegacyMachineID != legacyMachineID {
 		return ErrStateMismatch
 	}
 	return nil
@@ -149,7 +149,8 @@ func (s State) validate() error {
 	}
 	switch s.Version {
 	case Version:
-		if s.AllowLANHTTP || s.TrustedLANCIDR != "" || !validOrigin(s.Origin) {
+		canonical, ok := canonicalOriginForPolicy(s.Origin, clienttransport.Policy{})
+		if s.AllowLANHTTP || s.TrustedLANCIDR != "" || !ok || canonical != s.Origin {
 			return ErrInvalidState
 		}
 	case LANVersion:
@@ -167,14 +168,10 @@ func (s State) validate() error {
 }
 
 // TransportPolicy returns the non-secret LAN transport boundary bound into
-// this identity. HTTPS version-one identities return the zero policy.
+// this identity. HTTPS and literal-loopback version-one identities return the
+// zero policy.
 func (s State) TransportPolicy() clienttransport.Policy {
 	return clienttransport.Policy{AllowLANHTTP: s.AllowLANHTTP, TrustedLANCIDR: s.TrustedLANCIDR}
-}
-
-func validOrigin(raw string) bool {
-	canonical, ok := canonicalOrigin(raw)
-	return ok && canonical == raw
 }
 
 func canonicalOrigin(raw string) (string, bool) {
@@ -212,15 +209,32 @@ func canonicalOrigin(raw string) (string, bool) {
 // before accepting credentials or network input.
 func CanonicalOrigin(raw string) (string, bool) { return canonicalOrigin(raw) }
 
-// CanonicalOriginWithPolicy validates the explicit trusted-LAN HTTP exception
-// used only by version-two identity records.
+// CanonicalOriginWithPolicy validates HTTPS and literal loopback HTTP under the
+// zero policy, or the explicit trusted-LAN HTTP exception used by version-two
+// identity records.
 func CanonicalOriginWithPolicy(raw string, policy clienttransport.Policy) (string, bool) {
 	return canonicalOriginForPolicy(raw, policy)
 }
 
 func canonicalOriginForPolicy(raw string, policy clienttransport.Policy) (string, bool) {
 	if !policy.AllowLANHTTP && policy.TrustedLANCIDR == "" {
-		return canonicalOrigin(raw)
+		if canonical, ok := canonicalOrigin(raw); ok {
+			return canonical, true
+		}
+		parsed, err := clienttransport.ValidateOrigin(raw, policy)
+		if err != nil || parsed.Scheme != "http" {
+			return "", false
+		}
+		hostname, ok := canonicalHostname(parsed.Hostname())
+		if !ok {
+			return "", false
+		}
+		if port := parsed.Port(); port != "" {
+			parsed.Host = net.JoinHostPort(hostname, port)
+		} else {
+			parsed.Host = canonicalHost(hostname)
+		}
+		return parsed.String(), true
 	}
 	parsed, err := clienttransport.ValidateOrigin(raw, policy)
 	if err != nil {

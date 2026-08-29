@@ -6,7 +6,7 @@ if "%LOCALAPPDATA%"=="" (
 )
 set "PUNARO_SKILL_ATTACHMENT=%LOCALAPPDATA%\Punaro\bin\punaro-trusted-attachment.exe"
 if not exist "%PUNARO_SKILL_ATTACHMENT%" (
-  echo punaro attachment skill: installed trusted-attachment client is unavailable at "%PUNARO_SKILL_ATTACHMENT%"; run the Punaro client installer first 1>&2
+  echo punaro attachment skill: selected trusted-attachment client is unavailable; run the Punaro client installer or bootstrap doctor 1>&2
   exit /b 1
 )
 "%PUNARO_SKILL_ATTACHMENT%" %*

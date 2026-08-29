@@ -1,11 +1,14 @@
 package postgres
 
 import (
+	"context"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/rock3r/punaro/internal/relay"
 )
@@ -13,6 +16,13 @@ import (
 type mailCutoverScannerFunc func(...any) error
 
 func (f mailCutoverScannerFunc) Scan(destinations ...any) error { return f(destinations...) }
+
+func TestMailCutoverEmptyTargetIgnoresDerivedQuotaTables(t *testing.T) {
+	t.Parallel()
+	if strings.Contains(mailCutoverEmptyTargetCountSQL, "mail_pending_recipients") || strings.Contains(mailCutoverEmptyTargetCountSQL, "mail_pending_install") || strings.Contains(mailCutoverEmptyTargetCountSQL, "mail_delivery_terminals") {
+		t.Fatal("pending quota and terminal tables are derived operational state and must not fence an empty cutover target")
+	}
+}
 
 func TestScanMailCutoverPreservesManifestText(t *testing.T) {
 	t.Parallel()
@@ -57,6 +67,55 @@ func TestMailCutoverRequestValidation(t *testing.T) {
 	valid.ManifestSHA256 = hex.EncodeToString(digest[:])
 	if err := valid.Validate(); err != nil {
 		t.Fatal(err)
+	}
+	current := valid
+	currentManifest := manifest
+	currentManifest.Version = 7
+	currentManifest.TableSHA256.RoleProfiles = strings.Repeat("c", 64)
+	currentManifest.TableSHA256.RoleProfileIdempotency = strings.Repeat("c", 64)
+	currentManifest.TableSHA256.RateBuckets = strings.Repeat("c", 64)
+	currentManifest.TableSHA256.DirectConversations = strings.Repeat("c", 64)
+	currentManifest.TableSHA256.MessageFromRoles = strings.Repeat("c", 64)
+	currentManifest.TableSHA256.DirectMessageIdempotency = strings.Repeat("c", 64)
+	currentManifest.TableSHA256.TelegramClaims = strings.Repeat("c", 64)
+	currentManifest.TableSHA256.TelegramParticipants = strings.Repeat("c", 64)
+	currentManifest.TableSHA256.TelegramClaimEvents = strings.Repeat("c", 64)
+	currentManifest.TableSHA256.DisplayNameIdempotency = strings.Repeat("c", 64)
+	current.Manifest, _ = json.Marshal(currentManifest)
+	currentDigest := sha256.Sum256(current.Manifest)
+	current.ManifestSHA256 = hex.EncodeToString(currentDigest[:])
+	if err := current.Validate(); err != nil {
+		t.Fatalf("current v7 request rejected: %v", err)
+	}
+	if len(current.Manifest) > 8192 {
+		t.Fatalf("current v7 manifest is %d bytes, want <= 8192", len(current.Manifest))
+	}
+	legacyTelegram := valid
+	legacyTelegramManifest := currentManifest
+	legacyTelegramManifest.TableSHA256.RoleProfiles = ""
+	legacyTelegramManifest.TableSHA256.RoleProfileIdempotency = ""
+	legacyTelegramManifest.TableSHA256.RateBuckets = ""
+	legacyTelegramManifest.TableSHA256.DirectConversations = ""
+	legacyTelegramManifest.TableSHA256.MessageFromRoles = ""
+	legacyTelegramManifest.TableSHA256.DirectMessageIdempotency = ""
+	legacyTelegramManifest.TableSHA256.DisplayNameIdempotency = ""
+	legacyTelegramManifest.Counts.TelegramClaimIdempotency = legacyTelegramManifest.Counts.TelegramClaims
+	emptyDigest := sha256.Sum256(nil)
+	legacyTelegramManifest.TableSHA256.TelegramClaimIdempotency = hex.EncodeToString(emptyDigest[:])
+	legacyTelegram.Manifest, _ = json.Marshal(legacyTelegramManifest)
+	legacyTelegramDigest := sha256.Sum256(legacyTelegram.Manifest)
+	legacyTelegram.ManifestSHA256 = hex.EncodeToString(legacyTelegramDigest[:])
+	if err := legacyTelegram.Validate(); err != nil {
+		t.Fatalf("legacy Telegram branch request rejected: %v", err)
+	}
+	legacyTelegramInvalid := legacyTelegram
+	legacyTelegramInvalidManifest := legacyTelegramManifest
+	legacyTelegramInvalidManifest.Counts.DirectConversations = 1
+	legacyTelegramInvalid.Manifest, _ = json.Marshal(legacyTelegramInvalidManifest)
+	legacyTelegramInvalidDigest := sha256.Sum256(legacyTelegramInvalid.Manifest)
+	legacyTelegramInvalid.ManifestSHA256 = hex.EncodeToString(legacyTelegramInvalidDigest[:])
+	if err := legacyTelegramInvalid.Validate(); err == nil {
+		t.Fatal("legacy Telegram branch accepted nonzero evidence for an absent table")
 	}
 	legacy := valid
 	legacyManifest := manifest
@@ -129,6 +188,49 @@ func TestMailCutoverRequestValidation(t *testing.T) {
 		if err := request.Validate(); err == nil {
 			t.Fatalf("invalid request %d accepted: %#v", index, request)
 		}
+	}
+}
+
+func TestMailCutoverRequestAcceptsPreparedCurrentSQLiteSource(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	path := filepath.Join(t.TempDir(), "relay.db")
+	store, err := relay.Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	now := time.Date(2026, time.August, 18, 19, 30, 0, 0, time.UTC)
+	if err := store.AdvertiseEndpoints("machine-a", []string{"agent/a"}, now, time.Hour); err != nil {
+		_ = store.Close()
+		t.Fatal(err)
+	}
+	if err := store.Close(); err != nil {
+		t.Fatal(err)
+	}
+	inspected, err := relay.InspectMigrationSource(ctx, path)
+	if err != nil || inspected.Version != 8 {
+		t.Fatalf("inspect=%#v err=%v", inspected, err)
+	}
+	epochID := "019f7f07-4b88-7c12-a394-b663274a6555"
+	target := strings.Repeat("a", 64)
+	prepared, err := relay.PrepareMigrationSource(ctx, path, epochID, target, inspected.Fingerprint, now.Add(time.Minute))
+	if err != nil {
+		t.Fatal(err)
+	}
+	request := MailCutoverRequest{
+		EpochID: epochID, SourceID: prepared.SourceID, TargetIdentity: target, SourceFingerprint: prepared.Fingerprint,
+	}
+	request.Manifest, err = json.Marshal(prepared)
+	if err != nil {
+		t.Fatal(err)
+	}
+	digest := sha256.Sum256(request.Manifest)
+	request.ManifestSHA256 = hex.EncodeToString(digest[:])
+	if len(request.Manifest) > 8192 {
+		t.Fatalf("prepared current manifest is %d bytes, want <= 8192", len(request.Manifest))
+	}
+	if err := request.Validate(); err != nil {
+		t.Fatalf("prepared current source rejected: %v", err)
 	}
 }
 

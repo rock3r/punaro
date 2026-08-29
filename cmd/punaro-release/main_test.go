@@ -5,8 +5,11 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"strings"
 	"testing"
+	"time"
 
+	"github.com/rock3r/punaro/internal/operator"
 	punarorelease "github.com/rock3r/punaro/internal/release"
 )
 
@@ -19,25 +22,32 @@ func TestReleaseToolAssemblesSignsAndVerifiesExactBytes(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(artifacts, "punaro-adapter-linux-amd64"), []byte("adapter"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	compose := filepath.Join(dir, "production.yaml")
-	if err := os.WriteFile(compose, []byte("services: {}\n"), 0o600); err != nil {
-		t.Fatal(err)
-	}
 	if err := run([]string{
 		"assemble",
 		"--dir", artifacts,
 		"--release", "v0.1.0",
-		"--sequence", "1",
-		"--catalog-sequence", "1",
+		"--sequence", "10",
+		"--catalog-sequence", "10",
+		"--minimum-safe-sequence", "1",
 		"--published-at", "2026-08-16T12:00:00Z",
 		"--expires-at", "2026-08-23T12:00:00Z",
-		"--compose-file", compose,
 		"--minimum-bootstrap-release", "v0.1.0",
+		"--supported-from", "v0.0.9",
+		"--critical-block", "9",
 	}); err != nil {
 		t.Fatal(err)
 	}
 	if err := run([]string{"validate", "--dir", artifacts}); err != nil {
 		t.Fatal(err)
+	}
+	originalNow := publicationNow
+	publicationNow = func() time.Time { return time.Date(2026, 8, 20, 0, 0, 0, 0, time.UTC) }
+	t.Cleanup(func() { publicationNow = originalNow })
+	if err := run([]string{"publication-check", "--catalog", filepath.Join(artifacts, punarorelease.CatalogFile)}); err != nil {
+		t.Fatalf("fresh assembled catalog failed publication check: %v", err)
+	}
+	if err := run([]string{"validate", "--dir", artifacts, "--release", "v9.9.9"}); err == nil {
+		t.Fatal("unexpected release identity was accepted")
 	}
 	manifestPath := filepath.Join(artifacts, punarorelease.ReleaseManifestFile)
 	privatePath := filepath.Join(dir, "release.key")
@@ -63,12 +73,19 @@ func TestReleaseToolAssemblesSignsAndVerifiesExactBytes(t *testing.T) {
 	if parsed.MinimumBootstrapRelease != "v0.1.0" {
 		t.Fatalf("minimum bootstrap=%q", parsed.MinimumBootstrapRelease)
 	}
+	if len(parsed.SupportedFrom) != 1 || parsed.SupportedFrom[0] != "v0.0.9" {
+		t.Fatalf("supported from=%v", parsed.SupportedFrom)
+	}
+	if parsed.ComposeSHA256 != operator.ComposeManifestSHA256() {
+		t.Fatalf("compose digest=%q want generated artifact %q", parsed.ComposeSHA256, operator.ComposeManifestSHA256())
+	}
 	catalog, err := os.ReadFile(filepath.Join(artifacts, punarorelease.CatalogFile)) // #nosec G304 -- assembled file in t.TempDir.
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := punarorelease.ParseCatalog(catalog); err != nil {
-		t.Fatal(err)
+	parsedCatalog, err := punarorelease.ParseCatalog(catalog)
+	if err != nil || len(parsedCatalog.CriticalBlocks) != 1 || parsedCatalog.CriticalBlocks[0] != 9 {
+		t.Fatalf("critical blocks=%v err=%v", parsedCatalog.CriticalBlocks, err)
 	}
 	info, err := os.Stat(privatePath)
 	if err != nil {
@@ -76,6 +93,152 @@ func TestReleaseToolAssemblesSignsAndVerifiesExactBytes(t *testing.T) {
 	}
 	if runtime.GOOS != "windows" && info.Mode().Perm()&0o077 != 0 {
 		t.Fatalf("private key permissions=%v", info.Mode())
+	}
+}
+
+func TestReleaseToolBoundsCriticalBlockInputs(t *testing.T) {
+	args := []string{"assemble"}
+	for sequence := 1; sequence <= maximumReleaseCriticalBlocks+1; sequence++ {
+		args = append(args, "--critical-block", "1")
+	}
+	if err := run(args); err == nil {
+		t.Fatal("release assembly accepted too many critical blocks")
+	}
+}
+
+func TestReleaseToolBoundsSupportedFromInputs(t *testing.T) {
+	args := []string{"assemble"}
+	for sequence := 1; sequence <= maximumReleaseSupportedFrom+1; sequence++ {
+		args = append(args, "--supported-from", "v0.1.0")
+	}
+	if err := run(args); err == nil {
+		t.Fatal("release assembly accepted too many supported upgrade sources")
+	}
+}
+
+func TestReleaseToolCanonicallyValidatesPolicyBeforePublication(t *testing.T) {
+	valid := []string{
+		"validate-request",
+		"--release", "v0.1.0-alpha.2",
+		"--sequence", "2",
+		"--catalog-sequence", "2",
+		"--minimum-bootstrap-release", "v0.1.0-alpha.1",
+		"--supported-from", "v0.1.0-alpha.1",
+	}
+	if err := run(valid); err != nil {
+		t.Fatalf("valid release policy rejected: %v", err)
+	}
+	for _, invalid := range [][]string{
+		{"validate-request", "--release", "v1..2.3", "--sequence", "2", "--catalog-sequence", "2", "--minimum-bootstrap-release", "v0.1.0"},
+		{"validate-request", "--release", "v0.1.0", "--sequence", "2", "--catalog-sequence", "2", "--minimum-bootstrap-release", "v1.2.3junk"},
+		{"validate-request", "--release", "v0.1.0", "--sequence", "2", "--catalog-sequence", "2", "--minimum-bootstrap-release", "v0.1.0", "--supported-from", "v0.0.9", "--supported-from", "v0.0.9"},
+	} {
+		if err := run(invalid); err == nil {
+			t.Fatalf("invalid release policy accepted: %v", invalid)
+		}
+	}
+}
+
+func TestReleaseToolValidatesLiveCatalogAdvancementBeforeBuild(t *testing.T) {
+	directory := t.TempDir()
+	if err := os.WriteFile(filepath.Join(directory, "punaro-adapter-linux-amd64"), []byte("adapter"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := run([]string{
+		"assemble", "--dir", directory, "--release", "v0.1.0-alpha.1",
+		"--sequence", "1", "--catalog-sequence", "1",
+		"--published-at", "2026-08-16T12:00:00Z", "--expires-at", "2026-08-23T12:00:00Z",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	previous := filepath.Join(directory, punarorelease.CatalogFile)
+	base := []string{"validate-advancement", "--previous-catalog", previous, "--release", "v0.1.0-alpha.2", "--sequence", "2", "--catalog-sequence", "2"}
+	if err := run(base); err != nil {
+		t.Fatalf("advancing release rejected: %v", err)
+	}
+	for _, stale := range [][]string{
+		{"validate-advancement", "--previous-catalog", previous, "--release", "v0.1.0-alpha.2", "--sequence", "1", "--catalog-sequence", "2"},
+		{"validate-advancement", "--previous-catalog", previous, "--release", "v0.1.0-alpha.2", "--sequence", "2", "--catalog-sequence", "1"},
+	} {
+		if err := run(stale); err == nil {
+			t.Fatalf("stale live-catalog request accepted: %v", stale)
+		}
+	}
+}
+
+func TestBuildFactsBindsPluginSkillsGeneratedComposeAndMigrations(t *testing.T) {
+	root, err := filepath.Abs(filepath.Join("..", ".."))
+	if err != nil {
+		t.Fatal(err)
+	}
+	facts, err := buildFacts([]string{"--release", "v0.1.0-alpha.11", "--plugin-root", root})
+	if err != nil || facts.Release != "v0.1.0-alpha.11" || facts.ComposeSHA256 != operator.ComposeManifestSHA256() || len(facts.MigrationManifestSHA256) != 64 || len(facts.SkillSetSHA256) != 64 || len(facts.PluginRuntimeSHA256) != 64 {
+		t.Fatalf("facts=%#v err=%v", facts, err)
+	}
+	if _, err := buildFacts([]string{"--release", "v0.1.0", "--plugin-root", root}); err == nil {
+		t.Fatal("release not matching all plugin manifests was accepted")
+	}
+}
+
+func TestPublicationCatalogMustBeFreshAndAdvance(t *testing.T) {
+	now := time.Date(2026, 8, 23, 16, 0, 0, 0, time.UTC)
+	candidate := punarorelease.Catalog{
+		Sequence:    5,
+		PublishedAt: now.Add(-time.Hour).Format(time.RFC3339),
+		ExpiresAt:   now.Add(time.Hour).Format(time.RFC3339),
+	}
+	previous := candidate
+	previous.Sequence = 4
+	if err := validatePublicationCatalog(candidate, &previous, now); err != nil {
+		t.Fatalf("fresh advancing catalog rejected: %v", err)
+	}
+	if err := validatePublicationCatalog(candidate, nil, now); err != nil {
+		t.Fatalf("fresh initial catalog rejected: %v", err)
+	}
+
+	expired := candidate
+	expired.ExpiresAt = now.Format(time.RFC3339)
+	if err := validatePublicationCatalog(expired, &previous, now); err == nil {
+		t.Fatal("expired catalog accepted for publication")
+	}
+	future := candidate
+	future.PublishedAt = now.Add(time.Minute).Format(time.RFC3339)
+	if err := validatePublicationCatalog(future, &previous, now); err == nil {
+		t.Fatal("not-yet-valid catalog accepted for publication")
+	}
+	for _, sequence := range []int64{4, 3} {
+		downgrade := candidate
+		downgrade.Sequence = sequence
+		if err := validatePublicationCatalog(downgrade, &previous, now); err == nil {
+			t.Fatalf("catalog sequence %d accepted after %d", sequence, previous.Sequence)
+		}
+	}
+}
+
+func TestPublicationCatalogMustRetainEligibleLiveReleases(t *testing.T) {
+	now := time.Date(2026, 8, 23, 16, 0, 0, 0, time.UTC)
+	priorEntry := punarorelease.CatalogRelease{Release: "v0.1.0-alpha.1", Sequence: 1, ManifestPath: "v0.1.0-alpha.1/punaro-release.json", ManifestLength: 100, ManifestSHA256: strings.Repeat("a", 64)}
+	currentEntry := punarorelease.CatalogRelease{Release: "v0.1.0-alpha.2", Sequence: 2, ManifestPath: "v0.1.0-alpha.2/punaro-release.json", ManifestLength: 100, ManifestSHA256: strings.Repeat("b", 64)}
+	previous := punarorelease.Catalog{Sequence: 1, MinimumSafeSequence: 1, Releases: []punarorelease.CatalogRelease{priorEntry}}
+	candidate := punarorelease.Catalog{Sequence: 2, PublishedAt: now.Add(-time.Hour).Format(time.RFC3339), ExpiresAt: now.Add(time.Hour).Format(time.RFC3339), MinimumSafeSequence: 1, Releases: []punarorelease.CatalogRelease{currentEntry}}
+	if err := validatePublicationCatalog(candidate, &previous, now); err == nil {
+		t.Fatal("replacement catalog dropped an eligible rollback release")
+	}
+	candidate.CriticalBlocks = []int64{1}
+	if err := validatePublicationCatalog(candidate, &previous, now); err != nil {
+		t.Fatalf("explicitly blocked prior release was required: %v", err)
+	}
+}
+
+func TestPublicationCatalogAllowsRetiredCriticalBlocks(t *testing.T) {
+	now := time.Date(2026, 8, 23, 16, 0, 0, 0, time.UTC)
+	first := punarorelease.CatalogRelease{Release: "v0.1.0-alpha.1", Sequence: 1, ManifestPath: "v0.1.0-alpha.1/punaro-release.json", ManifestLength: 100, ManifestSHA256: strings.Repeat("a", 64)}
+	second := punarorelease.CatalogRelease{Release: "v0.1.0-alpha.2", Sequence: 2, ManifestPath: "v0.1.0-alpha.2/punaro-release.json", ManifestLength: 100, ManifestSHA256: strings.Repeat("b", 64)}
+	third := punarorelease.CatalogRelease{Release: "v0.1.0-alpha.3", Sequence: 3, ManifestPath: "v0.1.0-alpha.3/punaro-release.json", ManifestLength: 100, ManifestSHA256: strings.Repeat("c", 64)}
+	previous := punarorelease.Catalog{Sequence: 2, MinimumSafeSequence: 1, Releases: []punarorelease.CatalogRelease{first, second}, CriticalBlocks: []int64{1}}
+	candidate := punarorelease.Catalog{Sequence: 3, PublishedAt: now.Add(-time.Hour).Format(time.RFC3339), ExpiresAt: now.Add(time.Hour).Format(time.RFC3339), MinimumSafeSequence: 2, Releases: []punarorelease.CatalogRelease{second, third}}
+	if err := validatePublicationCatalog(candidate, &previous, now); err != nil {
+		t.Fatalf("retired below-floor critical block was retained: %v", err)
 	}
 }
 

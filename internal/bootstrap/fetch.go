@@ -13,7 +13,7 @@ import (
 )
 
 type fetcher interface {
-	Get(relative string, limit int64) ([]byte, error)
+	Get(ctx context.Context, relative string, limit int64) ([]byte, error)
 }
 
 type httpFetcher struct {
@@ -47,7 +47,7 @@ func newFetcher(origin string) (*httpFetcher, error) {
 	}, nil
 }
 
-func (transport *httpFetcher) Get(relative string, limit int64) ([]byte, error) {
+func (transport *httpFetcher) Get(ctx context.Context, relative string, limit int64) ([]byte, error) {
 	if err := punarorelease.ValidateRelativePath(relative); err != nil {
 		return nil, err
 	}
@@ -55,7 +55,11 @@ func (transport *httpFetcher) Get(relative string, limit int64) ([]byte, error) 
 		return nil, errors.New("release download is invalid")
 	}
 	target := strings.TrimRight(transport.origin.String(), "/") + "/" + relative
-	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	parent := ctx
+	ctx, cancel := context.WithTimeout(parent, 60*time.Second)
 	defer cancel()
 	request, err := http.NewRequestWithContext(ctx, http.MethodGet, target, nil)
 	if err != nil {
@@ -63,6 +67,9 @@ func (transport *httpFetcher) Get(relative string, limit int64) ([]byte, error) 
 	}
 	response, err := transport.client.Do(request) // #nosec G107 -- target is origin plus a validated relative path.
 	if err != nil {
+		if parent.Err() != nil {
+			return nil, parent.Err()
+		}
 		return nil, errors.New("release download failed")
 	}
 	defer func() { _ = response.Body.Close() }()

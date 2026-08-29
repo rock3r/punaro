@@ -18,10 +18,12 @@ Options:
   --machine-id ID             Unique machine ID; becomes agent/ID/ (required)
   --allow-lan-http            Acknowledge plaintext credentials on a trusted LAN
   --trusted-lan-cidr CIDR     Private/link-local CIDR containing the literal HTTP origin
-  --agent-mailbox-bin PATH    agent-mailbox executable (default: agent-mailbox)
+  --waypost-bin PATH          Waypost executable (default: auto-detect waypost, then legacy agent-mailbox)
+  --agent-mailbox-bin PATH    Deprecated alias for --waypost-bin
   --mailbox-state-dir PATH    Local mailbox state directory
   --attached-group ADDRESS    Local group (default: group/punaro-attached)
   --agent-guidance-dir PATH   Add Punaro guidance and skills to this project
+  --keys-file PATH            Persist this release public key set into the bootstrap directory
   --enable                    Start the per-user service after installation
   --help                      Show this help
 
@@ -66,13 +68,16 @@ regular_private_file() {
 
 relay_url=
 machine_id=
-mailbox_bin=agent-mailbox
+mailbox_bin=
+mailbox_bin_explicit=0
+mailbox_is_waypost=
 mailbox_state_dir=
 attached_group=group/punaro-attached
 agent_guidance_dir=
 enable=0
 allow_lan_http=false
 trusted_lan_cidr=
+keys_file=
 
 while [ "$#" -gt 0 ]; do
 	case "$1" in
@@ -80,17 +85,33 @@ while [ "$#" -gt 0 ]; do
 		--machine-id) [ "$#" -ge 2 ] || fail '--machine-id requires a value'; machine_id=$2; shift 2 ;;
 		--allow-lan-http) allow_lan_http=true; shift ;;
 		--trusted-lan-cidr) [ "$#" -ge 2 ] || fail '--trusted-lan-cidr requires a value'; trusted_lan_cidr=$2; shift 2 ;;
-		--agent-mailbox-bin) [ "$#" -ge 2 ] || fail '--agent-mailbox-bin requires a value'; mailbox_bin=$2; shift 2 ;;
+		--waypost-bin)
+			[ "$#" -ge 2 ] || fail "$1 requires a value"
+			[ "$mailbox_bin_explicit" -eq 0 ] || fail 'specify only one Waypost executable option'
+			mailbox_bin=$2
+			mailbox_bin_explicit=1
+			mailbox_is_waypost=1
+			shift 2
+			;;
+		--agent-mailbox-bin)
+			[ "$#" -ge 2 ] || fail "$1 requires a value"
+			[ "$mailbox_bin_explicit" -eq 0 ] || fail 'specify only one Waypost executable option'
+			mailbox_bin=$2
+			mailbox_bin_explicit=1
+			mailbox_is_waypost=0
+			shift 2
+			;;
 		--mailbox-state-dir) [ "$#" -ge 2 ] || fail '--mailbox-state-dir requires a value'; mailbox_state_dir=$2; shift 2 ;;
 		--attached-group) [ "$#" -ge 2 ] || fail '--attached-group requires a value'; attached_group=$2; shift 2 ;;
 		--agent-guidance-dir) [ "$#" -ge 2 ] || fail '--agent-guidance-dir requires a value'; agent_guidance_dir=$2; shift 2 ;;
+		--keys-file) [ "$#" -ge 2 ] || fail '--keys-file requires a value'; keys_file=$2; shift 2 ;;
 		--enable) enable=1; shift ;;
 		--help) usage; exit 0 ;;
 		*) fail "unknown option: $1" ;;
 	esac
 done
 
-[ "$(id -u)" -ne 0 ] || fail 'run this installer as the unprivileged account that owns agent-mailbox'
+[ "$(id -u)" -ne 0 ] || fail 'run this installer as the unprivileged account that owns Waypost'
 [ -n "$HOME" ] && [ "${HOME#/}" != "$HOME" ] || fail 'HOME must be an absolute path'
 
 case "$machine_id" in
@@ -105,23 +126,34 @@ case "$relay_url" in
 	*) fail 'relay URL must use https:// or explicitly acknowledged trusted-LAN http://' ;;
 esac
 
-if [ -z "$mailbox_state_dir" ]; then
-	mailbox_state_dir="$HOME/.local/state/ai-agent/mailbox"
-fi
-mailbox_bin_input=$mailbox_bin
-mailbox_state_dir_input=$mailbox_state_dir
-
 require_safe_relay_url "$relay_url"
 require_safe_value "$HOME" 'HOME'
-require_safe_value "$mailbox_bin" 'agent-mailbox path'
-require_safe_value "$mailbox_state_dir" 'mailbox state directory'
+if [ -n "$mailbox_bin" ]; then require_safe_value "$mailbox_bin" 'Waypost path'; fi
+if [ -n "$mailbox_state_dir" ]; then require_safe_value "$mailbox_state_dir" 'mailbox state directory'; fi
 require_safe_value "$attached_group" 'attached group'
 if [ -n "$trusted_lan_cidr" ]; then require_safe_value "$trusted_lan_cidr" 'trusted LAN CIDR'; fi
+if [ -n "$keys_file" ]; then
+	require_safe_value "$keys_file" 'release keys file'
+	case "$keys_file" in /*) ;; *) fail 'keys file must be an absolute path' ;; esac
+	[ -f "$keys_file" ] && [ ! -L "$keys_file" ] || fail 'keys file must be a non-symlink regular file'
+fi
 case "$attached_group" in group/*) ;; *) fail 'attached group must be a group/ address' ;; esac
 script_dir=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
 repo_dir=$(CDPATH= cd -- "$script_dir/.." && pwd)
-[ -f "$repo_dir/go.mod" ] && [ -d "$repo_dir/cmd/punaro-adapter" ] && [ -d "$repo_dir/cmd/punaro-keygen" ] || fail 'run this installer from a complete Punaro source checkout'
+[ -f "$repo_dir/go.mod" ] && [ -d "$repo_dir/cmd/punaro-adapter" ] && [ -d "$repo_dir/cmd/punaro-bootstrap" ] && [ -d "$repo_dir/cmd/punaro-keygen" ] || fail 'run this installer from a complete Punaro source checkout'
 command -v go >/dev/null 2>&1 || fail 'Go is required to build the adapter from this checkout'
+plugin_version_count=$(grep -Ec '^[[:space:]]*"version"[[:space:]]*:[[:space:]]*"[^"]+",?[[:space:]]*$' "$repo_dir/plugin.json")
+[ "$plugin_version_count" -eq 1 ] || fail 'plugin release identity is invalid'
+plugin_version=$(sed -n 's/^[[:space:]]*"version"[[:space:]]*:[[:space:]]*"\([^"]*\)",*[[:space:]]*$/\1/p' "$repo_dir/plugin.json")
+source_release="v$plugin_version"
+case "$source_release" in v[0-9]*.[0-9]*.[0-9]*) ;; *) fail 'plugin release identity is invalid' ;; esac
+build_facts=$(
+	cd "$repo_dir"
+	env -u GOOS -u GOARCH -u CGO_ENABLED go run ./cmd/punaro-release build-facts --release "$source_release" --plugin-root "$repo_dir"
+) || fail 'source release build identity is invalid'
+skill_sha256=$(printf '%s\n' "$build_facts" | sed -n 's/.*"skill_set_sha256":"\([0-9a-f]*\)".*/\1/p')
+plugin_runtime_sha256=$(printf '%s\n' "$build_facts" | sed -n 's/.*"plugin_runtime_sha256":"\([0-9a-f]*\)".*/\1/p')
+[ "${#skill_sha256}" -eq 64 ] && [ "${#plugin_runtime_sha256}" -eq 64 ] || fail 'source plugin identity is invalid'
 if [ "$allow_lan_http" = true ]; then
 	(
 		cd "$repo_dir"
@@ -133,24 +165,42 @@ else
 		go run ./cmd/punaro-adapter validate-relay-transport --relay-url "$relay_url" >/dev/null 2>&1
 	) || fail 'relay transport policy is invalid'
 fi
-if [ "$mailbox_bin" = agent-mailbox ]; then
-	mailbox_bin=$(command -v agent-mailbox) || fail 'agent-mailbox is required; install it before onboarding this machine'
+mailbox_bin_input=$mailbox_bin
+if [ -z "$mailbox_bin" ]; then
+	if mailbox_bin=$(command -v waypost 2>/dev/null); then
+		mailbox_is_waypost=1
+	elif mailbox_bin=$(command -v agent-mailbox 2>/dev/null); then
+		mailbox_is_waypost=0
+	else
+		fail 'Waypost is required; install it before onboarding this machine'
+	fi
+elif [ "$mailbox_bin" = waypost ] || [ "$mailbox_bin" = agent-mailbox ]; then
+	mailbox_bin=$(command -v "$mailbox_bin") || fail 'the configured Waypost executable is unavailable'
 elif [ ! -x "$mailbox_bin" ]; then
-	fail 'agent-mailbox path is not executable'
+	fail 'Waypost path is not executable'
 fi
-mailbox_bin_dir=$(CDPATH= cd -- "$(dirname -- "$mailbox_bin")" && pwd -P) || fail 'agent-mailbox path is unavailable'
+mailbox_bin_dir=$(CDPATH= cd -- "$(dirname -- "$mailbox_bin")" && pwd -P) || fail 'Waypost path is unavailable'
 mailbox_bin="$mailbox_bin_dir/$(basename -- "$mailbox_bin")"
+if [ -z "$mailbox_state_dir" ]; then
+	if [ "$mailbox_is_waypost" -eq 1 ]; then
+		mailbox_state_dir="$HOME/.local/state/waypost"
+	else
+		mailbox_state_dir="$HOME/.local/state/ai-agent/mailbox"
+	fi
+fi
+mailbox_state_dir_input=$mailbox_state_dir
 
 config_dir="$HOME/.config/punaro"
 state_dir="$HOME/.local/state/punaro-adapter"
+bootstrap_dir="$HOME/.local/state/punaro-bootstrap"
 bin_dir="$HOME/.local/bin"
 key_file="$config_dir/machine.key"
 enrollment_file="$config_dir/enrollment.json"
 config_file="$config_dir/adapter.env"
 endpoint_prefix="agent/$machine_id/"
 
-mkdir -p "$config_dir" "$state_dir" "$bin_dir"
-chmod 700 "$config_dir" "$state_dir"
+mkdir -p "$config_dir" "$state_dir" "$bootstrap_dir" "$bin_dir"
+chmod 700 "$config_dir" "$state_dir" "$bootstrap_dir"
 
 for retired_path in \
 	"$bin_dir/punaro-attachment" \
@@ -228,16 +278,24 @@ fi
 
 (
 	cd "$repo_dir"
-	go build -trimpath -buildvcs=true -o "$build_dir/punaro-adapter" ./cmd/punaro-adapter
+	go build -trimpath -buildvcs=true -ldflags "-X main.adapterBuildRelease=$source_release -X main.adapterExpectedSkillSetDigest=$skill_sha256 -X main.adapterExpectedPluginRuntimeDigest=$plugin_runtime_sha256" -o "$build_dir/punaro-adapter" ./cmd/punaro-adapter
+	go build -trimpath -buildvcs=true -ldflags "-X main.bootstrapBuildRelease=$source_release" -o "$build_dir/punaro-bootstrap" ./cmd/punaro-bootstrap
 	go build -trimpath -buildvcs=true -o "$build_dir/punaro-trusted-attachment" ./cmd/punaro-trusted-attachment
 	go build -trimpath -buildvcs=true -o "$build_dir/punaro-memory" ./cmd/punaro-memory
 	go build -trimpath -buildvcs=true -o "$build_dir/punaro-enroll" ./cmd/punaro-enroll
 	go build -trimpath -buildvcs=true -o "$build_dir/punaro-keygen" ./cmd/punaro-keygen
+	go build -trimpath -buildvcs=true -o "$build_dir/punaro-launcher" ./cmd/punaro-launcher
 )
 install -m 700 "$build_dir/punaro-adapter" "$bin_dir/punaro-adapter"
-install -m 700 "$build_dir/punaro-trusted-attachment" "$bin_dir/punaro-trusted-attachment"
-install -m 700 "$build_dir/punaro-memory" "$bin_dir/punaro-memory"
-install -m 700 "$build_dir/punaro-enroll" "$bin_dir/punaro-enroll"
+install -m 700 "$build_dir/punaro-bootstrap" "$bin_dir/punaro-bootstrap"
+if [ -n "$keys_file" ]; then
+	"$bin_dir/punaro-bootstrap" seed-checkout --directory "$bootstrap_dir" --adapter "$bin_dir/punaro-adapter" --trusted-attachment "$build_dir/punaro-trusted-attachment" --memory "$build_dir/punaro-memory" --enroll "$build_dir/punaro-enroll" --keys-file "$keys_file"
+else
+	"$bin_dir/punaro-bootstrap" seed-checkout --directory "$bootstrap_dir" --adapter "$bin_dir/punaro-adapter" --trusted-attachment "$build_dir/punaro-trusted-attachment" --memory "$build_dir/punaro-memory" --enroll "$build_dir/punaro-enroll"
+fi
+for component in punaro-adapter punaro-trusted-attachment punaro-memory punaro-enroll; do
+	install -m 700 "$build_dir/punaro-launcher" "$bin_dir/$component"
+done
 
 if [ -e "$key_file" ] || [ -L "$key_file" ]; then
 	regular_private_file "$key_file" || fail 'existing machine key must be a non-symlink regular 0600 file'
@@ -295,7 +353,11 @@ case "$(uname -s)" in
 		mkdir -p "$service_dir"
 		install -m 600 "$repo_dir/deploy/launchd/punaro-adapter.plist" "$service_file"
 		plutil -lint "$service_file" >/dev/null
-if [ "$enable" -eq 1 ]; then
+		service_active=0
+		if launchctl print "gui/$(id -u)/org.punaro.adapter" >/dev/null 2>&1; then
+			service_active=1
+		fi
+		if [ "$enable" -eq 1 ] || [ "$service_active" -eq 1 ]; then
 			launchctl bootout "gui/$(id -u)" "$service_file" >/dev/null 2>&1 || true
 			launchctl bootstrap "gui/$(id -u)" "$service_file"
 		fi
@@ -305,17 +367,30 @@ if [ "$enable" -eq 1 ]; then
 		service_dir="$HOME/.config/systemd/user"
 		service_file="$service_dir/punaro-adapter.service"
 		mkdir -p "$service_dir"
-		if [ "$mailbox_state_dir" = "$HOME/.local/state/ai-agent/mailbox" ]; then
+		if [ "$mailbox_state_dir" = "$HOME/.local/state/waypost" ]; then
 			install -m 600 "$repo_dir/deploy/systemd/user/punaro-adapter.service" "$service_file"
 		else
-			sed "s|^ReadWritePaths=%h/.local/state/punaro-adapter %h/.local/state/ai-agent/mailbox$|ReadWritePaths=%h/.local/state/punaro-adapter $mailbox_state_dir|" \
+			sed "s|^ReadWritePaths=%h/.local/state/punaro-adapter %h/.local/state/punaro-bootstrap %h/.local/state/waypost$|ReadWritePaths=%h/.local/state/punaro-adapter %h/.local/state/punaro-bootstrap $mailbox_state_dir|" \
 				"$repo_dir/deploy/systemd/user/punaro-adapter.service" >"$service_file"
 			chmod 600 "$service_file"
-			grep -Fqx "ReadWritePaths=%h/.local/state/punaro-adapter $mailbox_state_dir" "$service_file" || fail 'could not render the Linux mailbox sandbox path'
+			grep -Fqx "ReadWritePaths=%h/.local/state/punaro-adapter %h/.local/state/punaro-bootstrap $mailbox_state_dir" "$service_file" || fail 'could not render the Linux mailbox sandbox path'
+		fi
+		service_active=0
+		if systemctl --user is-active --quiet punaro-adapter.service; then
+			service_active=1
+		fi
+		if command -v systemctl >/dev/null 2>&1; then
+			if ! systemctl --user daemon-reload; then
+				if [ "$enable" -eq 1 ] || [ "$service_active" -eq 1 ]; then
+					fail 'could not reload the Linux user manager'
+				fi
+			fi
 		fi
 		if [ "$enable" -eq 1 ]; then
-			systemctl --user daemon-reload
-			systemctl --user enable --now punaro-adapter.service
+			systemctl --user enable punaro-adapter.service
+			systemctl --user restart punaro-adapter.service
+		elif [ "$service_active" -eq 1 ]; then
+			systemctl --user restart punaro-adapter.service
 		fi
 		service_hint='systemctl --user status punaro-adapter.service'
 		;;

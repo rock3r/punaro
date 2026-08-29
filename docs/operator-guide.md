@@ -14,7 +14,20 @@ explicit operator actions. Published native artifacts and the unsigned
 catalog/manifest pair live on GitHub Releases; see
 [github-releases.md](github-releases.md). `punaro-bootstrap` installs only
 signed catalog/manifest pairs; unsigned draft assets are not an automatic
-update source.
+update source. Platform services launch `punaro-bootstrap run` against the
+current slot. An unhealthy candidate rolls back once when the fresh catalog
+still lists the previous release; that decision is durable across restarts
+so a later failure cannot swap back to the known-unhealthy slot. An
+unreadable update journal also stays recovery-only. `run` holds a separate
+run lease so two supervisors cannot share the same mailbox; `update` still
+uses the transaction lock. A crash-safe `run.pid` is killed only when the
+live process image still matches the recorded adapter path; an unverifiable
+live pid refuses the run lease instead of launching a second adapter. A later publish stops the old adapter with
+SIGTERM and a bounded wait before SIGKILL. A healthy adapter that exits
+while the supervisor is still running is a supervisor failure so the
+platform service restarts it. Recovery-only keeps the supervisor parked
+until a later signed update or seed clears that marker, then the platform
+service restarts onto the repaired slot.
 
 ## Run locally
 
@@ -157,15 +170,32 @@ database and investigate. The digest-pinned `make test-postgres` stack is epheme
 test infrastructure, publishes no database port, and deletes its volume on
 exit.
 
-The current binary requires schema version 44 and supports an intact schema
-from version 10 through 44 as an update boundary. Versions 10 through 43 are
+The current binary requires schema version 57 and supports an intact schema
+from version 10 through 57 as an update boundary. Versions 10 through 56 are
 reported as `upgrade_required`; versions below the compatibility floor, newer
 versions, and damaged objects are `incompatible`. The embedded manifest and
 target release metadata are authoritative; check them instead of assuming a
 version from this guide when preparing a future release. Migration 40 adds
 durable conversation roles, migration 41 adds relay membership controls,
 migration 42 applies those controls to mail cutover, migration 43 adds the
-relay invocation capability, and migration 44 adds client lifecycle authority.
+relay invocation capability, migration 44 adds client lifecycle authority,
+migration 45 adds opt-in canonical role profiles, migration 46 adds durable
+mail rate-limit buckets, migration 47 adds idempotent direct-role
+conversations, migration 48 adds explicit pending-delivery capacity
+counters, migration 49 adds content-free terminal delivery metadata, and
+migrations 50 through 57 add conversation display names, Telegram topic-claim
+cutover tables, and their idempotency and machine-key fences.
+After migration 48, `punaro relay reconcile-capacity
+--directory DIR --yes` rebuilds those counters from pending deliveries if
+startup readiness reports inconsistency. Ordinary SQLite `Open` and PostgreSQL
+`Ready` still fail closed on drift; the reconcile command is the only supported
+repair path.
+After migration 49, pending deliveries older than the configured maximum age
+expire in bounded pages, release capacity once, and retain inspectable
+terminal metadata until the separate retention window elapses.
+`punaro relay list-terminals --directory DIR` prints one content-free page.
+`punaro relay maintain-deliveries --directory DIR --yes` runs one expire-and-prune
+page. Neither command is an agent API; they stay host-local.
 Migration 44 invalidates unredeemed legacy enrollment invitations while
 converting existing device credentials into lifecycle-managed client records,
 so it must not be applied as an ad hoc repair. The host wrapper's one-shot
@@ -178,7 +208,7 @@ consume the mail budget indefinitely.
 
 SQLite remains the default active relay. Maintainers may explicitly select an
 empty PostgreSQL relay with `PUNARO_RELAY_STORE=postgres` only after completing
-the supported update through schema v9. This selector does not import the SQLite file,
+the supported update through the exact current schema (currently v57). This selector does not import the SQLite file,
 does not dual-write, and is incompatible with the superseded directory and
 attachment routes. Do not point an established installation at an empty
 PostgreSQL relay as a migration shortcut; the verified one-shot mail cutover is
@@ -187,14 +217,21 @@ again while retaining both stores unchanged.
 
 ### One-shot mail cutover
 
-First complete the supported update through the exact current schema v9; the
-preview and execution both fail closed on runtime-compatible schema v8 before
+First complete the supported update through the exact current schema (currently
+v57); the preview and execution both fail closed on any runtime-compatible older schema before
 inspecting or preparing SQLite. Then stop ordinary operator changes, confirm every intended legacy machine is
 `migrated` or explicitly `retired`, and run the read-only preview:
 
 ```sh
 punaro mail cutover --directory /absolute/private/punaro --dry-run
 ```
+
+The preview includes a content-free `preflight` object and `ready` boolean.
+`ready` is false when the PostgreSQL mail target contains unintended rows, any
+legacy machine remains pending, or an incomplete epoch requires recovery. Do
+not execute until `ready` is true and server doctor passes
+`mail_cutover_target`, `mail_cutover_legacy_inventory`, and
+`mail_cutover_recovery`. The preview never changes either authority.
 
 Record the printed `source_fingerprint` and `target_identity`. Prepare one
 protected JSON file containing the complete public static relay enrollment;
@@ -226,6 +263,10 @@ begin can then only observe that tombstone and cannot recreate an import fence.
 
 After success, run `punaro up --directory /absolute/private/punaro` to recreate
 the daemon from the published PostgreSQL and credential-transition settings.
+Only after that server activation succeeds may migrated adapters and the
+Telegram gateway replace their legacy private-key profile entry with the staged
+device-credential-file entry and restart. Switch and doctor one client at a
+time; redemption alone does not make bearer relay authentication available.
 Never reopen or replace the retired SQLite file. Once PostgreSQL accepts new
 mail, recovery uses a PostgreSQL backup or forward repair.
 
@@ -275,6 +316,23 @@ punaro-admin client invite -owner-dsn-file /absolute/private/owner.dsn \
   -client-binding CLIENT_UUID \
   -project PROJECT_UUID
 ```
+
+For a registered server doctor, preserve zero authority while replacing the
+legacy key by confirming the empty service preview and binding the exact
+pending legacy principal:
+
+```sh
+punaro-admin client invite -owner-dsn-file /absolute/private/owner.dsn \
+  -actor-principal-id OWNER_UUID -name "server doctor" \
+  -machine-id server-doctor -client-binding CLIENT_UUID \
+  -service -legacy-principal-id LEGACY_UUID
+```
+
+Do not combine `-service` with project scope. The printed preview includes the
+exact `legacy_principal_id` and binds it into `preview_hash`; the confirmed run
+still requires `-yes`, and the client redeems through the legacy exchange with
+the existing doctor private key. Only one live pending enrollment may bind that
+legacy identity.
 
 The confirmed run returns one enrollment ID and code. M-5 mounts bounded
 redemption and device-session authentication under the transport policy below;
@@ -500,8 +558,29 @@ requires recovery. It waits up to 30 seconds for readiness and then runs the
 same checks as doctor. Raw `docker compose up` and `punarod` never migrate.
 
 Use `punaro status --directory ...` for a non-mutating report and `punaro doctor
---directory ...` for a failing health gate. Reports contain only capability and
-content-free path/schema/health states. The generated M-5 server Compose file
+--directory ... --machine-id punaro-lxc --relay-profile
+/absolute/private/server-doctor.env` for an Internet/proxy failing health gate.
+Provision that owner-only profile with `punaro doctor-profile write`; it stores
+only the fixed origin, diagnostic machine ID, and absolute references to
+exactly one separately protected relay credential (Ed25519 key before mail
+cutover or its migrated device credential after activation) and the Cloudflare
+Access credential file. Migrate the diagnostic identity before cutover but keep
+using its key-backed profile until the server restarts with PostgreSQL
+credential transition; then create a new device-credential-backed profile and
+use it for the post-cutover doctor. The diagnostic machine must be enrolled
+when relay is enabled; relay-only checks
+are optional when relay is intentionally disabled. Access health requires both
+a successful credentialed probe and rejection of a fresh credentialless probe
+before it reaches Punaro. A trusted-LAN installation may derive only its edge
+topology checks locally; enabled relay enrollment and protocol are reported
+unavailable rather than inferred. The
+exact formats and trusted-LAN omission are in [doctor.md](doctor.md). Add
+`--gateway-co-located` only when this host is explicitly responsible for the
+local `punaro-telegram` system service; otherwise collect its separate doctor
+report. Reports contain only capability and
+content-free path/schema/health states. The report contract, exact exit codes,
+fleet aggregation, and complete stable check registry are documented in
+[doctor.md](doctor.md). The generated M-5 server Compose file
 still uses an externally provisioned PostgreSQL service; the bundled production
 PostgreSQL/profile shape arrives in M-23.
 
@@ -535,6 +614,12 @@ bounded authentication check. `POST /v1/device/session/revoke` permanently
 revokes only its authenticating client and accepts no target. Forwarded headers
 never qualify a direct request for TLS or trusted-LAN admission. The older
 `client add` spelling remains an alias during the transition.
+
+For a pending registered legacy principal, create the invitation with the exact
+`--legacy-principal-id` and use `punaro-enroll`'s legacy preparation and
+redemption options. The client sends the six-field proof object only to
+`POST /v1/legacy-enrollments/redeem`; the server verifies possession of the
+registered Ed25519 key before atomically marking that inventory row migrated.
 
 ### Consistent backup and clean-stack restore
 
@@ -635,6 +720,22 @@ target release's published, protected metadata whose `image` is digest-pinned,
 schema-range, rollback-floor, and PostgreSQL-major values match the target
 release. The file must be an absolute private regular file. On the first update
 from an installation without a release-name lock, supply the current release:
+
+The supported host-binary handoff starts from one downloaded target-release
+directory containing `punaro-release.json`, `punaro-release.sig`, and every
+native artifact named by that manifest, plus the independently configured
+public release key. First verify the detached manifest signature with the
+trusted `punaro-release verify` tool, then verify the complete artifact
+directory against that verified manifest with `punaro-release
+verify-artifacts`. Select the matching verified `punaro-linux-ARCH` artifact
+and install it through a
+root-owned `0755` temporary file in `/usr/local/bin` and an atomic same-directory
+rename to `/usr/local/bin/punaro`; do not overwrite it from an unverified
+download stream. Confirm `punaro version` names the target before starting the
+update. After the durable transaction reaches its terminal outcome, server
+doctor must report `operator_binary_release` passing for that outcome. A
+failure uses remediation `install_release_operator_binary`; it never authorizes
+doctor to replace the executable itself.
 
 ```sh
 punaro update \

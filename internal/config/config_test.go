@@ -5,6 +5,8 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/rock3r/punaro/internal/relay"
 )
 
 func TestLoadUsesExplicitDotEnvWithoutOverridingProcess(t *testing.T) {
@@ -35,6 +37,15 @@ func TestLoadPostgresDefaultsDisabled(t *testing.T) {
 	}
 	if cfg.PostgresEnabled || cfg.PostgresDSNFile != "" {
 		t.Fatalf("PostgreSQL unexpectedly enabled: %#v", cfg)
+	}
+	if got, want := cfg.RelayRateLimits(), relay.DefaultRateLimitConfig(); got != want {
+		t.Fatalf("unexpected default rate limits: %#v", got)
+	}
+	if got, want := cfg.RelayQuotaLimits(), relay.DefaultQuotaConfig(); got != want {
+		t.Fatalf("unexpected default pending quota: %#v", got)
+	}
+	if got, want := cfg.RelayRetentionPolicy(), relay.DefaultRetentionConfig(); got != want {
+		t.Fatalf("unexpected default retention: %#v", got)
 	}
 }
 
@@ -474,12 +485,15 @@ func TestLoadCredentialTransitionIsOffByDefaultAndRequiresCompletePostgresRuntim
 	}
 	t.Setenv("PUNARO_RELAY_ENABLED", "true")
 	t.Setenv("PUNARO_RELAY_MACHINES_JSON", `[{"id":"machine-a","public_key":"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA","endpoint_prefixes":["agent/a/"]}]`)
-	t.Setenv("PUNARO_RELAY_STORE", "postgres")
 	t.Setenv("PUNARO_POSTGRES_ENABLED", "true")
 	t.Setenv("PUNARO_POSTGRES_DSN_FILE", "/run/secrets/punaro-app-dsn")
 	t.Setenv("PUNARO_DEVICE_AUTH_ENABLED", "true")
 	t.Setenv("PUNARO_INGRESS_MODE", "proxy")
 	t.Setenv("PUNARO_PUBLIC_URL", "https://punaro.example.test")
+	if _, err := Load(""); err == nil || !strings.Contains(err.Error(), "credential transition requires enabled PostgreSQL relay") {
+		t.Fatalf("credential transition with SQLite relay error=%v", err)
+	}
+	t.Setenv("PUNARO_RELAY_STORE", "postgres")
 	config, err = Load("")
 	if err != nil || !config.CredentialTransitionEnabled {
 		t.Fatalf("complete transition config=%#v err=%v", config, err)
@@ -511,5 +525,136 @@ func TestLoadAcceptsExactlyOneCloudflareAccessJWKSSource(t *testing.T) {
 	t.Setenv("PUNARO_ACCESS_JWKS_FILE", "relative/current.json")
 	if _, err := Load(""); err == nil {
 		t.Fatal("relative Access JWKS snapshot was accepted")
+	}
+}
+
+func TestLoadRejectsInvalidRelayRateLimits(t *testing.T) {
+	t.Setenv("PUNARO_RELAY_SENDER_RATE_BURST", "0")
+	if _, err := Load(""); err == nil {
+		t.Fatal("zero sender burst was accepted")
+	}
+	t.Setenv("PUNARO_RELAY_SENDER_RATE_BURST", "60")
+	t.Setenv("PUNARO_RELAY_CONVERSATION_RATE_REFILL_PER_MINUTE", "10001")
+	if _, err := Load(""); err == nil {
+		t.Fatal("oversized conversation refill was accepted")
+	}
+	t.Setenv("PUNARO_RELAY_CONVERSATION_RATE_REFILL_PER_MINUTE", "120")
+	t.Setenv("PUNARO_RELAY_RATE_RETRY_AFTER_MAX_SECONDS", "nope")
+	if _, err := Load(""); err == nil {
+		t.Fatal("non-integer retry-after cap was accepted")
+	}
+}
+
+func TestLoadAcceptsExplicitRelayRateLimits(t *testing.T) {
+	t.Setenv("PUNARO_RELAY_SENDER_RATE_BURST", "4")
+	t.Setenv("PUNARO_RELAY_SENDER_RATE_REFILL_PER_MINUTE", "12")
+	t.Setenv("PUNARO_RELAY_CONVERSATION_RATE_BURST", "8")
+	t.Setenv("PUNARO_RELAY_CONVERSATION_RATE_REFILL_PER_MINUTE", "24")
+	t.Setenv("PUNARO_RELAY_RATE_RETRY_AFTER_MAX_SECONDS", "9")
+	cfg, err := Load("")
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := cfg.RelayRateLimits()
+	want := relay.RateLimitConfig{SenderBurst: 4, SenderRefillPerMinute: 12, ConversationBurst: 8, ConversationRefillPerMinute: 24, RetryAfterMaxSeconds: 9}
+	if got != want {
+		t.Fatalf("rate limits=%#v want %#v", got, want)
+	}
+}
+
+func TestLoadRejectsInvalidRelayQuotaLimits(t *testing.T) {
+	t.Setenv("PUNARO_RELAY_PENDING_RECIPIENT_COUNT", "0")
+	if _, err := Load(""); err == nil {
+		t.Fatal("zero pending recipient count was accepted")
+	}
+	t.Setenv("PUNARO_RELAY_PENDING_RECIPIENT_COUNT", "10000")
+	t.Setenv("PUNARO_RELAY_PENDING_INSTALLATION_BYTES", "0")
+	if _, err := Load(""); err == nil {
+		t.Fatal("zero pending installation bytes were accepted")
+	}
+	t.Setenv("PUNARO_RELAY_PENDING_INSTALLATION_BYTES", "268435456")
+	t.Setenv("PUNARO_RELAY_PENDING_RETRY_AFTER_SECONDS", "nope")
+	if _, err := Load(""); err == nil {
+		t.Fatal("non-integer pending retry-after was accepted")
+	}
+}
+
+func TestLoadRejectsInvalidRelayRetention(t *testing.T) {
+	t.Setenv("PUNARO_RELAY_PENDING_MAX_AGE_SECONDS", "0")
+	if _, err := Load(""); err == nil {
+		t.Fatal("zero pending max age was accepted")
+	}
+	t.Setenv("PUNARO_RELAY_PENDING_MAX_AGE_SECONDS", "604800")
+	t.Setenv("PUNARO_RELAY_TERMINAL_RETENTION_SECONDS", "nope")
+	if _, err := Load(""); err == nil {
+		t.Fatal("non-integer terminal retention was accepted")
+	}
+}
+
+func TestLoadAcceptsExplicitRelayRetention(t *testing.T) {
+	t.Setenv("PUNARO_RELAY_PENDING_MAX_AGE_SECONDS", "90")
+	t.Setenv("PUNARO_RELAY_TERMINAL_RETENTION_SECONDS", "180")
+	t.Setenv("PUNARO_RELAY_DELIVERY_MAINTENANCE_BATCH", "7")
+	cfg, err := Load("")
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := cfg.RelayRetentionPolicy()
+	want := relay.RetentionConfig{PendingMaxAgeSeconds: 90, TerminalRetentionSeconds: 180, MaintenanceBatch: 7}
+	if got != want {
+		t.Fatalf("retention=%#v want %#v", got, want)
+	}
+}
+
+func TestRetentionPolicyFromFileIgnoresProcessEnv(t *testing.T) {
+	t.Setenv("PUNARO_RELAY_PENDING_MAX_AGE_SECONDS", "1")
+	t.Setenv("PUNARO_RELAY_TERMINAL_RETENTION_SECONDS", "2")
+	t.Setenv("PUNARO_RELAY_DELIVERY_MAINTENANCE_BATCH", "3")
+	path := filepath.Join(t.TempDir(), ".env")
+	body := "PUNARO_RELAY_PENDING_MAX_AGE_SECONDS=90\nPUNARO_RELAY_TERMINAL_RETENTION_SECONDS=180\nPUNARO_RELAY_DELIVERY_MAINTENANCE_BATCH=7\n"
+	if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	got, err := RetentionPolicyFromFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := relay.RetentionConfig{PendingMaxAgeSeconds: 90, TerminalRetentionSeconds: 180, MaintenanceBatch: 7}
+	if got != want {
+		t.Fatalf("retention=%#v want %#v", got, want)
+	}
+}
+
+func TestRetentionPolicyFromFileUsesDefaultsWhenKeysAbsent(t *testing.T) {
+	t.Setenv("PUNARO_RELAY_PENDING_MAX_AGE_SECONDS", "1")
+	t.Setenv("PUNARO_RELAY_TERMINAL_RETENTION_SECONDS", "2")
+	t.Setenv("PUNARO_RELAY_DELIVERY_MAINTENANCE_BATCH", "3")
+	path := filepath.Join(t.TempDir(), ".env")
+	if err := os.WriteFile(path, []byte("PUNARO_LOG_LEVEL=info\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	got, err := RetentionPolicyFromFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got != relay.DefaultRetentionConfig() {
+		t.Fatalf("retention=%#v want defaults", got)
+	}
+}
+
+func TestLoadAcceptsExplicitRelayQuotaLimits(t *testing.T) {
+	t.Setenv("PUNARO_RELAY_PENDING_RECIPIENT_COUNT", "2")
+	t.Setenv("PUNARO_RELAY_PENDING_RECIPIENT_BYTES", "64")
+	t.Setenv("PUNARO_RELAY_PENDING_INSTALLATION_COUNT", "8")
+	t.Setenv("PUNARO_RELAY_PENDING_INSTALLATION_BYTES", "256")
+	t.Setenv("PUNARO_RELAY_PENDING_RETRY_AFTER_SECONDS", "9")
+	cfg, err := Load("")
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := cfg.RelayQuotaLimits()
+	want := relay.QuotaConfig{RecipientCount: 2, RecipientBytes: 64, InstallationCount: 8, InstallationBytes: 256, RetryAfterSeconds: 9}
+	if got != want {
+		t.Fatalf("quota limits=%#v want %#v", got, want)
 	}
 }

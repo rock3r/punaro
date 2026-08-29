@@ -12,6 +12,7 @@ import (
 	"net/http/cookiejar"
 	"net/http/httptest"
 	"net/url"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -106,6 +107,289 @@ func TestHTTPRelayClientValidatesSenderWithoutMessageMutation(t *testing.T) {
 	}
 	if err := client.ValidateSender(context.Background(), "conversation-1", "agent/a"); err != nil {
 		t.Fatal(err)
+	}
+}
+
+func TestHTTPRelayClientDoctorProbeRequiresConfirmedOriginProtocol(t *testing.T) {
+	public, private, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	tests := []struct {
+		name       string
+		status     int
+		confirm    bool
+		protocol   string
+		wantResult DoctorProbeResult
+		wantErr    bool
+	}{
+		{name: "healthy", status: http.StatusNoContent, confirm: true, protocol: "1", wantResult: DoctorProbeResult{Transport: true, Origin: true, Access: true, Enrolled: true, Protocol: true}},
+		{name: "intermediary access rejection", status: http.StatusForbidden, wantResult: DoctorProbeResult{Transport: true}, wantErr: true},
+		{name: "origin enrollment rejection", status: http.StatusUnauthorized, confirm: true, wantResult: DoctorProbeResult{Transport: true, Origin: true, Access: true}, wantErr: true},
+		{name: "protocol mismatch", status: http.StatusNoContent, confirm: true, protocol: "2", wantResult: DoctorProbeResult{Transport: true, Origin: true, Access: true, Enrolled: true}, wantErr: true},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if r.Method != http.MethodHead || r.URL.Path != relay.DoctorPath || r.ContentLength > 0 {
+					t.Fatalf("request=%s %s length=%d", r.Method, r.URL.Path, r.ContentLength)
+				}
+				timestamp, parseErr := time.Parse(time.RFC3339Nano, r.Header.Get("X-Punaro-Timestamp"))
+				signature, signatureErr := base64.RawURLEncoding.DecodeString(r.Header.Get("X-Punaro-Signature"))
+				signed := relay.SignedRequest{MachineID: r.Header.Get("X-Punaro-Machine"), Method: r.Method, Path: r.URL.Path, Timestamp: timestamp, Nonce: r.Header.Get("X-Punaro-Nonce")}
+				if parseErr != nil || signatureErr != nil || signed.MachineID != "machine-a" || !ed25519.Verify(public, relay.CanonicalRequest(signed), signature) {
+					t.Fatal("doctor request was not signed")
+				}
+				if test.confirm {
+					w.Header().Set(relay.ResponseNonceHeader, signed.Nonce)
+				}
+				if test.protocol != "" {
+					w.Header().Set(relay.ProtocolHeader, test.protocol)
+				}
+				w.WriteHeader(test.status)
+			}))
+			defer server.Close()
+			client, err := NewHTTPRelayClient(server.URL, "machine-a", private, server.Client(), AccessServiceToken{})
+			if err != nil {
+				t.Fatal(err)
+			}
+			result, probeErr := client.Doctor(t.Context())
+			if result != test.wantResult || (probeErr != nil) != test.wantErr {
+				t.Fatalf("result=%#v err=%v", result, probeErr)
+			}
+		})
+	}
+}
+
+func TestDeviceHTTPRelayClientUsesBearerCredentialAndCorrelation(t *testing.T) {
+	credential := "11111111-1111-4111-8111-111111111111.AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
+	requests := 0
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requests++
+		correlation := r.Header.Get(relay.RequestCorrelationHeader)
+		if r.Header.Get("Authorization") != "Bearer "+credential || correlation == "" {
+			t.Fatal("device credential or correlation is missing")
+		}
+		for _, name := range []string{"X-Punaro-Machine", "X-Punaro-Timestamp", "X-Punaro-Nonce", "X-Punaro-Signature"} {
+			if r.Header.Get(name) != "" {
+				t.Fatalf("bearer request included signed header %s", name)
+			}
+		}
+		w.Header().Set(relay.ResponseNonceHeader, correlation)
+		w.Header().Set(relay.ProtocolHeader, strconv.Itoa(relay.ProtocolVersion))
+		if r.Method == http.MethodHead {
+			w.WriteHeader(http.StatusNoContent)
+			return
+		}
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	defer server.Close()
+	client, err := NewDeviceHTTPRelayClientWithPolicy(server.URL, "machine-a", credential, server.Client(), AccessServiceToken{}, clienttransport.Policy{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result, err := client.Doctor(t.Context()); err != nil || !result.Protocol || !result.Enrolled || !result.Origin {
+		t.Fatalf("doctor result=%#v err=%v", result, err)
+	}
+	if err := client.Advertise(t.Context(), []string{"agent/a/session"}); err != nil {
+		t.Fatal(err)
+	}
+	if requests != 2 {
+		t.Fatalf("requests=%d", requests)
+	}
+}
+
+func TestDeviceHTTPRelayClientRejectsAllowedSuccessWithoutExactCorrelationEcho(t *testing.T) {
+	credential := "11111111-1111-4111-8111-111111111111.AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
+	for _, test := range []struct {
+		name string
+		echo func(http.Header, string)
+	}{
+		{name: "missing", echo: func(http.Header, string) {}},
+		{name: "wrong", echo: func(header http.Header, _ string) { header.Set(relay.ResponseNonceHeader, "wrong-origin-token") }},
+		{name: "duplicate", echo: func(header http.Header, correlation string) {
+			header.Add(relay.ResponseNonceHeader, correlation)
+			header.Add(relay.ResponseNonceHeader, correlation)
+		}},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if r.Header.Get("Authorization") != "Bearer "+credential {
+					t.Fatal("device credential is missing")
+				}
+				test.echo(w.Header(), r.Header.Get(relay.RequestCorrelationHeader))
+				w.WriteHeader(http.StatusNoContent)
+			}))
+			defer server.Close()
+			client, err := NewDeviceHTTPRelayClientWithPolicy(server.URL, "machine-a", credential, server.Client(), AccessServiceToken{}, clienttransport.Policy{})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := client.Advertise(t.Context(), []string{"agent/a/session"}); err == nil || strings.Contains(err.Error(), credential) {
+				t.Fatalf("advertise error=%v", err)
+			}
+		})
+	}
+}
+
+func TestHTTPRelayClientDoctorEndpointBindsAssertionToSignature(t *testing.T) {
+	public, private, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	endpoint := "agent/a/session"
+	client, err := NewHTTPRelayClient("http://127.0.0.1:54321", "machine-a", private, &http.Client{Transport: roundTripperFunc(func(request *http.Request) (*http.Response, error) {
+		timestamp, parseErr := time.Parse(time.RFC3339Nano, request.Header.Get("X-Punaro-Timestamp"))
+		signature, signatureErr := base64.RawURLEncoding.DecodeString(request.Header.Get("X-Punaro-Signature"))
+		signed := relay.SignedRequest{MachineID: request.Header.Get("X-Punaro-Machine"), Method: request.Method, Path: request.URL.Path, Body: []byte(request.Header.Get(relay.DoctorEndpointHeader)), Timestamp: timestamp, Nonce: request.Header.Get("X-Punaro-Nonce")}
+		if parseErr != nil || signatureErr != nil || request.Header.Get(relay.DoctorEndpointHeader) != endpoint || !ed25519.Verify(public, relay.CanonicalRequest(signed), signature) {
+			t.Fatal("doctor endpoint assertion was not signed")
+		}
+		return testHTTPResponse(request, http.StatusNoContent, http.Header{
+			relay.ResponseNonceHeader:    {signed.Nonce},
+			relay.ProtocolHeader:         {strconv.Itoa(relay.ProtocolVersion)},
+			relay.DoctorAttachmentHeader: {"true"},
+		}), nil
+	})}, AccessServiceToken{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	result, err := client.DoctorEndpoint(t.Context(), endpoint)
+	if err != nil || !result.Attached || !result.Protocol || !result.Enrolled {
+		t.Fatalf("result=%#v err=%v", result, err)
+	}
+}
+
+func TestHTTPRelayClientDoctorProbeVerifiesAccessEnforcement(t *testing.T) {
+	_, private, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, accessProtected := range []bool{true, false} {
+		t.Run(map[bool]string{true: "protected", false: "open"}[accessProtected], func(t *testing.T) {
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if r.Header.Get("CF-Access-Client-Id") == "" && accessProtected {
+					w.WriteHeader(http.StatusForbidden)
+					return
+				}
+				w.Header().Set(relay.ResponseNonceHeader, r.Header.Get("X-Punaro-Nonce"))
+				w.Header().Set(relay.ProtocolHeader, strconv.Itoa(relay.ProtocolVersion))
+				w.WriteHeader(http.StatusNoContent)
+			}))
+			defer server.Close()
+			client, err := NewHTTPRelayClient(server.URL, "machine-a", private, server.Client(), AccessServiceToken{ClientID: "access-id", ClientSecret: "access-secret"})
+			if err != nil {
+				t.Fatal(err)
+			}
+			result, probeErr := client.Doctor(t.Context())
+			if accessProtected {
+				if probeErr != nil || result != (DoctorProbeResult{Transport: true, Origin: true, Access: true, Enrolled: true, Protocol: true}) {
+					t.Fatalf("protected result=%#v err=%v", result, probeErr)
+				}
+				return
+			}
+			if probeErr == nil || result != (DoctorProbeResult{Transport: true, Origin: true}) {
+				t.Fatalf("open result=%#v err=%v", result, probeErr)
+			}
+		})
+	}
+}
+
+func TestHTTPRelayClientDoctorRejectsPublicHTTPSWithoutAccessCredential(t *testing.T) {
+	_, private, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	client, err := NewHTTPRelayClient("https://relay.example", "machine-a", private, &http.Client{Transport: roundTripperFunc(func(request *http.Request) (*http.Response, error) {
+		return testHTTPResponse(request, http.StatusNoContent, http.Header{
+			relay.ResponseNonceHeader: {request.Header.Get("X-Punaro-Nonce")},
+			relay.ProtocolHeader:      {strconv.Itoa(relay.ProtocolVersion)},
+		}), nil
+	})}, AccessServiceToken{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	result, probeErr := client.Doctor(t.Context())
+	if probeErr == nil || result != (DoctorProbeResult{Transport: true, Origin: true}) {
+		t.Fatalf("result=%#v err=%v", result, probeErr)
+	}
+	if !requiresAccessAdmission(client.baseURL) {
+		t.Fatal("public HTTPS origin did not require Access admission")
+	}
+	if requiresAccessAdmission(&url.URL{Scheme: "https", Host: "127.0.0.1"}) {
+		t.Fatal("loopback HTTPS origin unexpectedly required Access admission")
+	}
+	if requiresAccessAdmission(&url.URL{Scheme: "http", Host: "192.0.2.10"}) {
+		t.Fatal("trusted-LAN HTTP origin unexpectedly required Access admission")
+	}
+}
+
+func TestHTTPRelayClientDoctorNotificationProbeIsContentFree(t *testing.T) {
+	_, private, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet || r.URL.Path != relay.DoctorNotificationsPath {
+			t.Fatalf("request=%s %s", r.Method, r.URL.Path)
+		}
+		w.Header().Set(relay.ResponseNonceHeader, r.Header.Get("X-Punaro-Nonce"))
+		w.Header().Set(relay.ProtocolHeader, "1")
+		connection, acceptErr := websocket.Accept(w, r, &websocket.AcceptOptions{CompressionMode: websocket.CompressionDisabled})
+		if acceptErr != nil {
+			t.Errorf("accept: %v", acceptErr)
+			return
+		}
+		_ = connection.Close(websocket.StatusNormalClosure, "")
+	}))
+	defer server.Close()
+	client, err := NewHTTPRelayClient(server.URL, "machine-a", private, server.Client(), AccessServiceToken{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	result, err := client.DoctorNotifications(t.Context())
+	if err != nil || result != (DoctorProbeResult{Transport: true, Origin: true, Access: true, Enrolled: true, Protocol: true}) {
+		t.Fatalf("result=%#v err=%v", result, err)
+	}
+}
+
+func TestHTTPRelayClientDoctorNotificationVerifiesAccessEnforcement(t *testing.T) {
+	_, private, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, accessProtected := range []bool{true, false} {
+		t.Run(map[bool]string{true: "protected", false: "open"}[accessProtected], func(t *testing.T) {
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if r.Header.Get("CF-Access-Client-Id") == "" && accessProtected {
+					w.WriteHeader(http.StatusForbidden)
+					return
+				}
+				w.Header().Set(relay.ResponseNonceHeader, r.Header.Get("X-Punaro-Nonce"))
+				w.Header().Set(relay.ProtocolHeader, strconv.Itoa(relay.ProtocolVersion))
+				connection, acceptErr := websocket.Accept(w, r, &websocket.AcceptOptions{CompressionMode: websocket.CompressionDisabled})
+				if acceptErr != nil {
+					t.Errorf("accept: %v", acceptErr)
+					return
+				}
+				_ = connection.Close(websocket.StatusNormalClosure, "")
+			}))
+			defer server.Close()
+			client, err := NewHTTPRelayClient(server.URL, "machine-a", private, server.Client(), AccessServiceToken{ClientID: "access-id", ClientSecret: "access-secret"})
+			if err != nil {
+				t.Fatal(err)
+			}
+			result, probeErr := client.DoctorNotifications(t.Context())
+			if accessProtected {
+				if probeErr != nil || result != (DoctorProbeResult{Transport: true, Origin: true, Access: true, Enrolled: true, Protocol: true}) {
+					t.Fatalf("protected result=%#v err=%v", result, probeErr)
+				}
+				return
+			}
+			if probeErr == nil || result != (DoctorProbeResult{Transport: true, Origin: true}) {
+				t.Fatalf("open result=%#v err=%v", result, probeErr)
+			}
+		})
 	}
 }
 
@@ -251,7 +535,10 @@ func TestHTTPRelayClientClassifiesOnlyPreAppendRejectionsAsTerminalOfferFailures
 		terminal bool
 	}{{http.StatusForbidden, true}, {http.StatusNotFound, true}, {http.StatusConflict, false}, {http.StatusInternalServerError, false}} {
 		t.Run(http.StatusText(test.status), func(t *testing.T) {
-			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(test.status) }))
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				w.Header().Set(relay.ResponseNonceHeader, r.Header.Get("X-Punaro-Nonce"))
+				w.WriteHeader(test.status)
+			}))
 			defer server.Close()
 			client, err := NewHTTPRelayClient(server.URL, "machine-a", private, server.Client(), AccessServiceToken{})
 			if err != nil {
@@ -259,7 +546,50 @@ func TestHTTPRelayClientClassifiesOnlyPreAppendRejectionsAsTerminalOfferFailures
 			}
 			_, err = client.Send(context.Background(), "conversation-1", "agent/a", "offer", "offer-1")
 			var terminal terminalOfferNoticeFailure
-			if err == nil || !errors.As(err, &terminal) || terminal.PermanentOfferNoticeFailure() != test.terminal {
+			var relayFailure interface{ PermanentRelayFailure() bool }
+			if err == nil || !errors.As(err, &terminal) || terminal.PermanentOfferNoticeFailure() != test.terminal || !errors.As(err, &relayFailure) || relayFailure.PermanentRelayFailure() != test.terminal {
+				t.Fatalf("status=%d err=%v offer_terminal=%v relay_terminal=%v", test.status, err, terminal, relayFailure)
+			}
+		})
+	}
+}
+
+func TestHTTPRelayClientClassifiesTelegramInboundPreAppendRejection(t *testing.T) {
+	_, private, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, test := range []struct {
+		name          string
+		status        int
+		relayResponse bool
+		terminal      bool
+	}{
+		{name: "relay forbidden", status: http.StatusForbidden, relayResponse: true, terminal: true},
+		{name: "relay not found", status: http.StatusNotFound, relayResponse: true, terminal: true},
+		{name: "intermediary forbidden", status: http.StatusForbidden, terminal: false},
+		{name: "intermediary not found", status: http.StatusNotFound, terminal: false},
+		{name: "relay conflict", status: http.StatusConflict, relayResponse: true, terminal: false},
+		{name: "relay server error", status: http.StatusInternalServerError, relayResponse: true, terminal: false},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if r.URL.Path != "/v1/conversations/conversation-1/telegram-inbound" {
+					t.Fatalf("unexpected path %s", r.URL.Path)
+				}
+				if test.relayResponse {
+					w.Header().Set(relay.ResponseNonceHeader, r.Header.Get("X-Punaro-Nonce"))
+				}
+				w.WriteHeader(test.status)
+			}))
+			defer server.Close()
+			client, err := NewHTTPRelayClient(server.URL, "machine-a", private, server.Client(), AccessServiceToken{})
+			if err != nil {
+				t.Fatal(err)
+			}
+			_, err = client.SendTelegramInbound(context.Background(), "conversation-1", relay.TelegramGatewayEndpoint, relay.TelegramUserParticipant, "ship it", "", "", 0, "telegram-update:42")
+			var terminal interface{ PermanentRelayFailure() bool }
+			if err == nil || !errors.As(err, &terminal) || terminal.PermanentRelayFailure() != test.terminal {
 				t.Fatalf("status=%d err=%v terminal=%v", test.status, err, terminal)
 			}
 		})
@@ -654,12 +984,185 @@ func TestHTTPRelayClientSignsBoundedProtocolRequests(t *testing.T) {
 	if err != nil || message.ID != "message-1" {
 		t.Fatalf("send = %#v, %v", message, err)
 	}
-	conversation, err := client.CreateConversation(context.Background(), "agent/a", []relay.Member{{Endpoint: "agent/a", Capabilities: relay.CapSend | relay.CapReceive | relay.CapAdmin}}, "create-1")
+	conversation, err := client.CreateConversation(context.Background(), "agent/a", []relay.Member{{Endpoint: "agent/a", Capabilities: relay.CapSend | relay.CapReceive | relay.CapAdmin}}, "", "create-1")
 	if err != nil || conversation.ID != "conversation-created" {
 		t.Fatalf("create=%#v err=%v", conversation, err)
 	}
 	if err := client.BindRole(context.Background(), "role/plan-reviewer", "agent/a/session"); err != nil {
 		t.Fatalf("bind durable role: %v", err)
+	}
+}
+
+func TestHTTPRelayClientRegistersCanonicalRoleAndExactRetry(t *testing.T) {
+	t.Parallel()
+	public, private, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var seen []string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost || r.URL.Path != "/v1/roles/register" {
+			t.Fatalf("request = %s %s", r.Method, r.URL.Path)
+		}
+		body := mustReadAll(t, r)
+		request := signedRequestFromHTTP(t, r, body)
+		if !ed25519.Verify(public, relay.CanonicalRequest(request), request.Signature) {
+			t.Fatal("role register request was not signed")
+		}
+		if r.Header.Get("Idempotency-Key") != "register-1" {
+			t.Fatalf("idempotency key=%q", r.Header.Get("Idempotency-Key"))
+		}
+		var payload struct {
+			Role              string `json:"role"`
+			DisplayName       string `json:"display_name"`
+			DirectAddressable bool   `json:"direct_addressable"`
+			Machine           string `json:"machine"`
+		}
+		if err := json.Unmarshal(body, &payload); err != nil || payload.Role != "role/machine-a/reviewer" || payload.DisplayName != "  Reviewer  " || payload.DirectAddressable || payload.Machine != "" {
+			t.Fatalf("payload=%s err=%v", body, err)
+		}
+		seen = append(seen, string(body))
+		status := http.StatusCreated
+		if len(seen) > 1 {
+			status = http.StatusOK
+		}
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(status)
+		_, _ = w.Write([]byte(`{"role":"role/machine-a/reviewer","display_name":"Reviewer","direct_addressable":false,"updated_at":"2026-08-18T16:00:00Z"}`))
+	}))
+	defer server.Close()
+	client, err := NewHTTPRelayClient(server.URL, "machine-a", private, server.Client(), AccessServiceToken{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	first, err := client.RegisterRole(context.Background(), "role/machine-a/reviewer", "  Reviewer  ", false, "register-1")
+	if err != nil || first.Role != "role/machine-a/reviewer" || first.DisplayName != "Reviewer" || first.DirectAddressable {
+		t.Fatalf("register=%#v err=%v", first, err)
+	}
+	retry, err := client.RegisterRole(context.Background(), "role/machine-a/reviewer", "  Reviewer  ", false, "register-1")
+	if err != nil || retry != first || len(seen) != 2 {
+		t.Fatalf("retry=%#v seen=%d err=%v", retry, len(seen), err)
+	}
+	if _, err := client.RegisterRole(context.Background(), "role/plan-reviewer", "", false, "register-legacy"); err == nil {
+		t.Fatal("legacy role was accepted by client")
+	}
+}
+
+func TestHTTPRelayClientListsAndResolvesPublicRoles(t *testing.T) {
+	t.Parallel()
+	public, private, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body := mustReadAll(t, r)
+		request := signedRequestFromHTTP(t, r, body)
+		if !ed25519.Verify(public, relay.CanonicalRequest(request), request.Signature) {
+			t.Fatal("directory request was not signed")
+		}
+		if r.URL.RawQuery != "" {
+			t.Fatal("directory request used a query string")
+		}
+		w.Header().Set("Content-Type", "application/json")
+		switch {
+		case r.Method == http.MethodPost && r.URL.Path == "/v1/roles/list":
+			var payload struct {
+				Cursor string `json:"cursor"`
+				Limit  int    `json:"limit"`
+			}
+			if err := json.Unmarshal(body, &payload); err != nil || payload.Cursor != "" || payload.Limit != relay.DefaultRoleListLimit {
+				t.Fatalf("list payload=%s err=%v", body, err)
+			}
+			_, _ = w.Write([]byte(`{"roles":[{"role":"role/machine-a/reviewer","display_name":"Reviewer","machine_id":"machine-a","online":true}]}`))
+		case r.Method == http.MethodPost && r.URL.Path == "/v1/roles/resolve":
+			var payload struct {
+				Name string `json:"name"`
+			}
+			if err := json.Unmarshal(body, &payload); err != nil {
+				t.Fatalf("resolve payload=%s err=%v", body, err)
+			}
+			switch payload.Name {
+			case "role/machine-a/reviewer":
+				_, _ = w.Write([]byte(`{"status":"resolved","role":"role/machine-a/reviewer","display_name":"Reviewer","machine_id":"machine-a","online":true}`))
+			case "reviewer":
+				w.WriteHeader(http.StatusConflict)
+				_, _ = w.Write([]byte(`{"status":"ambiguous","matches":[{"role":"role/machine-a/reviewer","display_name":"Reviewer"},{"role":"role/machine-b/reviewer"}]}`))
+			default:
+				w.WriteHeader(http.StatusNotFound)
+				_, _ = w.Write([]byte(`{"error":"role not found"}`))
+			}
+		default:
+			t.Fatalf("request = %s %s", r.Method, r.URL.Path)
+		}
+	}))
+	defer server.Close()
+	client, err := NewHTTPRelayClient(server.URL, "machine-a", private, server.Client(), AccessServiceToken{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	page, err := client.ListRoles(context.Background(), "", 0)
+	if err != nil || len(page.Roles) != 1 || page.Roles[0].Role != "role/machine-a/reviewer" || !page.Roles[0].Online {
+		t.Fatalf("list=%#v err=%v", page, err)
+	}
+	if encoded, err := json.Marshal(page); err != nil || strings.Contains(string(encoded), "agent/") || strings.Contains(string(encoded), "conversation") {
+		t.Fatalf("list leaked inventory: %s err=%v", encoded, err)
+	}
+	exact, err := client.ResolveRole(context.Background(), "role/machine-a/reviewer")
+	if err != nil || exact.Status != relay.RoleResolveResolved || exact.Role != "role/machine-a/reviewer" {
+		t.Fatalf("exact=%#v err=%v", exact, err)
+	}
+	ambiguous, err := client.ResolveRole(context.Background(), "reviewer")
+	if err != nil || ambiguous.Status != relay.RoleResolveAmbiguous || len(ambiguous.Matches) != 2 {
+		t.Fatalf("ambiguous=%#v err=%v", ambiguous, err)
+	}
+	missing, err := client.ResolveRole(context.Background(), "role/plan-reviewer")
+	if err != nil || missing.Status != relay.RoleResolveNotFound {
+		t.Fatalf("missing=%#v err=%v", missing, err)
+	}
+}
+
+func TestHTTPRelayClientSendsDirectMessageWithCanonicalRoles(t *testing.T) {
+	t.Parallel()
+	public, private, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body := mustReadAll(t, r)
+		request := signedRequestFromHTTP(t, r, body)
+		if !ed25519.Verify(public, relay.CanonicalRequest(request), request.Signature) {
+			t.Fatal("direct message request was not signed")
+		}
+		if r.Method != http.MethodPost || r.URL.Path != "/v1/direct-messages" || r.URL.RawQuery != "" {
+			t.Fatalf("request = %s %s", r.Method, r.URL.String())
+		}
+		if r.Header.Get("Idempotency-Key") != "dm-1" {
+			t.Fatalf("idempotency key=%q", r.Header.Get("Idempotency-Key"))
+		}
+		var payload struct {
+			FromRole     string `json:"from_role"`
+			ToRole       string `json:"to_role"`
+			Body         string `json:"body"`
+			FromEndpoint string `json:"from_endpoint"`
+		}
+		if err := json.Unmarshal(body, &payload); err != nil || payload.FromRole != "role/machine-a/reviewer" || payload.ToRole != "role/machine-b/implementer" || payload.Body != "please review" || payload.FromEndpoint != "" {
+			t.Fatalf("payload=%s err=%v", body, err)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusCreated)
+		_, _ = w.Write([]byte(`{"id":"message-1","conversation_id":"conversation-1","sequence":1,"from_role":"role/machine-a/reviewer","body":"please review","created_at":"2026-08-18T18:00:00Z"}`))
+	}))
+	defer server.Close()
+	client, err := NewHTTPRelayClient(server.URL, "machine-a", private, server.Client(), AccessServiceToken{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	message, err := client.SendDirectMessage(context.Background(), "role/machine-a/reviewer", "role/machine-b/implementer", "please review", "dm-1")
+	if err != nil || message.ID != "message-1" || message.ConversationID != "conversation-1" || message.FromRole != "role/machine-a/reviewer" || message.FromEndpoint != "" {
+		t.Fatalf("direct send=%#v err=%v", message, err)
+	}
+	if _, err := client.SendDirectMessage(context.Background(), "reviewer", "role/machine-b/implementer", "please review", "dm-1"); err == nil {
+		t.Fatal("unqualified source role was accepted")
 	}
 }
 
@@ -697,9 +1200,188 @@ func TestHTTPRelayClientEncodesDurableRoleMemberWithoutChangingEndpointMember(t 
 	conversation, err := client.CreateConversation(context.Background(), "agent/a/session", []relay.Member{
 		{Endpoint: "agent/a/session", Capabilities: relay.CapSend | relay.CapReceive | relay.CapAdmin},
 		{Role: "role/plan-reviewer", RoleMachineID: "machine-b", Capabilities: relay.CapReceive},
-	}, "create-role-member")
+	}, "", "create-role-member")
 	if err != nil || conversation.ID != "role-conversation" {
 		t.Fatalf("conversation=%#v err=%v", conversation, err)
+	}
+}
+
+func TestHTTPRelayClientOmitsEmptyDisplayNameOnCreate(t *testing.T) {
+	public, private, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var unnamedBody, namedBody []byte
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost || r.URL.Path != "/v1/conversations" {
+			t.Fatalf("request = %s %s", r.Method, r.URL.Path)
+		}
+		body := mustReadAll(t, r)
+		request := signedRequestFromHTTP(t, r, body)
+		if !ed25519.Verify(public, relay.CanonicalRequest(request), request.Signature) {
+			t.Fatal("conversation request was not signed")
+		}
+		var payload map[string]any
+		if err := json.Unmarshal(body, &payload); err != nil {
+			t.Fatalf("conversation payload=%s err=%v", body, err)
+		}
+		if _, present := payload["display_name"]; present && unnamedBody == nil {
+			t.Fatalf("unnamed create included display_name: %s", body)
+		}
+		if unnamedBody == nil {
+			unnamedBody = append([]byte(nil), body...)
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`{"id":"unnamed-conversation"}`))
+			return
+		}
+		if payload["display_name"] != "Review room" {
+			t.Fatalf("named create payload=%s", body)
+		}
+		namedBody = append([]byte(nil), body...)
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"id":"named-conversation","display_name":"Review room"}`))
+	}))
+	defer server.Close()
+	client, err := NewHTTPRelayClient(server.URL, "machine-a", private, server.Client(), AccessServiceToken{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	unnamed, err := client.CreateConversation(context.Background(), "agent/a", []relay.Member{{Endpoint: "agent/a", Capabilities: relay.CapSend | relay.CapReceive | relay.CapAdmin}}, "", "create-unnamed")
+	if err != nil || unnamed.ID != "unnamed-conversation" {
+		t.Fatalf("unnamed=%#v err=%v", unnamed, err)
+	}
+	named, err := client.CreateConversation(context.Background(), "agent/a", []relay.Member{{Endpoint: "agent/a", Capabilities: relay.CapSend | relay.CapReceive | relay.CapAdmin}}, "Review room", "create-named")
+	if err != nil || named.ID != "named-conversation" || named.DisplayName != "Review room" {
+		t.Fatalf("named=%#v err=%v", named, err)
+	}
+	if unnamedBody == nil || namedBody == nil {
+		t.Fatal("create requests were not observed")
+	}
+}
+
+func TestHTTPRelayClientTelegramClaimAndInboundMethods(t *testing.T) {
+	t.Parallel()
+	public, private, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	seen := map[string][]byte{}
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body := mustReadAll(t, r)
+		request := signedRequestFromHTTP(t, r, body)
+		if !ed25519.Verify(public, relay.CanonicalRequest(request), request.Signature) {
+			t.Fatal("telegram claim request was not signed")
+		}
+		seen[r.Method+" "+r.URL.Path] = append([]byte(nil), body...)
+		w.Header().Set("Content-Type", "application/json")
+		switch r.URL.Path {
+		case "/v1/conversations/conversation-1/telegram-claim":
+			if r.Header.Get("Idempotency-Key") != "claim-conversation-1" {
+				t.Fatal("missing claim idempotency key")
+			}
+			_, _ = w.Write([]byte(`{"conversation_id":"conversation-1","status":"pending","display_name":"Ops","created_at":"2026-08-16T12:00:00Z"}`))
+		case "/v1/conversations/conversation-1/telegram-claim/complete":
+			if string(body) != "{}" {
+				t.Fatalf("complete body=%s", body)
+			}
+			_, _ = w.Write([]byte(`{"conversation_id":"conversation-1","status":"complete","display_name":"Ops","created_at":"2026-08-16T12:00:00Z","completed_at":"2026-08-16T12:00:05Z"}`))
+		case "/v1/telegram/claims/pending":
+			_, _ = w.Write([]byte(`{"claims":[{"conversation_id":"conversation-1","status":"pending","display_name":"Ops","created_at":"2026-08-16T12:00:00Z"}]}`))
+		case "/v1/telegram/unclaimed":
+			_, _ = w.Write([]byte(`{"topics":[{"id":"conversation-1","display_name":"Ops"}]}`))
+		case "/v1/sessions/topic":
+			_, _ = w.Write([]byte(`{"id":"conversation-1","display_name":"Ops","claimed":true}`))
+		case "/v1/conversations/conversation-1/telegram-inbound":
+			if r.Header.Get("Idempotency-Key") != "telegram-update:42" {
+				t.Fatal("missing inbound idempotency key")
+			}
+			_, _ = w.Write([]byte(`{"id":"message-1","conversation_id":"conversation-1","sequence":1,"from_endpoint":"telegram/primary","from_participant":"user-telegram","body":"ship it","created_at":"2026-08-16T12:00:00Z"}`))
+		default:
+			t.Fatalf("unexpected path %s", r.URL.Path)
+		}
+	}))
+	defer server.Close()
+	client, err := NewHTTPRelayClient(server.URL, "machine-a", private, server.Client(), AccessServiceToken{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	claim, err := client.ClaimConversation(context.Background(), "conversation-1", "agent/a", "claim-conversation-1")
+	if err != nil || claim.Status != "pending" {
+		t.Fatalf("claim=%#v err=%v", claim, err)
+	}
+	completed, err := client.CompleteTelegramClaim(context.Background(), "conversation-1")
+	if err != nil || completed.Status != "complete" {
+		t.Fatalf("complete=%#v err=%v", completed, err)
+	}
+	pending, err := client.PendingTelegramClaims(context.Background(), 1, "")
+	if err != nil || len(pending) != 1 || pending[0].ConversationID != "conversation-1" {
+		t.Fatalf("pending=%#v err=%v", pending, err)
+	}
+	topics, err := client.ListUnclaimed(context.Background())
+	if err != nil || len(topics) != 1 || topics[0].ID != "conversation-1" {
+		t.Fatalf("unclaimed=%#v err=%v", topics, err)
+	}
+	topic, err := client.GetSessionTopic(context.Background(), "agent/a")
+	if err != nil || !topic.Claimed || topic.ID != "conversation-1" {
+		t.Fatalf("topic=%#v err=%v", topic, err)
+	}
+	message, err := client.SendTelegramInbound(context.Background(), "conversation-1", relay.TelegramGatewayEndpoint, relay.TelegramUserParticipant, "ship it", "", "", 0, "telegram-update:42")
+	if err != nil || message.FromParticipant != relay.TelegramUserParticipant {
+		t.Fatalf("inbound=%#v err=%v", message, err)
+	}
+	if _, ok := seen["POST /v1/conversations/conversation-1/telegram-claim/complete"]; !ok {
+		t.Fatal("complete request was not observed")
+	}
+}
+
+func TestHTTPRelayClientClaimConversationTreatsCompleteAsSuccess(t *testing.T) {
+	t.Parallel()
+	_, private, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost || r.URL.Path != "/v1/conversations/conversation-1/telegram-claim" {
+			t.Fatalf("unexpected route %s %s", r.Method, r.URL.Path)
+		}
+		if r.Header.Get("Idempotency-Key") != "claim-conversation-1" {
+			t.Fatal("missing claim idempotency key")
+		}
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(`{"conversation_id":"conversation-1","status":"complete","display_name":"Ops","created_at":"2026-08-16T12:00:00Z","completed_at":"2026-08-16T12:00:05Z"}`))
+	}))
+	defer server.Close()
+	client, err := NewHTTPRelayClient(server.URL, "machine-a", private, server.Client(), AccessServiceToken{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	claim, err := client.ClaimConversation(context.Background(), "conversation-1", "agent/a", "claim-conversation-1")
+	if err != nil || claim.Status != "complete" || claim.ConversationID != "conversation-1" {
+		t.Fatalf("complete claim=%#v err=%v", claim, err)
+	}
+}
+
+func TestHTTPRelayClientGetSessionTopicExposesForbiddenStatus(t *testing.T) {
+	t.Parallel()
+	_, private, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost || r.URL.Path != "/v1/sessions/topic" {
+			t.Fatalf("unexpected route %s %s", r.Method, r.URL.Path)
+		}
+		http.Error(w, `{"error":"authorization denied"}`, http.StatusForbidden)
+	}))
+	defer server.Close()
+	client, err := NewHTTPRelayClient(server.URL, "machine-a", private, server.Client(), AccessServiceToken{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = client.GetSessionTopic(context.Background(), "agent/a")
+	if RelayHTTPStatus(err) != http.StatusForbidden {
+		t.Fatalf("forbidden topic status=%d err=%v", RelayHTTPStatus(err), err)
 	}
 }
 

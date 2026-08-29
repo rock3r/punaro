@@ -1,11 +1,19 @@
 package relay
 
 import (
+	"encoding/base64"
+	"errors"
+	"fmt"
+	"regexp"
 	"strings"
 	"time"
 	"unicode"
 	"unicode/utf8"
+
+	"github.com/google/uuid"
 )
+
+var canonicalRoleSlug = regexp.MustCompile(`^[a-z0-9][a-z0-9-]{0,62}$`)
 
 func validBoundedText(value string, maxCharacters, maxBytes int) bool {
 	if value == "" || !utf8.ValidString(value) || strings.TrimSpace(value) != value || len(value) > maxBytes || utf8.RuneCountInString(value) > maxCharacters {
@@ -31,6 +39,110 @@ func ValidEndpoint(value string) bool { return validBoundedText(value, 512, 2048
 // namespaces in the relay model even when their textual labels are similar.
 func ValidRole(value string) bool { return validBoundedText(value, 512, 2048) }
 
+// CanonicalRoleHandle reports whether role has the immutable machine-qualified
+// form role/<machine>/<slug> without checking which machine owns it.
+func CanonicalRoleHandle(role string) bool {
+	if !ValidRole(role) {
+		return false
+	}
+	rest, ok := strings.CutPrefix(role, "role/")
+	if !ok {
+		return false
+	}
+	machine, slug, ok := strings.Cut(rest, "/")
+	return ok && !strings.Contains(slug, "/") && ValidMachineID(machine) && canonicalRoleSlug.MatchString(slug)
+}
+
+// CanonicalRoleForMachine reports whether role is the immutable machine-qualified
+// handle role/<machine>/<slug> for the authenticated owner.
+func CanonicalRoleForMachine(role, machineID string) bool {
+	if !ValidMachineID(machineID) || !CanonicalRoleHandle(role) {
+		return false
+	}
+	rest, _ := strings.CutPrefix(role, "role/")
+	machine, _, _ := strings.Cut(rest, "/")
+	return machine == machineID
+}
+
+// OrderedDirectRolePair returns the lexicographic unordered pair for two distinct
+// canonical roles. Equal or non-canonical handles are rejected.
+func OrderedDirectRolePair(left, right string) (string, string, bool) {
+	if !CanonicalRoleHandle(left) || !CanonicalRoleHandle(right) || left == right {
+		return "", "", false
+	}
+	if left < right {
+		return left, right, true
+	}
+	return right, left, true
+}
+
+// DirectMessageRequestHash binds a direct-send idempotency key to source role,
+// target role, and body. Conversation ID is assigned after this hash.
+func DirectMessageRequestHash(fromRole, toRole, body string) string {
+	return stableHash(fromRole, toRole, body)
+}
+
+// CanonicalRoleSlug returns the immutable trailing slug of a canonical handle.
+func CanonicalRoleSlug(role string) (string, bool) {
+	if !CanonicalRoleHandle(role) {
+		return "", false
+	}
+	rest, _ := strings.CutPrefix(role, "role/")
+	_, slug, _ := strings.Cut(rest, "/")
+	return slug, true
+}
+
+// ValidRoleSlug reports whether value is a canonical role slug, not a display name.
+func ValidRoleSlug(value string) bool {
+	return canonicalRoleSlug.MatchString(value)
+}
+
+// EncodeRoleListCursor hides the last canonical role behind an opaque page token.
+func EncodeRoleListCursor(role string) string {
+	if !CanonicalRoleHandle(role) {
+		return ""
+	}
+	return base64.RawURLEncoding.EncodeToString([]byte(role))
+}
+
+// DecodeRoleListCursor reports the last canonical role of an opaque page token.
+func DecodeRoleListCursor(cursor string) (string, bool) {
+	if cursor == "" {
+		return "", true
+	}
+	raw, err := base64.RawURLEncoding.DecodeString(cursor)
+	if err != nil {
+		return "", false
+	}
+	role := string(raw)
+	if !CanonicalRoleHandle(role) {
+		return "", false
+	}
+	return role, true
+}
+
+// NormalizeRoleDisplayName trims an optional portable display name. Empty after
+// trim means the role has no display name. It is never authorization.
+func NormalizeRoleDisplayName(value string) (string, bool) {
+	trimmed := strings.TrimSpace(value)
+	if trimmed == "" {
+		return "", true
+	}
+	if !validBoundedText(trimmed, 128, 128) {
+		return "", false
+	}
+	return trimmed, true
+}
+
+// RegisterRoleRequestHash binds a registration idempotency key to the normalized request.
+func RegisterRoleRequestHash(role, displayName string, directAddressable bool) string {
+	addressable := "0"
+	if directAddressable {
+		addressable = "1"
+	}
+	return stableHash(role, displayName, addressable)
+}
+
 // ValidRequestToken bounds nonces, idempotency keys, and consumer identities.
 func ValidRequestToken(value string) bool { return validBoundedText(value, 128, 512) }
 
@@ -43,14 +155,111 @@ func ValidMessageBody(value string) bool {
 // AppendRequestHash binds a message idempotency key to its immutable request.
 func AppendRequestHash(input AppendInput) string { return appendHash(input) }
 
+const (
+	maxConversationDisplayNameRunes = 128
+	maxConversationDisplayNameBytes = 512
+	// TelegramGatewayEndpoint is the enrolled gateway mailbox. Claim complete
+	// is the only writer that inserts it with send|receive.
+	TelegramGatewayEndpoint = "telegram/primary"
+	// TelegramUserParticipant is the built-in per-topic human label. It is
+	// never a durable roles row and never a member-set target.
+	TelegramUserParticipant = "user-telegram"
+	// TelegramPrimaryEndpoint is the occupancy-fence name for the gateway.
+	// It must occupy every claimed topic, so fencing never applies to it.
+	TelegramPrimaryEndpoint = TelegramGatewayEndpoint
+	// TelegramCodexRole is the durable role the host-local adopt-prepare
+	// one-shot drops from the still-unnamed non-keeper. It is an ordinary
+	// role, not a reserved participant label.
+	TelegramCodexRole = "role/telegram-codex"
+)
+
+// TelegramGatewayCapabilities is the only membership complete may grant.
+const TelegramGatewayCapabilities = CapSend | CapReceive
+
+// ReservedRelayMember reports labels that cannot be created or member-set.
+// user-telegram is a built-in participant; telegram/primary is claim-owned.
+func ReservedRelayMember(value string) bool {
+	return value == TelegramUserParticipant || value == TelegramGatewayEndpoint
+}
+
+// ValidateTelegramInbound checks gateway inbound fields before a store write.
+func ValidateTelegramInbound(input TelegramInboundInput) error {
+	if strings.TrimSpace(input.ConversationID) == "" || !ValidMachineID(input.SenderMachineID) || input.FromEndpoint != TelegramGatewayEndpoint || input.FromParticipant != TelegramUserParticipant || !ValidRequestToken(input.IdempotencyKey) {
+		return ErrForbidden
+	}
+	if input.InReplyToEndpoint != "" && !ValidEndpoint(input.InReplyToEndpoint) {
+		return ErrForbidden
+	}
+	if input.InReplyToMessageID != "" && !ValidRequestToken(input.InReplyToMessageID) && uuid.Validate(input.InReplyToMessageID) != nil {
+		return ErrForbidden
+	}
+	if input.TelegramThreadID < 0 {
+		return ErrForbidden
+	}
+	if !ValidMessageBody(input.Body) {
+		return errors.New("message body is not portable UTF-8 text")
+	}
+	if len(input.Body) > maxMessageBodyBytes {
+		return fmt.Errorf("message body exceeds %d bytes", maxMessageBodyBytes)
+	}
+	return nil
+}
+
+// SanitizeConversationDisplayName trims and clamps a room label. Empty input is
+// legal for unnamed test rooms; a provided name must remain non-empty.
+func SanitizeConversationDisplayName(value string) (string, error) {
+	if value == "" {
+		return "", nil
+	}
+	if !utf8.ValidString(value) || strings.ContainsRune(value, 0) {
+		return "", errInvalidConversationDisplayName
+	}
+	for _, character := range value {
+		if unicode.IsControl(character) {
+			return "", errInvalidConversationDisplayName
+		}
+	}
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return "", errInvalidConversationDisplayName
+	}
+	if utf8.RuneCountInString(value) > maxConversationDisplayNameRunes {
+		value = string([]rune(value)[:maxConversationDisplayNameRunes])
+	}
+	for len(value) > maxConversationDisplayNameBytes {
+		_, size := utf8.DecodeLastRuneInString(value)
+		if size <= 0 {
+			return "", errInvalidConversationDisplayName
+		}
+		value = value[:len(value)-size]
+	}
+	if value == "" {
+		return "", errInvalidConversationDisplayName
+	}
+	return value, nil
+}
+
+var errInvalidConversationDisplayName = errors.New("invalid conversation display name")
+
 // CreateConversationRequestHash binds a conversation idempotency key to the
-// normalized creator and membership set.
-func CreateConversationRequestHash(creatorEndpoint string, members []Member, projectID ...string) string {
+// normalized creator, membership set, and display name. An empty display name
+// keeps the pre-upgrade membership digest so unnamed create retries still hit
+// existing conversation_idempotency rows.
+func CreateConversationRequestHash(creatorEndpoint string, members []Member, displayName string, projectID ...string) string {
 	digest := createConversationHash(creatorEndpoint, members)
+	if displayName != "" {
+		digest = stableHash(digest, displayName)
+	}
 	if len(projectID) == 0 || projectID[0] == "" {
 		return digest
 	}
 	return stableHash(digest, projectID[0])
+}
+
+// DisplayNameRequestHash binds a rename idempotency key to the conversation,
+// live admin endpoint, and sanitized label.
+func DisplayNameRequestHash(conversationID, actorEndpoint, displayName string) string {
+	return stableHash(conversationID, actorEndpoint, displayName)
 }
 
 // Backend is the complete durable mail boundary shared by the SQLite parity
@@ -71,6 +280,21 @@ type Backend interface {
 	ConversationsForMachine(machineID string, now time.Time) ([]Conversation, error)
 }
 
+// AttachmentDoctorSnapshot is a bounded, content-free attachment aggregate
+// for one authenticated machine.
+type AttachmentDoctorSnapshot struct {
+	ActiveEndpoints  int
+	ExpiredEndpoints int
+	ActiveRoles      int
+	ExpiredRoles     int
+}
+
+// AttachmentDoctorBackend supports the signed read-only doctor route without
+// exposing endpoint or role inventory.
+type AttachmentDoctorBackend interface {
+	DoctorAttachments(machineID string, now time.Time) (AttachmentDoctorSnapshot, error)
+}
+
 // InvocationBackend is intentionally separate from Backend while PostgreSQL
 // mail cutover parity is staged. Selected backends without it fail closed
 // rather than treating a normal message or notification as process control.
@@ -89,6 +313,24 @@ type ControlBackend interface {
 	ControlAudit(conversationID, machineID, actorEndpoint string, now time.Time) ([]ControlEvent, error)
 }
 
+// DisplayNameBackend is the explicit admin rename surface. It stays off the
+// message plane and rechecks a live admin session on every mutation.
+type DisplayNameBackend interface {
+	SetConversationDisplayName(SetDisplayNameInput) (Conversation, bool, error)
+}
+
+// TelegramClaimBackend is the claim, occupancy, and gateway-inbound surface.
+// It stays off Backend so mail cutover parity is not blocked on topic APIs.
+type TelegramClaimBackend interface {
+	SetConversationDisplayName(SetDisplayNameInput) (Conversation, bool, error)
+	ReserveTelegramClaim(TelegramClaimInput) (TelegramClaim, bool, error)
+	CompleteTelegramClaim(TelegramClaimCompleteInput) (TelegramClaim, bool, error)
+	PendingTelegramClaims(machineID string, now time.Time, limit int, after string) ([]TelegramClaim, error)
+	UnclaimedNamedConversations(machineID string, now time.Time, limit int) ([]UnclaimedTopic, error)
+	SessionTopic(machineID, endpoint string, now time.Time) (SessionTopic, error)
+	AppendTelegramInbound(TelegramInboundInput) (Message, bool, error)
+}
+
 // PrincipalEndpointBackend atomically binds advertised endpoint ownership to
 // the stable authenticated principal used by trusted attachment snapshots.
 // Legacy backends remain mail-only and need not implement it.
@@ -101,6 +343,21 @@ type PrincipalEndpointBackend interface {
 // session; the binding itself has a bounded renewable lease.
 type RoleBindingBackend interface {
 	BindRoleToSession(machineID, role, sessionEndpoint string, now time.Time, ttl time.Duration) error
+}
+
+// RoleProfileBackend persists opt-in addressable role identity. Profile state
+// is distinct from transient session bindings and from legacy conversation roles.
+type RoleProfileBackend interface {
+	RegisterRoleProfile(RegisterRoleInput) (RoleProfile, bool, error)
+	RoleProfile(role string) (RoleProfile, error)
+	ListAddressableRoles(RoleListInput) (RoleListPage, error)
+	ResolveAddressableRole(RoleResolveInput) (RoleResolveResult, error)
+}
+
+// DirectMessageBackend creates or reuses one conversation for an unordered
+// opted-in role pair and appends a targeted message in the same transaction.
+type DirectMessageBackend interface {
+	SendDirectMessage(DirectMessageInput) (Message, bool, error)
 }
 
 // PrincipalAuthority is the non-secret, generation-fenced result of device
@@ -119,3 +376,7 @@ type NonceStore interface {
 }
 
 var _ Backend = (*Store)(nil)
+var _ RoleProfileBackend = (*Store)(nil)
+var _ DirectMessageBackend = (*Store)(nil)
+var _ DisplayNameBackend = (*Store)(nil)
+var _ TelegramClaimBackend = (*Store)(nil)

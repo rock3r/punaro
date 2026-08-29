@@ -5,6 +5,40 @@
 set -eu
 
 repo_dir=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
+
+# --enable is also the live-apply path: it must restart an already-active user
+# service after switching ExecStart to punaro-bootstrap run.
+grep -Fqx "$(printf '\t\t\tsystemctl --user enable punaro-adapter.service')" "$repo_dir/scripts/install-adapter.sh"
+grep -Fqx "$(printf '\t\t\tsystemctl --user restart punaro-adapter.service')" "$repo_dir/scripts/install-adapter.sh"
+if grep -Fqx "$(printf '\t\t\tsystemctl --user enable --now punaro-adapter.service')" "$repo_dir/scripts/install-adapter.sh"; then
+	printf '%s\n' 'live adapter unit would not be applied to an already-running service' >&2
+	exit 1
+fi
+grep -Fq "fail 'could not reload the Linux user manager'" "$repo_dir/scripts/install-adapter.sh" || {
+	printf '%s\n' 'installer must fail a requested Linux service handoff when daemon-reload fails' >&2
+	exit 1
+}
+grep -Fq 'if ! systemctl --user daemon-reload; then' "$repo_dir/scripts/install-adapter.sh" || {
+	printf '%s\n' 'installer must reload the Linux user manager after replacing the unit' >&2
+	exit 1
+}
+grep -Fq 'systemctl --user is-active --quiet punaro-adapter.service' "$repo_dir/scripts/install-adapter.sh" || {
+	printf '%s\n' 'installer must restart an already-active Linux adapter without --enable' >&2
+	exit 1
+}
+grep -Fq 'launchctl print "gui/$(id -u)/org.punaro.adapter"' "$repo_dir/scripts/install-adapter.sh" || {
+	printf '%s\n' 'installer must restart an already-active macOS adapter without --enable' >&2
+	exit 1
+}
+grep -Fq -- '--keys-file' "$repo_dir/scripts/install-adapter.sh" || {
+	printf '%s\n' 'installer must accept --keys-file so signed slots can roll back' >&2
+	exit 1
+}
+grep -Fq 'seed-checkout --directory "$bootstrap_dir" --adapter "$bin_dir/punaro-adapter" --trusted-attachment "$build_dir/punaro-trusted-attachment" --memory "$build_dir/punaro-memory" --enroll "$build_dir/punaro-enroll" --keys-file "$keys_file"' "$repo_dir/scripts/install-adapter.sh" || {
+	printf '%s\n' 'installer must persist release keys during seed-checkout' >&2
+	exit 1
+}
+
 fixture_dir=$(mktemp -d "${TMPDIR:-/tmp}/punaro-install-test.XXXXXXXX")
 fixture_dir=$(CDPATH= cd -- "$fixture_dir" && pwd -P)
 # The installer deliberately uses a temporary HOME. Keep Go's shared caches
@@ -22,6 +56,9 @@ mailbox_log="$fixture_dir/mailbox.log"
 guidance_project="$fixture_dir/project"
 mailbox_state="$fixture_dir/custom-mailbox"
 mkdir -p "$home" "$guidance_project"
+# Prove the installer establishes privacy itself instead of inheriting a
+# restrictive caller umask.
+umask 022
 
 cat >"$mailbox" <<'EOF'
 #!/bin/sh
@@ -40,7 +77,7 @@ run_install() {
 		sh "$repo_dir/scripts/install-client.sh" \
 		--relay-url https://relay.example.test \
 		--machine-id macbook \
-		--agent-mailbox-bin "$mailbox" \
+		--waypost-bin "$mailbox" \
 		--mailbox-state-dir "$mailbox_state" \
 		--agent-guidance-dir "$guidance_project"
 }
@@ -48,6 +85,7 @@ run_install() {
 run_install >"$fixture_dir/first.out"
 
 adapter="$home/.local/bin/punaro-adapter"
+bootstrap="$home/.local/bin/punaro-bootstrap"
 attachment="$home/.local/bin/punaro-trusted-attachment"
 memory="$home/.local/bin/punaro-memory"
 enroll="$home/.local/bin/punaro-enroll"
@@ -65,6 +103,10 @@ file_mode() {
 }
 
 [ -x "$adapter" ] || { printf '%s\n' 'adapter binary was not installed' >&2; exit 1; }
+[ -x "$bootstrap" ] || { printf '%s\n' 'bootstrap binary was not installed' >&2; exit 1; }
+[ "$(HOME="$home" "$adapter" version)" = 'v0.1.0-alpha.11' ] || { printf '%s\n' 'adapter binary lacks the source release identity' >&2; exit 1; }
+[ "$("$bootstrap" version)" = 'v0.1.0-alpha.11' ] || { printf '%s\n' 'bootstrap binary lacks the source release identity' >&2; exit 1; }
+[ -d "$home/.local/state/punaro-bootstrap/current" ] || { printf '%s\n' 'bootstrap current slot was not seeded' >&2; exit 1; }
 [ -x "$attachment" ] || { printf '%s\n' 'attachment binary was not installed' >&2; exit 1; }
 [ -x "$memory" ] || { printf '%s\n' 'memory binary was not installed' >&2; exit 1; }
 [ -x "$enroll" ] || { printf '%s\n' 'enrollment binary was not installed' >&2; exit 1; }
@@ -74,13 +116,16 @@ file_mode() {
 [ -f "$guidance_project/AGENTS.md" ] || { printf '%s\n' 'opt-in agent guidance was not installed' >&2; exit 1; }
 if [ "$(uname -s)" = Darwin ]; then
 	[ -f "$plist" ] || { printf '%s\n' 'LaunchAgent was not installed' >&2; exit 1; }
+	grep -Fq 'punaro-bootstrap" run --directory' "$plist" || { printf '%s\n' 'LaunchAgent does not launch punaro-bootstrap run' >&2; exit 1; }
 else
 	[ -f "$home/.config/systemd/user/punaro-adapter.service" ] || { printf '%s\n' 'user systemd unit was not installed' >&2; exit 1; }
-	grep -Fqx "ReadWritePaths=%h/.local/state/punaro-adapter $mailbox_state" "$home/.config/systemd/user/punaro-adapter.service"
+	grep -Fqx "ReadWritePaths=%h/.local/state/punaro-adapter %h/.local/state/punaro-bootstrap $mailbox_state" "$home/.config/systemd/user/punaro-adapter.service"
+	grep -Fq 'punaro-bootstrap run --directory' "$home/.config/systemd/user/punaro-adapter.service" || { printf '%s\n' 'user unit does not launch punaro-bootstrap run' >&2; exit 1; }
 fi
 [ "$(file_mode "$key")" = 600 ] || { printf '%s\n' 'machine key permissions are not 0600' >&2; exit 1; }
 [ "$(file_mode "$config")" = 600 ] || { printf '%s\n' 'adapter environment permissions are not 0600' >&2; exit 1; }
 [ "$(file_mode "$enrollment")" = 600 ] || { printf '%s\n' 'enrollment record permissions are not 0600' >&2; exit 1; }
+[ "$(file_mode "$mailbox_state")" = 700 ] || { printf '%s\n' 'mailbox state directory permissions are not 0700' >&2; exit 1; }
 
 grep -Fqx 'PUNARO_ADAPTER_RELAY_URL=https://relay.example.test' "$config"
 grep -Fqx 'PUNARO_MACHINE_ID=macbook' "$config"
@@ -91,6 +136,11 @@ grep -Fq '"endpoint_prefixes":["agent/macbook/"]' "$enrollment"
 grep -Fq 'group create --group group/punaro-attached' "$mailbox_log"
 HOME="$home" PUNARO_TEST_MAILBOX_LOG="$mailbox_log" "$repo_dir/scripts/punaro-plugin-mcp"
 grep -Fq -- "--state-dir $mailbox_state mcp" "$mailbox_log"
+mv "$adapter" "$adapter.fixed-before-slot-test"
+printf '%s\n' '#!/bin/sh' 'exit 88' >"$adapter"
+chmod 700 "$adapter"
+HOME="$home" PUNARO_TEST_MAILBOX_LOG="$mailbox_log" "$repo_dir/scripts/punaro-plugin-mcp"
+mv "$adapter.fixed-before-slot-test" "$adapter"
 grep -Fq '"id":"macbook"' "$fixture_dir/first.out"
 if grep -Fq 'PUNARO_CF_ACCESS_CLIENT_SECRET' "$fixture_dir/first.out"; then
 	printf '%s\n' 'installer output must not solicit or print Access secrets' >&2
@@ -243,6 +293,29 @@ PATH="$fixture_dir:$PATH" HOME="$default_home" GOTOOLCHAIN=local GOMODCACHE="$go
 		--machine-id default-path >"$fixture_dir/default.out"
 default_mailbox_dir=$(CDPATH= cd -- "$(dirname -- "$mailbox")" && pwd -P)
 grep -Fqx "PUNARO_AGENT_MAILBOX_BIN=$default_mailbox_dir/$(basename -- "$mailbox")" "$default_home/.config/punaro/adapter.env"
+
+waypost="$fixture_dir/waypost"
+cp "$mailbox" "$waypost"
+waypost_home="$fixture_dir/waypost-home"
+mkdir -p "$waypost_home"
+PATH="$fixture_dir:$PATH" HOME="$waypost_home" GOTOOLCHAIN=local GOMODCACHE="$go_mod_cache" GOCACHE="$go_build_cache" PUNARO_TEST_MAILBOX_LOG="$mailbox_log" \
+	sh "$repo_dir/scripts/install-client.sh" \
+		--relay-url https://relay.example.test \
+		--machine-id waypost-default >"$fixture_dir/waypost-default.out"
+grep -Fqx "PUNARO_AGENT_MAILBOX_BIN=$default_mailbox_dir/waypost" "$waypost_home/.config/punaro/adapter.env"
+grep -Fqx "PUNARO_MAILBOX_STATE_DIR=$waypost_home/.local/state/waypost" "$waypost_home/.config/punaro/adapter.env"
+
+versioned_waypost="$fixture_dir/waypost-0.8"
+cp "$mailbox" "$versioned_waypost"
+versioned_waypost_home="$fixture_dir/versioned-waypost-home"
+mkdir -p "$versioned_waypost_home"
+HOME="$versioned_waypost_home" GOTOOLCHAIN=local GOMODCACHE="$go_mod_cache" GOCACHE="$go_build_cache" PUNARO_TEST_MAILBOX_LOG="$mailbox_log" \
+	sh "$repo_dir/scripts/install-client.sh" \
+		--relay-url https://relay.example.test \
+		--machine-id waypost-versioned \
+		--waypost-bin "$versioned_waypost" >"$fixture_dir/waypost-versioned.out"
+grep -Fqx "PUNARO_AGENT_MAILBOX_BIN=$versioned_waypost" "$versioned_waypost_home/.config/punaro/adapter.env"
+grep -Fqx "PUNARO_MAILBOX_STATE_DIR=$versioned_waypost_home/.local/state/waypost" "$versioned_waypost_home/.config/punaro/adapter.env"
 
 set +e
 HOME="$home" sh "$repo_dir/scripts/install-adapter.sh" --relay-url https://relay.example.test --machine-id 'bad/id' >"$fixture_dir/invalid.out" 2>&1

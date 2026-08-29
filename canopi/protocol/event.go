@@ -1,0 +1,384 @@
+// Package protocol defines Canopi's transport-neutral coding-agent lifecycle
+// event. It deliberately contains no Punaro transport or authentication types.
+package protocol
+
+import (
+	"bytes"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"io"
+	"regexp"
+	"time"
+	"unicode/utf8"
+)
+
+// SpecVersion is the current normalized lifecycle-event schema version.
+const SpecVersion = 1
+
+// Source identifies the coding-agent provider that emitted an event.
+type Source string
+
+// Supported event sources. Other preserves forward-compatible custom adapters.
+const (
+	SourcePi         Source = "pi"
+	SourceClaudeCode Source = "claude_code"
+	SourceCodex      Source = "codex"
+	SourceGrokBuild  Source = "grok_build"
+	SourceOther      Source = "other"
+)
+
+// State is the normalized current lifecycle state of an agent instance.
+type State string
+
+// Supported normalized lifecycle states, in no particular display order.
+const (
+	StateWorking        State = "working"
+	StateWaitingForUser State = "waiting_for_user"
+	StateDone           State = "done"
+)
+
+// WaitingReason describes why an agent needs user attention.
+type WaitingReason string
+
+// Supported reasons for the waiting-for-user state.
+const (
+	WaitingReasonPermission  WaitingReason = "permission"
+	WaitingReasonQuestion    WaitingReason = "question"
+	WaitingReasonElicitation WaitingReason = "elicitation"
+	WaitingReasonApproval    WaitingReason = "approval"
+	WaitingReasonOther       WaitingReason = "other"
+)
+
+// Machine identifies the host on which an agent instance is running.
+type Machine struct {
+	ID    string `json:"id"`
+	Label string `json:"label"`
+}
+
+// Task contains the privacy-safe display identity of an agent's work.
+type Task struct {
+	Title            string `json:"title"`
+	Repository       string `json:"repository,omitempty"`
+	WorkingDirectory string `json:"working_directory,omitempty"`
+}
+
+// Event is the transport-neutral normalized lifecycle event.
+type Event struct {
+	SpecVersion           int            `json:"spec_version"`
+	EventID               string         `json:"event_id"`
+	Source                Source         `json:"source"`
+	Machine               Machine        `json:"machine"`
+	SessionID             string         `json:"session_id"`
+	AgentInstanceID       string         `json:"agent_instance_id"`
+	ParentAgentInstanceID string         `json:"parent_agent_instance_id,omitempty"`
+	State                 State          `json:"state"`
+	WaitingReason         WaitingReason  `json:"waiting_reason,omitempty"`
+	ActivityAt            time.Time      `json:"activity_at"`
+	EmittedAt             time.Time      `json:"emitted_at"`
+	Task                  Task           `json:"task"`
+	Metadata              map[string]any `json:"metadata,omitempty"`
+}
+
+// UnmarshalJSON preserves strict object semantics for the optional metadata
+// field: omission is valid, while an explicit JSON null contradicts the schema.
+func (e *Event) UnmarshalJSON(payload []byte) error {
+	if err := ValidateJSONEncoding(payload); err != nil {
+		return err
+	}
+	var fields map[string]json.RawMessage
+	if err := json.Unmarshal(payload, &fields); err != nil {
+		return err
+	}
+	if metadata, present := fields["metadata"]; present && bytes.Equal(bytes.TrimSpace(metadata), []byte("null")) {
+		return errors.New("metadata must be an object when present")
+	}
+	type wireEvent Event
+	decoder := json.NewDecoder(bytes.NewReader(payload))
+	decoder.DisallowUnknownFields()
+	decoder.UseNumber()
+	var decoded wireEvent
+	if err := decoder.Decode(&decoded); err != nil {
+		return err
+	}
+	*e = Event(decoded)
+	return nil
+}
+
+var machineIDPattern = regexp.MustCompile(`^[A-Za-z0-9._-]+$`)
+
+var allowedMetadataKeys = map[string]struct{}{
+	"agent_type": {},
+	"hook":       {},
+	"simulated":  {},
+}
+
+// Key returns the stable identity used to track an agent across events.
+func (e Event) Key() string {
+	return string(e.Source) + "\x00" + e.Machine.ID + "\x00" + e.AgentInstanceID
+}
+
+// Validate checks the protocol, bounds, state consistency, and privacy rules.
+func (e Event) Validate() error {
+	if e.SpecVersion != SpecVersion {
+		return fmt.Errorf("spec_version must be %d", SpecVersion)
+	}
+	if err := bounded("event_id", e.EventID, 1, 200); err != nil {
+		return err
+	}
+	switch e.Source {
+	case SourcePi, SourceClaudeCode, SourceCodex, SourceGrokBuild, SourceOther:
+	default:
+		return fmt.Errorf("unsupported source %q", e.Source)
+	}
+	if err := bounded("machine.id", e.Machine.ID, 1, 100); err != nil {
+		return err
+	}
+	if !machineIDPattern.MatchString(e.Machine.ID) {
+		return errors.New("machine.id contains unsupported characters")
+	}
+	if err := bounded("machine.label", e.Machine.Label, 1, 40); err != nil {
+		return err
+	}
+	if err := bounded("session_id", e.SessionID, 1, 300); err != nil {
+		return err
+	}
+	if err := bounded("agent_instance_id", e.AgentInstanceID, 1, 300); err != nil {
+		return err
+	}
+	if e.ParentAgentInstanceID != "" {
+		if err := bounded("parent_agent_instance_id", e.ParentAgentInstanceID, 1, 300); err != nil {
+			return err
+		}
+	}
+	switch e.State {
+	case StateWorking, StateWaitingForUser, StateDone:
+	default:
+		return fmt.Errorf("unsupported state %q", e.State)
+	}
+	if e.WaitingReason != "" {
+		switch e.WaitingReason {
+		case WaitingReasonPermission, WaitingReasonQuestion, WaitingReasonElicitation, WaitingReasonApproval, WaitingReasonOther:
+		default:
+			return fmt.Errorf("unsupported waiting_reason %q", e.WaitingReason)
+		}
+	}
+	if e.State != StateWaitingForUser && e.WaitingReason != "" {
+		return errors.New("waiting_reason is only valid for waiting_for_user")
+	}
+	if e.ActivityAt.IsZero() || e.EmittedAt.IsZero() {
+		return errors.New("activity_at and emitted_at are required")
+	}
+	if err := bounded("task.title", e.Task.Title, 1, 80); err != nil {
+		return err
+	}
+	if utf8.RuneCountInString(e.Task.Repository) > 300 {
+		return errors.New("task.repository exceeds 300 characters")
+	}
+	if utf8.RuneCountInString(e.Task.WorkingDirectory) > 1000 {
+		return errors.New("task.working_directory exceeds 1000 characters")
+	}
+	for key, value := range e.Metadata {
+		if _, allowed := allowedMetadataKeys[key]; !allowed {
+			return fmt.Errorf("metadata key %q is not allowed", key)
+		}
+		if key == "agent_type" {
+			if _, valid := value.(string); value != nil && !valid {
+				return errors.New("metadata agent_type must be a string or null")
+			}
+			continue
+		}
+		if !isPrimitiveMetadata(value) {
+			return fmt.Errorf("metadata %q must contain a primitive value", key)
+		}
+	}
+	return nil
+}
+
+func isPrimitiveMetadata(value any) bool {
+	switch typed := value.(type) {
+	case nil, string, float64, float32, int, int8, int16, int32, int64, uint, uint8, uint16, uint32, uint64, bool:
+		return true
+	case json.Number:
+		_, err := json.Marshal(typed)
+		return err == nil
+	default:
+		return false
+	}
+}
+
+// DecodeEvent strictly decodes one bounded event and rejects unknown fields.
+func DecodeEvent(reader io.Reader, maxBytes int64) (Event, error) {
+	if maxBytes <= 0 {
+		return Event{}, errors.New("maxBytes must be positive")
+	}
+	payload, err := io.ReadAll(io.LimitReader(reader, maxBytes+1))
+	if err != nil {
+		return Event{}, fmt.Errorf("read event: %w", err)
+	}
+	if int64(len(payload)) > maxBytes {
+		return Event{}, fmt.Errorf("event exceeds %d bytes", maxBytes)
+	}
+	if err := ValidateJSONEncoding(payload); err != nil {
+		return Event{}, err
+	}
+	decoder := json.NewDecoder(bytes.NewReader(payload))
+	decoder.DisallowUnknownFields()
+	decoder.UseNumber()
+	var event Event
+	if err := decoder.Decode(&event); err != nil {
+		return Event{}, fmt.Errorf("decode event: %w", err)
+	}
+	var trailing any
+	if err := decoder.Decode(&trailing); !errors.Is(err, io.EOF) {
+		return Event{}, errors.New("event must contain exactly one JSON object")
+	}
+	if err := event.Validate(); err != nil {
+		return Event{}, err
+	}
+	return event, nil
+}
+
+// ValidateJSONEncoding rejects byte and escape sequences that encoding/json
+// would otherwise normalize into Unicode replacement characters.
+func ValidateJSONEncoding(payload []byte) error {
+	if !utf8.Valid(payload) {
+		return errors.New("event must be valid UTF-8 JSON")
+	}
+	if !validJSONUnicodeEscapes(payload) {
+		return errors.New("event must use valid Unicode scalar escapes")
+	}
+	if err := validateUniqueJSONMembers(payload); err != nil {
+		return err
+	}
+	return nil
+}
+
+func validateUniqueJSONMembers(payload []byte) error {
+	decoder := json.NewDecoder(bytes.NewReader(payload))
+	decoder.UseNumber()
+	if err := validateUniqueJSONValue(decoder); err != nil {
+		return fmt.Errorf("event must not contain duplicate JSON object members: %w", err)
+	}
+	if _, err := decoder.Token(); !errors.Is(err, io.EOF) {
+		return errors.New("event must contain exactly one JSON value")
+	}
+	return nil
+}
+
+func validateUniqueJSONValue(decoder *json.Decoder) error {
+	token, err := decoder.Token()
+	if err != nil {
+		return err
+	}
+	delimiter, isDelimiter := token.(json.Delim)
+	if !isDelimiter {
+		return nil
+	}
+	switch delimiter {
+	case '{':
+		seen := make(map[string]struct{})
+		for decoder.More() {
+			key, err := decoder.Token()
+			if err != nil {
+				return err
+			}
+			name, ok := key.(string)
+			if !ok {
+				return errors.New("JSON object member name is not a string")
+			}
+			if _, duplicate := seen[name]; duplicate {
+				return fmt.Errorf("duplicate member %q", name)
+			}
+			seen[name] = struct{}{}
+			if err := validateUniqueJSONValue(decoder); err != nil {
+				return err
+			}
+		}
+		end, err := decoder.Token()
+		if err != nil || end != json.Delim('}') {
+			return errors.New("unterminated JSON object")
+		}
+	case '[':
+		for decoder.More() {
+			if err := validateUniqueJSONValue(decoder); err != nil {
+				return err
+			}
+		}
+		end, err := decoder.Token()
+		if err != nil || end != json.Delim(']') {
+			return errors.New("unterminated JSON array")
+		}
+	default:
+		return errors.New("unexpected JSON delimiter")
+	}
+	return nil
+}
+
+func validJSONUnicodeEscapes(payload []byte) bool {
+	for index := 0; index < len(payload); index++ {
+		if payload[index] != '"' {
+			continue
+		}
+		for index++; index < len(payload) && payload[index] != '"'; index++ {
+			if payload[index] != '\\' {
+				continue
+			}
+			index++
+			if index >= len(payload) {
+				return true // The JSON decoder reports the incomplete escape.
+			}
+			if payload[index] != 'u' {
+				continue
+			}
+			value, ok := decodeHexQuad(payload, index+1)
+			if !ok {
+				return true // The JSON decoder reports the malformed escape.
+			}
+			index += 4
+			switch {
+			case value >= 0xd800 && value <= 0xdbff:
+				if index+6 >= len(payload) || payload[index+1] != '\\' || payload[index+2] != 'u' {
+					return false
+				}
+				low, ok := decodeHexQuad(payload, index+3)
+				if !ok || low < 0xdc00 || low > 0xdfff {
+					return false
+				}
+				index += 6
+			case value >= 0xdc00 && value <= 0xdfff:
+				return false
+			}
+		}
+	}
+	return true
+}
+
+func decodeHexQuad(payload []byte, start int) (uint16, bool) {
+	if start+4 > len(payload) {
+		return 0, false
+	}
+	var value uint16
+	for _, digit := range payload[start : start+4] {
+		value <<= 4
+		switch {
+		case digit >= '0' && digit <= '9':
+			value += uint16(digit - '0')
+		case digit >= 'a' && digit <= 'f':
+			value += uint16(digit-'a') + 10
+		case digit >= 'A' && digit <= 'F':
+			value += uint16(digit-'A') + 10
+		default:
+			return 0, false
+		}
+	}
+	return value, true
+}
+
+func bounded(name, value string, minLength, maxLength int) error {
+	length := utf8.RuneCountInString(value)
+	if length < minLength || length > maxLength {
+		return fmt.Errorf("%s length must be between %d and %d", name, minLength, maxLength)
+	}
+	return nil
+}

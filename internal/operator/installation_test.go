@@ -3,7 +3,9 @@ package operator
 import (
 	"context"
 	"crypto/ed25519"
+	"crypto/sha256"
 	"encoding/base64"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"os"
@@ -405,6 +407,14 @@ func TestLoadPreservesMissingPathDiagnosticsForDoctor(t *testing.T) {
 	}
 }
 
+func TestLoadContextHonorsCancellationBeforeFilesystemInspection(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	if _, err := LoadContext(ctx, filepath.Join(t.TempDir(), "unavailable")); !errors.Is(err, context.Canceled) {
+		t.Fatalf("LoadContext error=%v, want context cancellation", err)
+	}
+}
+
 func TestLoadAndCheckPathsRejectInstallationDirectoryPermissionDrift(t *testing.T) {
 	options := validInitOptions(t)
 	installation, err := Init(context.Background(), options, func(context.Context, string, string) (punaropostgres.Principal, error) {
@@ -776,6 +786,14 @@ func TestComposeOverrideKeepsMemoryAPIDarkButOperatorEnableable(t *testing.T) {
 	}
 	if environment := daemonEnv(Installation{}); !strings.Contains(environment, "PUNARO_MEMORY_API_ENABLED=false\n") {
 		t.Fatalf("default generated environment is not dark: %s", environment)
+	}
+}
+
+func TestComposeManifestSHA256BindsGeneratedArtifact(t *testing.T) {
+	digest := sha256.Sum256([]byte(composeOverride()))
+	want := hex.EncodeToString(digest[:])
+	if got := ComposeManifestSHA256(); got != want {
+		t.Fatalf("ComposeManifestSHA256() = %q, want %q", got, want)
 	}
 }
 

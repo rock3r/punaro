@@ -7,10 +7,13 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"net"
+	"strings"
 	"sync"
 	"time"
 
 	_ "github.com/jackc/pgx/v5/stdlib" // Register the audited pgx database/sql driver.
+	"github.com/rock3r/punaro/internal/relay"
 )
 
 const operationTimeout = 5 * time.Second
@@ -32,6 +35,14 @@ type Database struct {
 	memoryUsageStop           chan struct{}
 	memoryUsageDone           chan struct{}
 	memoryUsageStopOnce       sync.Once
+	rateMu                    sync.Mutex
+	rateLimits                relay.RateLimitConfig
+	quotaMu                   sync.Mutex
+	quota                     relay.QuotaConfig
+	retentionMu               sync.Mutex
+	retention                 relay.RetentionConfig
+	pendingMetricsMu          sync.Mutex
+	metrics                   *relay.Metrics
 }
 
 // InstallationState identifies one installation timeline and its last change.
@@ -46,6 +57,16 @@ func OpenApplication(ctx context.Context, cfg Config) (*Database, error) {
 	dsn, err := ReadDSNFile(cfg.DSNFile)
 	if err != nil {
 		return nil, err
+	}
+	return OpenApplicationDSN(ctx, dsn)
+}
+
+// OpenApplicationDSN opens an application connection from an already
+// protected and validated in-memory DSN. Diagnostic callers use this after a
+// deadline-isolated credential read.
+func OpenApplicationDSN(ctx context.Context, dsn string) (*Database, error) {
+	if strings.TrimSpace(dsn) == "" {
+		return nil, errors.New("PostgreSQL connection configuration is invalid")
 	}
 	db, err := open(ctx, dsn)
 	if err != nil {
@@ -92,7 +113,7 @@ func OpenApplication(ctx context.Context, cfg Config) (*Database, error) {
 		return nil, err
 	}
 	database := &Database{
-		db: db, relayDB: relayDB, brainDB: brainDB, embeddingDB: embeddingDB, manifest: CurrentManifest(),
+		db: db, relayDB: relayDB, brainDB: brainDB, embeddingDB: embeddingDB, manifest: CurrentManifest(), rateLimits: relay.DefaultRateLimitConfig(), quota: relay.DefaultQuotaConfig(), retention: relay.DefaultRetentionConfig(),
 		attachmentPhysicalGCSlots: make(chan struct{}, 1),
 		memoryUsageWrites:         make(chan memoryUsageWrite, maxMemoryRecallQueue),
 		memoryUsageStop:           make(chan struct{}),
@@ -175,7 +196,13 @@ func (d *Database) Ready(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
-	return state.Ready()
+	if err := state.Ready(); err != nil {
+		return err
+	}
+	if state.Version >= 48 {
+		return d.VerifyPendingQuota(checkCtx)
+	}
+	return nil
 }
 
 // TrustedAttachmentRuntimeReady requires the exact current schema because the
@@ -222,6 +249,42 @@ func (d *Database) PostgreSQLMajor(ctx context.Context) (int, error) {
 		return 0, errors.New("PostgreSQL major version is unavailable")
 	}
 	return major, nil
+}
+
+// ListenerPrivate verifies the server's configured TCP listeners through the
+// application-role connection instead of inferring them from local files.
+func (d *Database) ListenerPrivate(ctx context.Context) (bool, error) {
+	return listenerPrivate(ctx, d.db)
+}
+
+// ListenerPrivate verifies the same server boundary through owner authority.
+func (a *Administration) ListenerPrivate(ctx context.Context) (bool, error) {
+	return listenerPrivate(ctx, a.db)
+}
+
+func listenerPrivate(ctx context.Context, q queryer) (bool, error) {
+	var addresses string
+	if err := q.QueryRowContext(ctx, "SELECT current_setting('listen_addresses')").Scan(&addresses); err != nil {
+		return false, errors.New("PostgreSQL listener configuration is unavailable")
+	}
+	return listenerAddressesPrivate(addresses), nil
+}
+
+func listenerAddressesPrivate(value string) bool {
+	if strings.TrimSpace(value) == "" {
+		return true
+	}
+	for _, address := range strings.Split(value, ",") {
+		address = strings.TrimSpace(address)
+		if strings.EqualFold(address, "localhost") {
+			continue
+		}
+		ip := net.ParseIP(address)
+		if ip == nil || !ip.IsLoopback() {
+			return false
+		}
+	}
+	return true
 }
 
 // Identity returns a content-free fingerprint of the exact target database
@@ -1246,6 +1309,41 @@ FROM objects, table_ownership, routine_safety, routine_acl, table_acl, schema_ac
 			return Snapshot{}, errors.New("PostgreSQL client lifecycle schema cannot be inspected")
 		}
 		snapshot.CurrentObjectsPresent = lifecycleObjectsPresent
+	}
+	if snapshot.CurrentObjectsPresent && len(snapshot.Records) > 0 && snapshot.Records[len(snapshot.Records)-1].Version >= 45 {
+		profileObjectsPresent, err := relayRoleProfilesAvailable(ctx, q, snapshot.Records[len(snapshot.Records)-1].Version)
+		if err != nil {
+			return Snapshot{}, errors.New("PostgreSQL relay role-profile schema cannot be inspected")
+		}
+		snapshot.CurrentObjectsPresent = profileObjectsPresent
+	}
+	if snapshot.CurrentObjectsPresent && len(snapshot.Records) > 0 && snapshot.Records[len(snapshot.Records)-1].Version >= 46 {
+		rateObjectsPresent, err := relayRateLimitControlsAvailable(ctx, q)
+		if err != nil {
+			return Snapshot{}, errors.New("PostgreSQL relay rate-limit schema cannot be inspected")
+		}
+		snapshot.CurrentObjectsPresent = rateObjectsPresent
+	}
+	if snapshot.CurrentObjectsPresent && len(snapshot.Records) > 0 && snapshot.Records[len(snapshot.Records)-1].Version >= 47 {
+		directObjectsPresent, err := relayDirectMessagesAvailable(ctx, q, snapshot.Records[len(snapshot.Records)-1].Version)
+		if err != nil {
+			return Snapshot{}, errors.New("PostgreSQL relay direct-message schema cannot be inspected")
+		}
+		snapshot.CurrentObjectsPresent = directObjectsPresent
+	}
+	if snapshot.CurrentObjectsPresent && len(snapshot.Records) > 0 && snapshot.Records[len(snapshot.Records)-1].Version >= 48 {
+		quotaObjectsPresent, err := relayPendingQuotaControlsAvailable(ctx, q)
+		if err != nil {
+			return Snapshot{}, errors.New("PostgreSQL relay pending-quota schema cannot be inspected")
+		}
+		snapshot.CurrentObjectsPresent = quotaObjectsPresent
+	}
+	if snapshot.CurrentObjectsPresent && len(snapshot.Records) > 0 && snapshot.Records[len(snapshot.Records)-1].Version >= 49 {
+		terminalObjectsPresent, err := relayDeliveryTerminalsAvailable(ctx, q)
+		if err != nil {
+			return Snapshot{}, errors.New("PostgreSQL relay delivery-terminal schema cannot be inspected")
+		}
+		snapshot.CurrentObjectsPresent = terminalObjectsPresent
 	}
 	return snapshot, nil
 }
