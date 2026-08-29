@@ -402,7 +402,7 @@ func main() { os.Exit(run(os.Args[1:], os.Stdout, os.Stderr)) }
 
 func run(args []string, stdout, stderr io.Writer) int {
 	if len(args) == 0 {
-		_, _ = fmt.Fprintln(stderr, "usage: punaro init|up|status|doctor|doctor-profile|client|relay|mail|backup|restore|update|version")
+		_, _ = fmt.Fprintln(stderr, "usage: punaro init|up|status|doctor|doctor-profile|client|relay|mail|backup|restore|update|fleet-config|version")
 		return 2
 	}
 	switch args[0] {
@@ -470,6 +470,16 @@ func run(args []string, stdout, stderr io.Writer) int {
 		return runRestore(args[1:], stdout, stderr)
 	case "update":
 		return runUpdate(args[1:], stdout, stderr)
+	case "fleet-config":
+		if len(args) > 1 && args[1] == "configure" {
+			return runFleetConfigConfigure(args[2:], stdout, stderr)
+		}
+		if len(args) > 1 && args[1] == "publish" {
+			return runFleetConfigPublish(args[2:], stdout, stderr)
+		}
+		if len(args) > 1 && args[1] == "status" {
+			return runFleetConfigStatus(args[2:], stdout, stderr)
+		}
 	case "version":
 		if len(args) != 1 || serverBuildRelease == "" {
 			return 1
