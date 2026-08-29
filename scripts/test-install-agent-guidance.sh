@@ -352,6 +352,8 @@ require_phrase "$repo_dir/docs/installation.md" '--guidance-only --replace-manag
 require_phrase "$repo_dir/docs/installation.md" '-GuidanceOnly -ReplaceManaged'
 require_phrase "$repo_dir/docs/installation.md" 'mkdir -p "$HOME/.codex" "$HOME/.agents"'
 require_phrase "$repo_dir/docs/installation.md" "New-Item -ItemType Directory -Force"
+require_phrase "$repo_dir/docs/installation.md" 'ln -s ../.agents/AGENTS.md "$HOME/.claude/CLAUDE.md"'
+require_phrase "$repo_dir/docs/installation.md" 'New-Item -ItemType HardLink'
 require_phrase "$repo_dir/docs/installation.md" 'global guidance expects the Punaro plugin'
 require_phrase "$repo_dir/docs/agent-plugin.md" 'After status reports a warning or failure'
 forbid_phrase "$repo_dir/docs/agent-plugin.md" 'before first use when readiness is uncertain'
