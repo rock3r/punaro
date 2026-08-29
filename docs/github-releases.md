@@ -168,6 +168,13 @@ Only the offline-signature publisher can make those stable assets visible.
    `minimum_bootstrap_release=v0.1.0-alpha.8` and
    `supported_from=v0.1.0-alpha.10`; alpha.10 clients can exercise the built-in
    signed update before the server doctor credential cutover.
+
+   Alpha.12 packages the default agent-coordination guidance, current Punaro
+   skills, and client installer hardening without changing the signed-slot or
+   fixed-bootstrap protocol. Dispatch `v0.1.0-alpha.12` with
+   `minimum_bootstrap_release=v0.1.0-alpha.8` and
+   `supported_from=v0.1.0-alpha.11`; alpha.11 clients can exercise the built-in
+   signed update before installing the matching alpha.12 plugin and skills.
 3. Wait for the draft release to appear. The live `catalog` prerelease is not
    touched by the unsigned workflow.
 4. Generate the offline key once, on an air-gapped or owner-only machine, and
