@@ -11,11 +11,11 @@ import (
 func TestInspectRootAcceptsGlobalAgentsAndProjectSkills(t *testing.T) {
 	t.Parallel()
 	root := writeTree(t, map[string]string{
-		"AGENTS.md":                      "# fleet\n",
-		"skills/demo/SKILL.md":           skillMarkdown("demo", "A bounded demo skill."),
-		"skills/demo/scripts/run.sh":     "#!/bin/sh\necho unused\n",
-		"projects/punaro/AGENTS.md":      "# punaro\n",
-		"projects/canopi/AGENTS.md":      "# canopi\n",
+		"AGENTS.md":                         "# fleet\n",
+		"skills/demo/SKILL.md":              skillMarkdown("demo", "A bounded demo skill."),
+		"skills/demo/scripts/run.sh":        "#!/bin/sh\necho unused\n",
+		"projects/punaro/AGENTS.md":         "# punaro\n",
+		"projects/canopi/AGENTS.md":         "# canopi\n",
 		"projects/canopi/skills/x/SKILL.md": skillMarkdown("x", "Project skill."),
 	})
 	tree, err := InspectRoot(root)
@@ -68,8 +68,16 @@ func TestInspectRootRejectsUnsafeLayout(t *testing.T) {
 			"AGENTS.md":            "# fleet\n",
 			"skills/demo/SKILL.md": "---\nname: demo\n---\n# Demo\n",
 		}},
+		{"skill data without skill markdown", map[string]string{
+			"AGENTS.md":                  "# fleet\n",
+			"skills/demo/scripts/run.sh": "#!/bin/sh\necho unused\n",
+		}},
+		{"unterminated frontmatter flow", map[string]string{
+			"AGENTS.md":            "# fleet\n",
+			"skills/demo/SKILL.md": "---\nname: demo\ndescription: Demo.\nextra: [\n---\n# Demo\n",
+		}},
 		{"nested project outside projects", map[string]string{
-			"AGENTS.md":             "# fleet\n",
+			"AGENTS.md":               "# fleet\n",
 			"nested/punaro/AGENTS.md": "# nested\n",
 		}},
 		{"uppercase project", map[string]string{
@@ -126,6 +134,21 @@ func TestInspectRootRejectsSymlinkAndTraversalNames(t *testing.T) {
 				t.Fatalf("escaped path %q", file.Path)
 			}
 		}
+	}
+}
+
+func TestSkillCountCountsOnlyValidatedSkillRoots(t *testing.T) {
+	t.Parallel()
+	tree := Tree{Files: []File{
+		{Path: "AGENTS.md", Data: []byte("# fleet\n")},
+		{Path: "skills/demo/SKILL.md", Data: []byte(skillMarkdown("demo", "Demo skill."))},
+		{Path: "skills/demo/examples/SKILL.md", Data: []byte("# example\n")},
+	}}
+	if err := Validate(tree); err != nil {
+		t.Fatal(err)
+	}
+	if tree.SkillCount() != 1 {
+		t.Fatalf("nested SKILL.md counted as a skill: %d", tree.SkillCount())
 	}
 }
 

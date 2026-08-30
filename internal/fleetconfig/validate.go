@@ -23,6 +23,7 @@ func Validate(tree Tree) error {
 	folded := map[string]struct{}{}
 	hasGlobalAgents := false
 	skills := map[string]struct{}{}
+	dataSkills := map[string]struct{}{}
 	for _, file := range tree.Files {
 		path, err := canonicalPath(file.Path)
 		if err != nil {
@@ -65,10 +66,16 @@ func Validate(tree Tree) error {
 			if bytes.Contains(file.Data, []byte{0}) && isTextPath(path) {
 				return errors.New("fleet-config text file is invalid")
 			}
+			dataSkills[kind.skillKey] = struct{}{}
 		}
 	}
 	if !hasGlobalAgents {
 		return errors.New("fleet-config source requires AGENTS.md")
+	}
+	for key := range dataSkills {
+		if _, ok := skills[key]; !ok {
+			return errors.New("fleet-config skill path is invalid")
+		}
 	}
 	if len(skills) > MaxSkills {
 		return errors.New("fleet-config source has too many skills")
@@ -176,12 +183,22 @@ func parseSkillFrontmatter(data []byte) (string, string, error) {
 	description := ""
 	for _, line := range strings.Split(body, "\n") {
 		line = strings.TrimRight(line, "\r")
+		trimmed := strings.TrimSpace(line)
+		if trimmed == "" || strings.HasPrefix(trimmed, "#") {
+			continue
+		}
 		key, value, ok := strings.Cut(line, ":")
 		if !ok {
-			continue
+			return "", "", errors.New("missing frontmatter")
 		}
 		key = strings.TrimSpace(key)
 		value = strings.TrimSpace(value)
+		if key == "" || strings.ContainsAny(key, " \t") {
+			return "", "", errors.New("missing frontmatter")
+		}
+		if unclosedFlow(value) {
+			return "", "", errors.New("missing frontmatter")
+		}
 		switch key {
 		case "name":
 			name = value
@@ -193,6 +210,16 @@ func parseSkillFrontmatter(data []byte) (string, string, error) {
 		return "", "", errors.New("missing frontmatter fields")
 	}
 	return name, description, nil
+}
+
+func unclosedFlow(value string) bool {
+	if strings.HasPrefix(value, "[") && !strings.HasSuffix(value, "]") {
+		return true
+	}
+	if strings.HasPrefix(value, "{") && !strings.HasSuffix(value, "}") {
+		return true
+	}
+	return false
 }
 
 func isTextPath(path string) bool {

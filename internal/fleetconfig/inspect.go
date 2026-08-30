@@ -2,6 +2,7 @@ package fleetconfig
 
 import (
 	"errors"
+	"io"
 	"io/fs"
 	"os"
 	"path/filepath"
@@ -20,14 +21,15 @@ func InspectRoot(root string) (Tree, error) {
 	if !info.IsDir() || info.Mode()&os.ModeSymlink != 0 {
 		return Tree{}, errors.New("fleet-config source root must be a directory")
 	}
+	scoped, err := os.OpenRoot(root)
+	if err != nil {
+		return Tree{}, errors.New("fleet-config source root is unavailable")
+	}
+	defer func() { _ = scoped.Close() }()
 	var files []File
-	err = filepath.WalkDir(root, func(path string, entry fs.DirEntry, walkErr error) error {
+	err = fs.WalkDir(scoped.FS(), ".", func(rel string, entry fs.DirEntry, walkErr error) error {
 		if walkErr != nil {
 			return errors.New("fleet-config source walk failed")
-		}
-		rel, relErr := filepath.Rel(root, path)
-		if relErr != nil {
-			return errors.New("fleet-config source path is invalid")
 		}
 		if rel == "." {
 			return nil
@@ -35,6 +37,9 @@ func InspectRoot(root string) (Tree, error) {
 		slash, pathErr := canonicalPath(filepath.ToSlash(rel))
 		if pathErr != nil {
 			return pathErr
+		}
+		if entry.Type()&os.ModeSymlink != 0 {
+			return errors.New("fleet-config source must not contain links")
 		}
 		info, err := entry.Info()
 		if err != nil {
@@ -55,11 +60,21 @@ func InspectRoot(root string) (Tree, error) {
 		if info.Size() > MaxFileBytes {
 			return errors.New("fleet-config file is too large")
 		}
-		data, err := os.ReadFile(path) // #nosec G304 -- bounded walk of a caller-selected source tree.
+		file, err := scoped.OpenFile(rel, os.O_RDONLY, 0)
 		if err != nil {
 			return errors.New("fleet-config source walk failed")
 		}
-		if int64(len(data)) != info.Size() {
+		opened, statErr := file.Stat()
+		if statErr != nil || !opened.Mode().IsRegular() || opened.Mode()&os.ModeSymlink != 0 {
+			_ = file.Close()
+			return errors.New("fleet-config source contains a special file")
+		}
+		data, readErr := io.ReadAll(io.LimitReader(file, MaxFileBytes+1))
+		_ = file.Close()
+		if readErr != nil {
+			return errors.New("fleet-config source walk failed")
+		}
+		if int64(len(data)) != info.Size() || int64(len(data)) != opened.Size() {
 			return errors.New("fleet-config source file changed during read")
 		}
 		files = append(files, File{Path: slash, Data: data})

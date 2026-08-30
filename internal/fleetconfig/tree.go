@@ -1,3 +1,4 @@
+// Package fleetconfig validates and materializes data-only fleet agent configuration.
 package fleetconfig
 
 import "sort"
@@ -39,23 +40,24 @@ type ManifestFile struct {
 
 // Release is a content-addressed, data-only fleet-config archive plus manifest.
 type Release struct {
-	Schema              int
-	SourceCommit        string
-	Digest              string
-	Archive             []byte
-	Files               []ManifestFile
-	SkillCount          int
-	TotalBytes          int64
-	DataOnly            bool
-	ActivationCommands  int
-	Destinations        []string
+	Schema             int
+	SourceCommit       string
+	Digest             string
+	Archive            []byte
+	Files              []ManifestFile
+	SkillCount         int
+	TotalBytes         int64
+	DataOnly           bool
+	ActivationCommands int
+	Destinations       []string
 }
 
-// SkillCount counts SKILL.md files in the tree.
+// SkillCount counts validated skill roots (SKILL.md at the skill directory).
 func (tree Tree) SkillCount() int {
 	count := 0
 	for _, file := range tree.Files {
-		if isSkillMarkdown(file.Path) {
+		kind, err := classifyPath(file.Path)
+		if err == nil && kind.class == pathSkillMarkdown {
 			count++
 		}
 	}
@@ -91,10 +93,6 @@ func indexOf(values []string, want string) (int, bool) {
 		}
 	}
 	return 0, false
-}
-
-func isSkillMarkdown(path string) bool {
-	return len(path) >= 9 && path[len(path)-8:] == "SKILL.md" && (path == "SKILL.md" || path[len(path)-9] == '/')
 }
 
 func projectName(path string) (string, bool) {

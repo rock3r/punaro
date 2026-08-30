@@ -11,10 +11,10 @@ const testCommit = "0123456789abcdef0123456789abcdef01234567"
 func TestMaterializeIsDeterministicAndOmitsTrailer(t *testing.T) {
 	t.Parallel()
 	root := writeTree(t, map[string]string{
-		"AGENTS.md":                  "# fleet\n",
-		"skills/demo/SKILL.md":       skillMarkdown("demo", "A bounded demo skill."),
+		"AGENTS.md":                    "# fleet\n",
+		"skills/demo/SKILL.md":         skillMarkdown("demo", "A bounded demo skill."),
 		"skills/demo/scripts/hint.txt": "data only\n",
-		"projects/punaro/AGENTS.md":  "# punaro\n",
+		"projects/punaro/AGENTS.md":    "# punaro\n",
 	})
 	tree, err := InspectRoot(root)
 	if err != nil {
