@@ -29,3 +29,5 @@
 !deploy/systemd/
 !deploy/systemd/user/
 !deploy/systemd/user/punaro-adapter.service
+!deploy/compose/
+!deploy/compose/postgres-bootstrap.sh

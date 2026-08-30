@@ -1,6 +1,8 @@
 package postgres
 
 import (
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 )
@@ -49,6 +51,70 @@ func TestClassifySchemaState(t *testing.T) {
 				t.Fatalf("Classify() = %s, want %s", got.Classification, tt.want)
 			}
 		})
+	}
+}
+
+func TestOwnedSchemaNamesIncludeFleet(t *testing.T) {
+	found := false
+	for _, name := range ownedSchemaNames {
+		if name == "fleet" {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Fatal("inspect owned-schema list omits fleet")
+	}
+	if len(ownedSchemaNames) < 7 {
+		t.Fatalf("owned schema count=%d, want at least the original six plus fleet", len(ownedSchemaNames))
+	}
+}
+
+func TestProductionBootstrapAllowlistIncludesFleet(t *testing.T) {
+	body, err := os.ReadFile(filepath.Join("..", "..", "deploy", "compose", "postgres-bootstrap.sh"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	text := string(body)
+	for _, needle := range []string{
+		"'auth', 'relay', 'attachment', 'brain', 'audit', 'jobs', 'public'",
+		"'auth', 'relay', 'attachment', 'brain', 'audit', 'jobs', 'public', 'information_schema'",
+	} {
+		if strings.Contains(text, needle) {
+			t.Fatalf("bootstrap still treats Punaro schemas without fleet: %s", needle)
+		}
+	}
+	if !strings.Contains(text, "'fleet'") {
+		t.Fatal("bootstrap allowlist omits fleet")
+	}
+}
+
+func TestPostgresIntegrationImageIncludesFleetBootstrapAndGit(t *testing.T) {
+	dockerfile, err := os.ReadFile(filepath.Join("..", "..", "Dockerfile")) // #nosec G304 -- test reads the checked-out postgres-test Dockerfile.
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, expected := range []string{
+		"COPY deploy/compose/postgres-bootstrap.sh ./deploy/compose/",
+		"git=2.54.0-r0",
+	} {
+		if !strings.Contains(string(dockerfile), expected) {
+			t.Fatalf("postgres-test image omits %s", expected)
+		}
+	}
+	ignored, err := os.ReadFile(filepath.Join("..", "..", ".dockerignore")) // #nosec G304 -- test reads the checked-out build-context policy.
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(ignored), "!deploy/compose/postgres-bootstrap.sh") {
+		t.Fatal("build context excludes postgres-bootstrap.sh")
+	}
+	compose, err := os.ReadFile(filepath.Join("..", "..", "docker-compose.postgres-test.yml")) // #nosec G304 -- test reads the checked-out postgres-test Compose manifest.
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(compose), "target: build") {
+		t.Fatal("postgres-tests does not run the image stage that holds source, git, and bootstrap")
 	}
 }
 
