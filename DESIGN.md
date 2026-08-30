@@ -668,6 +668,12 @@ without merging fleet-prefix edits, matches project names only as top-level
 directories under a configured base path (or an explicit override), and keeps
 last-known-good on failed activation. Concurrent reconcile is serialized.
 
+Harness projection installs only Punaro-managed `AGENTS.md` and skills.
+Opt-in Claude aliases are POSIX symlinks; Windows uses `os.Symlink` or fails
+closed without copying. Unmanaged Claude files are never overwritten.
+Activation is reported as immediate, next turn, next session, or restart
+required. Unknown installed harnesses are `unsupported`.
+
 ## Canonical memory model
 
 Canonical memory is project-scoped PostgreSQL authority. Each item has an
