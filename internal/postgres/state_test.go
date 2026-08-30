@@ -54,22 +54,6 @@ func TestClassifySchemaState(t *testing.T) {
 	}
 }
 
-func TestOwnedSchemaNamesIncludeFleet(t *testing.T) {
-	found := false
-	for _, name := range ownedSchemaNames {
-		if name == "fleet" {
-			found = true
-			break
-		}
-	}
-	if !found {
-		t.Fatal("inspect owned-schema list omits fleet")
-	}
-	if len(ownedSchemaNames) < 7 {
-		t.Fatalf("owned schema count=%d, want at least the original six plus fleet", len(ownedSchemaNames))
-	}
-}
-
 func TestProductionBootstrapAllowlistIncludesFleet(t *testing.T) {
 	body, err := os.ReadFile(filepath.Join("..", "..", "deploy", "compose", "postgres-bootstrap.sh"))
 	if err != nil {

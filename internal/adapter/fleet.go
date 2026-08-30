@@ -446,7 +446,7 @@ func aliasState(enabled bool, results map[string]fleetconfig.AliasResult) string
 }
 
 func unsupportedHarness(home string) bool {
-	for _, harness := range fleetconfig.DetectHarnesses(home, nil) {
+	for _, harness := range fleetconfig.DetectHarnesses(home, "", nil) {
 		if harness.State == "unsupported" {
 			return true
 		}
