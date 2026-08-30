@@ -196,7 +196,7 @@ func parseSkillFrontmatter(data []byte) (string, string, error) {
 		if key == "" || strings.ContainsAny(key, " \t") {
 			return "", "", errors.New("missing frontmatter")
 		}
-		if unclosedFlow(value) {
+		if unclosedScalar(value) {
 			return "", "", errors.New("missing frontmatter")
 		}
 		switch key {
@@ -212,11 +212,17 @@ func parseSkillFrontmatter(data []byte) (string, string, error) {
 	return name, description, nil
 }
 
-func unclosedFlow(value string) bool {
+func unclosedScalar(value string) bool {
 	if strings.HasPrefix(value, "[") && !strings.HasSuffix(value, "]") {
 		return true
 	}
 	if strings.HasPrefix(value, "{") && !strings.HasSuffix(value, "}") {
+		return true
+	}
+	if strings.HasPrefix(value, "\"") && !strings.HasSuffix(value, "\"") {
+		return true
+	}
+	if strings.HasPrefix(value, "'") && !strings.HasSuffix(value, "'") {
 		return true
 	}
 	return false

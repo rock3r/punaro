@@ -76,6 +76,20 @@ func TestInspectRootRejectsUnsafeLayout(t *testing.T) {
 			"AGENTS.md":            "# fleet\n",
 			"skills/demo/SKILL.md": "---\nname: demo\ndescription: Demo.\nextra: [\n---\n# Demo\n",
 		}},
+		{"unterminated frontmatter quote", map[string]string{
+			"AGENTS.md":            "# fleet\n",
+			"skills/demo/SKILL.md": "---\nname: demo\ndescription: \"unterminated\n---\n# Demo\n",
+		}},
+		{"windows reserved name", map[string]string{
+			"AGENTS.md":            "# fleet\n",
+			"skills/demo/CON.txt":  "nope\n",
+			"skills/demo/SKILL.md": skillMarkdown("demo", "Demo."),
+		}},
+		{"windows colon name", map[string]string{
+			"AGENTS.md":            "# fleet\n",
+			"skills/demo/a:b.txt":  "nope\n",
+			"skills/demo/SKILL.md": skillMarkdown("demo", "Demo."),
+		}},
 		{"nested project outside projects", map[string]string{
 			"AGENTS.md":               "# fleet\n",
 			"nested/punaro/AGENTS.md": "# nested\n",
@@ -171,6 +185,19 @@ func TestValidateRejectsOversizedAndDuplicateCasePaths(t *testing.T) {
 		{Path: "skills/demo/SKILL.md", Data: []byte(skillMarkdown("demo", "Demo."))},
 		{Path: "skills/Demo/SKILL.md", Data: []byte(skillMarkdown("Demo", "Collision."))},
 	}}
+	if err := Validate(Tree{Files: []File{
+		{Path: "AGENTS.md", Data: []byte("# fleet\n")},
+		{Path: "skills/demo/" + strings.Repeat("a", 120), Data: []byte("too long\n")},
+	}}); err == nil {
+		t.Fatal("accepted USTAR-oversized path")
+	}
+	if err := Validate(Tree{Files: []File{
+		{Path: "AGENTS.md", Data: []byte("# fleet\n")},
+		{Path: "skills/demo/café.txt", Data: []byte("non-ascii\n")},
+	}}); err == nil {
+		t.Fatal("accepted non-ASCII path")
+	}
+
 	if err := Validate(colliding); err == nil {
 		t.Fatal("accepted case-colliding paths")
 	}

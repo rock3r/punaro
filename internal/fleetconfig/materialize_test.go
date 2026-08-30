@@ -34,8 +34,14 @@ func TestMaterializeIsDeterministicAndOmitsTrailer(t *testing.T) {
 	if first.SourceCommit != testCommit || first.SkillCount != 1 || first.TotalBytes == 0 {
 		t.Fatalf("manifest=%#v", first)
 	}
-	if !strings.HasPrefix(first.Digest, "") || len(first.Digest) != 64 {
+	if len(first.Digest) != 64 {
 		t.Fatalf("digest=%q", first.Digest)
+	}
+	for i := 0; i < len(first.Digest); i++ {
+		c := first.Digest[i]
+		if (c < '0' || c > '9') && (c < 'a' || c > 'f') {
+			t.Fatalf("digest=%q", first.Digest)
+		}
 	}
 	if bytes.Contains(first.Archive, []byte(TrailerStart)) || bytes.Contains(first.Archive, []byte(TrailerEnd)) {
 		t.Fatal("trailer text present in published archive")

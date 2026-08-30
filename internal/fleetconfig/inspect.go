@@ -26,6 +26,15 @@ func InspectRoot(root string) (Tree, error) {
 		return Tree{}, errors.New("fleet-config source root is unavailable")
 	}
 	defer func() { _ = scoped.Close() }()
+	dot, err := scoped.Open(".")
+	if err != nil {
+		return Tree{}, errors.New("fleet-config source root is unavailable")
+	}
+	openedRoot, statErr := dot.Stat()
+	_ = dot.Close()
+	if statErr != nil || !os.SameFile(info, openedRoot) {
+		return Tree{}, errors.New("fleet-config source root is unavailable")
+	}
 	var files []File
 	err = fs.WalkDir(scoped.FS(), ".", func(rel string, entry fs.DirEntry, walkErr error) error {
 		if walkErr != nil {
@@ -93,11 +102,39 @@ func canonicalPath(path string) (string, error) {
 	if path == "" || strings.Contains(path, "\\") || strings.ContainsRune(path, 0) || strings.HasPrefix(path, "/") {
 		return "", errors.New("fleet-config path is invalid")
 	}
+	if len(path) > 100 {
+		return "", errors.New("fleet-config path is invalid")
+	}
+	for i := 0; i < len(path); i++ {
+		if path[i] > 127 {
+			return "", errors.New("fleet-config path is invalid")
+		}
+	}
 	parts := strings.Split(path, "/")
 	for _, part := range parts {
-		if part == "" || part == "." || part == ".." {
+		if part == "" || part == "." || part == ".." || !windowsSafeName(part) {
 			return "", errors.New("fleet-config path is invalid")
 		}
 	}
 	return path, nil
+}
+
+func windowsSafeName(part string) bool {
+	if strings.HasSuffix(part, " ") || strings.HasSuffix(part, ".") {
+		return false
+	}
+	if strings.ContainsAny(part, `<>:"|?*`) {
+		return false
+	}
+	base := strings.ToUpper(part)
+	if i := strings.IndexByte(base, '.'); i >= 0 {
+		base = base[:i]
+	}
+	switch base {
+	case "CON", "PRN", "AUX", "NUL",
+		"COM1", "COM2", "COM3", "COM4", "COM5", "COM6", "COM7", "COM8", "COM9",
+		"LPT1", "LPT2", "LPT3", "LPT4", "LPT5", "LPT6", "LPT7", "LPT8", "LPT9":
+		return false
+	}
+	return true
 }
