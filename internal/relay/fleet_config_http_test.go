@@ -298,6 +298,36 @@ func TestBroadcastFleetWakeUsesReservedTopic(t *testing.T) {
 	}
 }
 
+func TestWatchFleetDesiredBroadcastsGenerationBump(t *testing.T) {
+	t.Parallel()
+	store := &memoryFleetStore{desired: FleetDesiredMetadata{Generation: 1, Digest: "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"}}
+	notifier := NewNotifier()
+	client := notifier.Register("machine-a")
+	t.Cleanup(client.Close)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go WatchFleetDesired(ctx, store, notifier, 20*time.Millisecond)
+	select {
+	case event := <-client.Events():
+		if event.TopicID != FleetConfigTopic || event.Sequence != 1 || event.Type != "wake" {
+			t.Fatalf("event=%#v", event)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("missed initial fleet-config wake")
+	}
+	store.mu.Lock()
+	store.desired.Generation = 3
+	store.mu.Unlock()
+	select {
+	case event := <-client.Events():
+		if event.TopicID != FleetConfigTopic || event.Sequence != 3 {
+			t.Fatalf("bump=%#v", event)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("missed fleet-config generation bump")
+	}
+}
+
 func serveUnsigned(t *testing.T, handler http.Handler, method, path, body string) *httptest.ResponseRecorder {
 	t.Helper()
 	request := httptest.NewRequestWithContext(context.Background(), method, path, bytes.NewBufferString(body))

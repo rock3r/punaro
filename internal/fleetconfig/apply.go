@@ -11,9 +11,10 @@ import (
 
 // ApplyState is persisted next to the live tree without configuration contents.
 type ApplyState struct {
-	Digest         string            `json:"digest"`
-	PrefixDigests  map[string]string `json:"prefix_digests,omitempty"`
-	LastGoodDigest string            `json:"last_good_digest,omitempty"`
+	Digest           string            `json:"digest"`
+	PrefixDigests    map[string]string `json:"prefix_digests,omitempty"`
+	LastGoodDigest   string            `json:"last_good_digest,omitempty"`
+	ReportGeneration int64             `json:"report_generation,omitempty"`
 }
 
 var reconcileMu sync.Mutex

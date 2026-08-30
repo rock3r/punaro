@@ -785,6 +785,7 @@ func unavailableServerDoctorChecks(gatewayColocated bool) []punarodiagnostic.Che
 	for _, code := range codes {
 		checks = append(checks, punarodiagnostic.Unavailable(code, "repair_installation_configuration"))
 	}
+	checks = append(checks, punarodiagnostic.FleetConfigChecks("", nil)...)
 	checks = appendServerGatewayChecks(checks, serverDoctorState{}, gatewayColocated)
 	return checks
 }
@@ -936,6 +937,22 @@ func diagnoseServer(ctx context.Context, installation operator.Installation, mac
 		checks = append(checks, punarodiagnostic.Fail("readiness_endpoint", "repair_server_readiness"))
 	} else {
 		checks = append(checks, punarodiagnostic.Pass("readiness_endpoint"))
+	}
+
+	if state.Version >= 58 {
+		desiredDigest := ""
+		if desired, err := loadFleetDesired(ctx, installation.OwnerDSNFile); err == nil {
+			desiredDigest = desired.Digest
+		}
+		var clientStates []string
+		if clients, err := loadFleetClients(ctx, installation.OwnerDSNFile); err == nil {
+			for _, client := range clients {
+				clientStates = append(clientStates, client.State)
+			}
+		}
+		checks = append(checks, punarodiagnostic.FleetConfigChecks(desiredDigest, clientStates)...)
+	} else {
+		checks = append(checks, punarodiagnostic.FleetConfigChecks("schema-below-fleet-config", nil)...)
 	}
 
 	return punarodiagnostic.NewComponentReport(punarodiagnostic.ComponentServer, identity, checks)

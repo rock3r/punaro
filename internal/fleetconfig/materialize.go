@@ -7,6 +7,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"errors"
+	"io"
 	"sort"
 	"strconv"
 	"strings"
@@ -107,6 +108,60 @@ func writeArchive(files []File) ([]byte, error) {
 		return nil, errors.New("fleet-config archive failed")
 	}
 	return raw.Bytes(), nil
+}
+
+const maxArchiveBytes = 8 << 20
+
+// ReadArchive unpacks a deterministic gzip+tar release into a validated tree.
+func ReadArchive(archive []byte) (Tree, error) {
+	if len(archive) == 0 || len(archive) > maxArchiveBytes {
+		return Tree{}, errors.New("fleet-config archive is invalid")
+	}
+	gzipReader, err := gzip.NewReader(bytes.NewReader(archive))
+	if err != nil {
+		return Tree{}, errors.New("fleet-config archive is invalid")
+	}
+	defer func() { _ = gzipReader.Close() }()
+	tarReader := tar.NewReader(gzipReader)
+	var files []File
+	var total int64
+	for {
+		header, err := tarReader.Next()
+		if errors.Is(err, io.EOF) {
+			break
+		}
+		if err != nil {
+			return Tree{}, errors.New("fleet-config archive is invalid")
+		}
+		switch header.Typeflag {
+		case tar.TypeDir:
+			continue
+		case tar.TypeReg:
+		default:
+			return Tree{}, errors.New("fleet-config archive contains a special file")
+		}
+		path, err := canonicalPath(header.Name)
+		if err != nil {
+			return Tree{}, errors.New("fleet-config archive path is invalid")
+		}
+		if header.Size < 0 || header.Size > MaxFileBytes {
+			return Tree{}, errors.New("fleet-config file is too large")
+		}
+		data, err := io.ReadAll(io.LimitReader(tarReader, header.Size+1))
+		if err != nil || int64(len(data)) != header.Size {
+			return Tree{}, errors.New("fleet-config archive is invalid")
+		}
+		total += int64(len(data))
+		if total > MaxTotalBytes || len(files) >= MaxFiles {
+			return Tree{}, errors.New("fleet-config source is too large")
+		}
+		files = append(files, File{Path: path, Data: data})
+	}
+	tree := Tree{Files: files}
+	if err := Validate(tree); err != nil {
+		return Tree{}, err
+	}
+	return tree, nil
 }
 
 func archiveDirectories(files []File) []string {

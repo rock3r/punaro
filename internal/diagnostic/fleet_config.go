@@ -14,7 +14,7 @@ func FleetConfigChecks(desiredDigest string, clientStates []string) []Check {
 			drifted = true
 		case "unsupported":
 			unsupported = true
-		case "offline", "pending":
+		case "offline":
 			stale = true
 		}
 	}

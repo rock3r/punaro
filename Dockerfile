@@ -1,5 +1,5 @@
 FROM golang:1.26-alpine@sha256:1a9c10cf505a9e6b1e96ea77ebdbfe79a0f10380181faf88bc3b51d7e4315fae AS build
-RUN apk add --no-cache postgresql18-client=18.6-r0
+RUN apk add --no-cache postgresql18-client=18.6-r0 git=2.54.0-r0
 WORKDIR /src
 ARG PUNARO_RELEASE
 ARG PUNARO_SEQUENCE
@@ -23,6 +23,7 @@ COPY Dockerfile .dockerignore docker-compose.memory-onboarding-e2e.yml ./
 COPY scripts/install-client.sh scripts/install-adapter.sh ./scripts/
 COPY scripts/verify-deployment-files.sh ./scripts/
 COPY deploy/systemd/user/punaro-adapter.service ./deploy/systemd/user/
+COPY deploy/compose/postgres-bootstrap.sh ./deploy/compose/
 RUN mkdir -p /home/punaro/tmp \
  && chown 65532:65532 /home/punaro /home/punaro/tmp \
  && chmod 700 /home/punaro /home/punaro/tmp

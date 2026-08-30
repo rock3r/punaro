@@ -46,6 +46,9 @@ func CreateAlias(targetPath, linkPath string, enabled bool) (AliasResult, error)
 	} else if !errors.Is(err, os.ErrNotExist) {
 		return AliasResult{State: "unsupported"}, err
 	}
+	if err := os.MkdirAll(filepath.Dir(linkPath), 0o700); err != nil {
+		return AliasResult{State: "unsupported"}, err
+	}
 	if err := createAliasLink(targetPath, linkPath); err != nil {
 		return AliasResult{State: "unsupported"}, err
 	}

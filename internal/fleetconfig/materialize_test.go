@@ -1,9 +1,12 @@
 package fleetconfig
 
 import (
+	"archive/tar"
 	"bytes"
+	"compress/gzip"
 	"strings"
 	"testing"
+	"time"
 )
 
 const testCommit = "0123456789abcdef0123456789abcdef01234567"
@@ -103,5 +106,48 @@ func TestMaterializeArchivesHundredByteDirectory(t *testing.T) {
 	}}
 	if _, err := Materialize(tree, testCommit); err != nil {
 		t.Fatal(err)
+	}
+}
+
+func TestReadArchiveRoundTripsMaterialize(t *testing.T) {
+	t.Parallel()
+	tree := Tree{Files: []File{
+		{Path: "AGENTS.md", Data: []byte("# fleet\n")},
+		{Path: "skills/demo/SKILL.md", Data: []byte(skillMarkdown("demo", "Demo skill."))},
+		{Path: "projects/punaro/AGENTS.md", Data: []byte("# punaro\n")},
+	}}
+	release, err := Materialize(tree, testCommit)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got, err := ReadArchive(release.Archive)
+	if err != nil {
+		t.Fatal(err)
+	}
+	again, err := Materialize(got, testCommit)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if again.Digest != release.Digest {
+		t.Fatalf("unpacked digest=%s want %s", again.Digest, release.Digest)
+	}
+}
+
+func TestReadArchiveRejectsSymlink(t *testing.T) {
+	t.Parallel()
+	var raw bytes.Buffer
+	gzipWriter := gzip.NewWriter(&raw)
+	tarWriter := tar.NewWriter(gzipWriter)
+	if err := tarWriter.WriteHeader(&tar.Header{Typeflag: tar.TypeSymlink, Name: "AGENTS.md", Linkname: "/etc/passwd", Mode: 0o644, ModTime: time.Unix(0, 0).UTC(), Format: tar.FormatUSTAR}); err != nil {
+		t.Fatal(err)
+	}
+	if err := tarWriter.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if err := gzipWriter.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := ReadArchive(raw.Bytes()); err == nil {
+		t.Fatal("accepted a symlink archive entry")
 	}
 }
