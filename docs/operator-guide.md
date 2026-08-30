@@ -209,7 +209,7 @@ consume the mail budget indefinitely.
 
 SQLite remains the default active relay. Maintainers may explicitly select an
 empty PostgreSQL relay with `PUNARO_RELAY_STORE=postgres` only after completing
-the supported update through the exact current schema (currently v57). This selector does not import the SQLite file,
+the supported update through the exact current schema (currently v58). This selector does not import the SQLite file,
 does not dual-write, and is incompatible with the superseded directory and
 attachment routes. Do not point an established installation at an empty
 PostgreSQL relay as a migration shortcut; the verified one-shot mail cutover is
@@ -219,7 +219,7 @@ again while retaining both stores unchanged.
 ### One-shot mail cutover
 
 First complete the supported update through the exact current schema (currently
-v57); the preview and execution both fail closed on any runtime-compatible older schema before
+v58); the preview and execution both fail closed on any runtime-compatible older schema before
 inspecting or preparing SQLite. Then stop ordinary operator changes, confirm every intended legacy machine is
 `migrated` or explicitly `retired`, and run the read-only preview:
 

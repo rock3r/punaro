@@ -146,7 +146,7 @@ func runFleetConfigPublish(args []string, stdout, stderr io.Writer) int {
 		_, _ = fmt.Fprintln(stderr, "fleet-config publish refused: confirmed preview hash does not match")
 		return 3
 	}
-	published, err := persistFleetRelease(context.Background(), installation.OwnerDSNFile, release, previewHash)
+	published, err := persistFleetRelease(context.Background(), installation.OwnerDSNFile, release, previewHash, desired)
 	if err != nil {
 		_, _ = fmt.Fprintln(stderr, "fleet-config publish failed; prior desired revision is unchanged")
 		return 1
@@ -231,26 +231,29 @@ func materializeFleetCommitFromGit(repository, commit string) (fleetconfig.Relea
 	if _, err := fleetconfig.ParseCommitID(commit); err != nil {
 		return fleetconfig.Release{}, err
 	}
-	kind := exec.Command("git", "-C", repository, "cat-file", "-t", commit) // #nosec G204 -- fixed git argv, commit already parsed.
+	kind := exec.CommandContext(context.Background(), "git", "-C", repository, "cat-file", "-t", commit) // #nosec G204 -- fixed git argv, commit already parsed.
 	kind.Stderr = io.Discard
 	out, err := kind.Output()
 	if err != nil || strings.TrimSpace(string(out)) != "commit" {
 		return fleetconfig.Release{}, errors.New("commit is unavailable")
+	}
+	if err := boundFleetGitTree(repository, commit); err != nil {
+		return fleetconfig.Release{}, err
 	}
 	dest, err := os.MkdirTemp("", "punaro-fleet-config-")
 	if err != nil {
 		return fleetconfig.Release{}, errors.New("fleet-config checkout failed")
 	}
 	defer func() { _ = os.RemoveAll(dest) }()
-	archive := exec.Command("git", "-C", repository, "archive", commit) // #nosec G204 -- fixed git argv, commit already parsed.
+	archive := exec.CommandContext(context.Background(), "git", "-C", repository, "archive", commit) // #nosec G204 -- fixed git argv, commit already parsed.
 	archive.Stderr = io.Discard
-	extract := exec.Command("tar", "-x", "-C", dest) // #nosec G204 -- fixed tar argv, dest is MkdirTemp.
+	extract := exec.CommandContext(context.Background(), "tar", "-x", "-C", dest) // #nosec G204 -- fixed tar argv, dest is MkdirTemp.
 	extract.Stderr = io.Discard
 	pipe, err := archive.StdoutPipe()
 	if err != nil {
 		return fleetconfig.Release{}, errors.New("fleet-config checkout failed")
 	}
-	extract.Stdin = pipe
+	extract.Stdin = io.LimitReader(pipe, 8<<20+1)
 	if err := archive.Start(); err != nil {
 		return fleetconfig.Release{}, errors.New("fleet-config checkout failed")
 	}
@@ -273,13 +276,50 @@ func materializeFleetCommitFromGit(repository, commit string) (fleetconfig.Relea
 	return fleetconfig.Materialize(tree, commit)
 }
 
-func persistFleetReleaseDefault(ctx context.Context, ownerDSNFile string, release fleetconfig.Release, previewHash string) (punaropostgres.FleetDesired, error) {
+func persistFleetReleaseDefault(ctx context.Context, ownerDSNFile string, release fleetconfig.Release, previewHash string, expected punaropostgres.FleetDesired) (punaropostgres.FleetDesired, error) {
 	admin, err := punaropostgres.OpenAdministration(ctx, punaropostgres.Config{DSNFile: ownerDSNFile})
 	if err != nil {
 		return punaropostgres.FleetDesired{}, err
 	}
 	defer func() { _ = admin.Close() }()
-	return admin.PublishFleetRelease(ctx, release, previewHash)
+	return admin.PublishFleetRelease(ctx, release, previewHash, expected)
+}
+
+func boundFleetGitTree(repository, commit string) error {
+	listed := exec.CommandContext(context.Background(), "git", "-C", repository, "ls-tree", "-r", "-l", "--full-tree", commit) // #nosec G204 -- fixed git argv, commit already parsed.
+	listed.Stderr = io.Discard
+	out, err := listed.Output()
+	if err != nil {
+		return errors.New("commit is unavailable")
+	}
+	var files int
+	var total int64
+	for _, line := range strings.Split(strings.TrimRight(string(out), "\n"), "\n") {
+		if line == "" {
+			continue
+		}
+		meta, _, ok := strings.Cut(line, "\t")
+		if !ok {
+			return errors.New("fleet-config git tree is too large")
+		}
+		fields := strings.Fields(meta)
+		if len(fields) < 4 || fields[1] != "blob" {
+			continue
+		}
+		size, err := strconv.ParseInt(fields[3], 10, 64)
+		if err != nil || size < 0 || size > fleetconfig.MaxFileBytes {
+			return errors.New("fleet-config git tree is too large")
+		}
+		files++
+		total += size
+		if files > fleetconfig.MaxFiles || total > fleetconfig.MaxTotalBytes {
+			return errors.New("fleet-config git tree is too large")
+		}
+	}
+	if files < 1 || total < 1 {
+		return errors.New("fleet-config git tree is too large")
+	}
+	return nil
 }
 
 func loadFleetDesiredDefault(ctx context.Context, ownerDSNFile string) (punaropostgres.FleetDesired, error) {

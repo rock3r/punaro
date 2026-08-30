@@ -21,7 +21,7 @@ func TestFleetConfigPublishRejectsBranchAndLeavesDesiredUnchanged(t *testing.T) 
 	preserveFleetConfig(t)
 	directory := testInstallation(t)
 	published := false
-	persistFleetRelease = func(context.Context, string, fleetconfig.Release, string) (punaropostgres.FleetDesired, error) {
+	persistFleetRelease = func(context.Context, string, fleetconfig.Release, string, punaropostgres.FleetDesired) (punaropostgres.FleetDesired, error) {
 		published = true
 		return punaropostgres.FleetDesired{}, errors.New("should not publish")
 	}
@@ -43,7 +43,7 @@ func TestFleetConfigPublishPreviewIncludesContractFields(t *testing.T) {
 	loadFleetDesired = func(context.Context, string) (punaropostgres.FleetDesired, error) {
 		return punaropostgres.FleetDesired{Digest: "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb", Generation: 2, SourceCommit: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}, nil
 	}
-	persistFleetRelease = func(context.Context, string, fleetconfig.Release, string) (punaropostgres.FleetDesired, error) {
+	persistFleetRelease = func(context.Context, string, fleetconfig.Release, string, punaropostgres.FleetDesired) (punaropostgres.FleetDesired, error) {
 		t.Fatal("preview must not persist")
 		return punaropostgres.FleetDesired{}, nil
 	}
@@ -78,7 +78,7 @@ func TestFleetConfigPublishFailedMaterializeLeavesDesiredUnchanged(t *testing.T)
 		return fleetconfig.Release{}, errors.New("invalid source")
 	}
 	published := false
-	persistFleetRelease = func(context.Context, string, fleetconfig.Release, string) (punaropostgres.FleetDesired, error) {
+	persistFleetRelease = func(context.Context, string, fleetconfig.Release, string, punaropostgres.FleetDesired) (punaropostgres.FleetDesired, error) {
 		published = true
 		return punaropostgres.FleetDesired{}, nil
 	}
@@ -138,6 +138,79 @@ func TestFleetConfigPublishRetryIsIdempotentAndRollbackRepublishes(t *testing.T)
 	}
 	if store.desiredState.Digest != first.Digest || store.desiredState.Generation != 3 {
 		t.Fatalf("rollback desired=%#v", store.desiredState)
+	}
+}
+
+func TestFleetConfigPublishRejectsOversizedGitBlob(t *testing.T) {
+	preserveFleetConfig(t)
+	directory := testInstallation(t)
+	repo := writeGitSource(t)
+	huge := filepath.Join(repo, "skills", "demo", "huge.bin")
+	if err := os.WriteFile(huge, bytes.Repeat([]byte("a"), fleetconfig.MaxFileBytes+1), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	for _, args := range [][]string{
+		{"add", "skills/demo/huge.bin"},
+		{"commit", "-m", "too large", "--no-gpg-sign"},
+	} {
+		cmd := exec.CommandContext(t.Context(), "git", args...) // #nosec G204 -- fixed git binary, test-controlled argv.
+		cmd.Dir = repo
+		cmd.Env = append(os.Environ(), "GIT_CONFIG_NOSYSTEM=1")
+		if out, err := cmd.CombinedOutput(); err != nil {
+			t.Fatalf("git %v: %v %s", args, err, out)
+		}
+	}
+	if code := run([]string{"fleet-config", "configure", "--directory", directory, "--repository", repo, "--yes"}, bytes.NewBuffer(nil), bytes.NewBuffer(nil)); code != 0 {
+		t.Fatalf("configure code=%d", code)
+	}
+	commit := gitHead(t, repo)
+	if _, err := materializeFleetCommitFromGit(repo, commit); err == nil || err.Error() != "fleet-config git tree is too large" {
+		t.Fatalf("git bound=%v", err)
+	}
+	materializeFleetCommit = materializeFleetCommitFromGit
+	published := false
+	persistFleetRelease = func(context.Context, string, fleetconfig.Release, string, punaropostgres.FleetDesired) (punaropostgres.FleetDesired, error) {
+		published = true
+		return punaropostgres.FleetDesired{}, nil
+	}
+	loadFleetDesired = func(context.Context, string) (punaropostgres.FleetDesired, error) {
+		return punaropostgres.FleetDesired{}, nil
+	}
+	var stdout, stderr bytes.Buffer
+	if code := run([]string{"fleet-config", "publish", "--directory", directory, "--yes", "--confirm-preview-hash", "deadbeef", commit}, &stdout, &stderr); code != 1 || published {
+		t.Fatalf("code=%d published=%t stdout=%s stderr=%s", code, published, stdout.String(), stderr.String())
+	}
+}
+
+func TestFleetConfigPublishRejectsStalePreview(t *testing.T) {
+	preserveFleetConfig(t)
+	directory := testInstallation(t)
+	writeFleetSource(t, directory)
+	release := testRelease()
+	materializeFleetCommit = func(string, string) (fleetconfig.Release, error) { return release, nil }
+	stale := punaropostgres.FleetDesired{
+		Digest:     "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+		Generation: 1,
+	}
+	current := punaropostgres.FleetDesired{
+		Digest:     "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+		Generation: 2,
+	}
+	loadFleetDesired = func(context.Context, string) (punaropostgres.FleetDesired, error) {
+		return stale, nil
+	}
+	published := false
+	persistFleetRelease = func(_ context.Context, _ string, _ fleetconfig.Release, _ string, expected punaropostgres.FleetDesired) (punaropostgres.FleetDesired, error) {
+		if expected.Digest != current.Digest || expected.Generation != current.Generation {
+			return punaropostgres.FleetDesired{}, errors.New("fleet-config preview is stale")
+		}
+		published = true
+		return current, nil
+	}
+	hash := fleetPublishPreviewHash(release, stale)
+	var stdout, stderr bytes.Buffer
+	if code := run([]string{"fleet-config", "publish", "--directory", directory, "--yes", "--confirm-preview-hash", hash, testPublishCommit}, &stdout, &stderr); code != 1 || published {
+		t.Fatalf("code=%d published=%t stdout=%s stderr=%s", code, published, stdout.String(), stderr.String())
 	}
 }
 
@@ -205,7 +278,10 @@ func (store *memoryFleetStore) desired(context.Context, string) (punaropostgres.
 	return store.desiredState, nil
 }
 
-func (store *memoryFleetStore) publish(_ context.Context, _ string, release fleetconfig.Release, _ string) (punaropostgres.FleetDesired, error) {
+func (store *memoryFleetStore) publish(_ context.Context, _ string, release fleetconfig.Release, _ string, expected punaropostgres.FleetDesired) (punaropostgres.FleetDesired, error) {
+	if expected.Digest != store.desiredState.Digest || expected.Generation != store.desiredState.Generation {
+		return punaropostgres.FleetDesired{}, errors.New("fleet-config preview is stale")
+	}
 	store.publishes++
 	if store.desiredState.Digest == release.Digest && store.desiredState.Generation > 0 {
 		return store.desiredState, nil
@@ -250,7 +326,7 @@ func writeGitSource(t *testing.T) string {
 		{"add", "."},
 		{"commit", "-m", "source", "--no-gpg-sign"},
 	} {
-		cmd := exec.Command("git", args...)
+		cmd := exec.CommandContext(t.Context(), "git", args...) // #nosec G204 -- fixed git binary, test-controlled argv.
 		cmd.Dir = repo
 		cmd.Env = append(os.Environ(), "GIT_CONFIG_NOSYSTEM=1")
 		if out, err := cmd.CombinedOutput(); err != nil {
@@ -262,7 +338,7 @@ func writeGitSource(t *testing.T) string {
 
 func gitHead(t *testing.T, repo string) string {
 	t.Helper()
-	cmd := exec.Command("git", "-C", repo, "rev-parse", "HEAD")
+	cmd := exec.CommandContext(t.Context(), "git", "-C", repo, "rev-parse", "HEAD") // #nosec G204 -- fixed git argv.
 	out, err := cmd.Output()
 	if err != nil {
 		t.Fatal(err)

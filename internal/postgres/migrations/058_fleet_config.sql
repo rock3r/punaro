@@ -21,6 +21,13 @@ CREATE TABLE fleet.desired (
     preview_hash text NOT NULL CHECK (preview_hash ~ '^[0-9a-f]{64}$')
 );
 
+CREATE TRIGGER application_mutation_fence
+    BEFORE INSERT OR UPDATE OR DELETE ON fleet.releases
+    FOR EACH ROW EXECUTE FUNCTION jobs.guard_application_mutation();
+CREATE TRIGGER application_mutation_fence
+    BEFORE INSERT OR UPDATE OR DELETE ON fleet.desired
+    FOR EACH ROW EXECUTE FUNCTION jobs.guard_application_mutation();
+
 REVOKE ALL ON SCHEMA fleet FROM PUBLIC;
 GRANT USAGE ON SCHEMA fleet TO punaro_app;
 GRANT SELECT ON fleet.releases, fleet.desired TO punaro_app;

@@ -38,14 +38,15 @@ WHERE desired.id`).Scan(&desired.Digest, &desired.SourceCommit, &desired.Generat
 }
 
 // PublishFleetRelease stores the immutable archive first, then sets desired state.
-// An identical digest does not increment generation.
-func (a *Administration) PublishFleetRelease(ctx context.Context, release fleetconfig.Release, previewHash string) (FleetDesired, error) {
-	if a == nil || !release.DataOnly || release.Digest == "" || len(release.Archive) == 0 || previewHash == "" {
+// An identical digest does not increment generation. expected must match the
+// locked singleton (zero when none exists) or publication is rejected as stale.
+func (a *Administration) PublishFleetRelease(ctx context.Context, release fleetconfig.Release, previewHash string, expected FleetDesired) (FleetDesired, error) {
+	if a == nil || a.db == nil || !release.DataOnly || release.Digest == "" || len(release.Archive) == 0 || previewHash == "" {
 		return FleetDesired{}, errors.New("fleet-config release is invalid")
 	}
-	tx, err := a.db.BeginTx(ctx, nil)
+	tx, err := beginMutation(ctx, a.db)
 	if err != nil {
-		return FleetDesired{}, errors.New("fleet-config publication failed")
+		return FleetDesired{}, mutationStartError(err, "fleet-config publication failed")
 	}
 	defer func() { _ = tx.Rollback() }()
 	if _, err := tx.ExecContext(ctx, `
@@ -57,25 +58,33 @@ ON CONFLICT (digest) DO NOTHING`,
 	}
 	var currentDigest string
 	var currentGeneration int64
-	err = tx.QueryRowContext(ctx, `SELECT release_digest, generation FROM fleet.desired WHERE id`).Scan(&currentDigest, &currentGeneration)
+	err = tx.QueryRowContext(ctx, `SELECT release_digest, generation FROM fleet.desired WHERE id FOR UPDATE`).Scan(&currentDigest, &currentGeneration)
 	if err != nil && !errors.Is(err, sql.ErrNoRows) {
 		return FleetDesired{}, errors.New("fleet-config publication failed")
 	}
 	if errors.Is(err, sql.ErrNoRows) {
-		if _, err := tx.ExecContext(ctx, `
+		if expected.Digest != "" || expected.Generation != 0 {
+			return FleetDesired{}, errors.New("fleet-config preview is stale")
+		}
+		if err := tx.QueryRowContext(ctx, `
 INSERT INTO fleet.desired (id, release_digest, generation, preview_hash)
-VALUES (true, $1, 1, $2)`, release.Digest, previewHash); err != nil {
+VALUES (true, $1, 1, $2)
+RETURNING generation`, release.Digest, previewHash).Scan(&currentGeneration); err != nil {
 			return FleetDesired{}, errors.New("fleet-config publication failed")
 		}
-		currentGeneration = 1
-	} else if currentDigest != release.Digest {
-		if _, err := tx.ExecContext(ctx, `
+	} else {
+		if currentDigest != expected.Digest || currentGeneration != expected.Generation {
+			return FleetDesired{}, errors.New("fleet-config preview is stale")
+		}
+		if currentDigest != release.Digest {
+			if err := tx.QueryRowContext(ctx, `
 UPDATE fleet.desired
 SET release_digest = $1, generation = generation + 1, published_at = statement_timestamp(), preview_hash = $2
-WHERE id`, release.Digest, previewHash); err != nil {
-			return FleetDesired{}, errors.New("fleet-config publication failed")
+WHERE id
+RETURNING generation`, release.Digest, previewHash).Scan(&currentGeneration); err != nil {
+				return FleetDesired{}, errors.New("fleet-config publication failed")
+			}
 		}
-		currentGeneration++
 	}
 	if err := tx.Commit(); err != nil {
 		return FleetDesired{}, errors.New("fleet-config publication failed")
