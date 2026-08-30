@@ -26,7 +26,7 @@ func TestReconcileFleetAppliesAtomicallyAndPreservesTrailer(t *testing.T) {
 	if trailers["AGENTS.md"].Collision {
 		t.Fatal("false collision")
 	}
-	got, err := os.ReadFile(filepath.Join(root, "current", "AGENTS.md"))
+	got, err := os.ReadFile(filepath.Join(root, "current", "AGENTS.md")) //nolint:gosec // G304: test fixture under t.TempDir.
 	if err != nil || !strings.Contains(string(got), "# fleet") || !strings.Contains(string(got), "stay") {
 		t.Fatalf("applied=%q err=%v", got, err)
 	}

@@ -13,22 +13,22 @@ func TestPublishTreeIsAtomicAndKeepsLastKnownGood(t *testing.T) {
 	if err := PublishTree(root, map[string][]byte{"AGENTS.md": []byte("# v1\n")}, "d1"); err != nil {
 		t.Fatal(err)
 	}
-	if got, err := os.ReadFile(filepath.Join(root, "current", "AGENTS.md")); err != nil || string(got) != "# v1\n" {
+	if got, err := os.ReadFile(filepath.Join(root, "current", "AGENTS.md")); err != nil || string(got) != "# v1\n" { //nolint:gosec // G304: test fixture under t.TempDir.
 		t.Fatalf("live=%q err=%v", got, err)
 	}
 	if err := PublishTree(root, map[string][]byte{"AGENTS.md": []byte("# v2\n")}, "d2"); err != nil {
 		t.Fatal(err)
 	}
-	if got, err := os.ReadFile(filepath.Join(root, "current", "AGENTS.md")); err != nil || string(got) != "# v2\n" {
+	if got, err := os.ReadFile(filepath.Join(root, "current", "AGENTS.md")); err != nil || string(got) != "# v2\n" { //nolint:gosec // G304: test fixture under t.TempDir.
 		t.Fatalf("updated=%q err=%v", got, err)
 	}
-	if got, err := os.ReadFile(filepath.Join(root, "last-good", "AGENTS.md")); err != nil || string(got) != "# v1\n" {
+	if got, err := os.ReadFile(filepath.Join(root, "last-good", "AGENTS.md")); err != nil || string(got) != "# v1\n" { //nolint:gosec // G304: test fixture under t.TempDir.
 		t.Fatalf("last-good=%q err=%v", got, err)
 	}
 	if err := RestoreLastGood(root); err != nil {
 		t.Fatal(err)
 	}
-	if got, err := os.ReadFile(filepath.Join(root, "current", "AGENTS.md")); err != nil || string(got) != "# v1\n" {
+	if got, err := os.ReadFile(filepath.Join(root, "current", "AGENTS.md")); err != nil || string(got) != "# v1\n" { //nolint:gosec // G304: test fixture under t.TempDir.
 		t.Fatalf("restored=%q err=%v", got, err)
 	}
 }
@@ -42,7 +42,8 @@ func TestPublishTreeSerializesConcurrentReconcile(t *testing.T) {
 		wg.Add(1)
 		go func(n int) {
 			defer wg.Done()
-			body := []byte{byte('A' + n), '\n'}
+			body := []byte("ABCDEFGH")[n : n+1]
+			body = append(body, '\n')
 			errCh <- PublishTree(root, map[string][]byte{"AGENTS.md": body}, "d")
 		}(i)
 	}
@@ -53,8 +54,42 @@ func TestPublishTreeSerializesConcurrentReconcile(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	if _, err := os.ReadFile(filepath.Join(root, "current", "AGENTS.md")); err != nil {
+	if _, err := os.ReadFile(filepath.Join(root, "current", "AGENTS.md")); err != nil { //nolint:gosec // G304: test fixture under t.TempDir.
 		t.Fatal(err)
+	}
+}
+
+func TestPublishTreeRecoversDisplacedLiveFromNext(t *testing.T) {
+	t.Parallel()
+	root := t.TempDir()
+	if err := PublishTree(root, map[string][]byte{"AGENTS.md": []byte("# v1\n")}, "d1"); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Rename(filepath.Join(root, "current"), filepath.Join(root, "last-good.next")); err != nil {
+		t.Fatal(err)
+	}
+	if err := PublishTree(root, map[string][]byte{"AGENTS.md": []byte("# v2\n")}, "d2"); err != nil {
+		t.Fatal(err)
+	}
+	if got, err := os.ReadFile(filepath.Join(root, "current", "AGENTS.md")); err != nil || string(got) != "# v2\n" { //nolint:gosec // G304: test fixture under t.TempDir.
+		t.Fatalf("live=%q err=%v", got, err)
+	}
+	if got, err := os.ReadFile(filepath.Join(root, "last-good", "AGENTS.md")); err != nil || string(got) != "# v1\n" { //nolint:gosec // G304: test fixture under t.TempDir.
+		t.Fatalf("last-good=%q err=%v", got, err)
+	}
+	if _, err := os.Lstat(filepath.Join(root, "last-good.next")); !os.IsNotExist(err) {
+		t.Fatal("left leftover last-good.next")
+	}
+}
+
+func TestPublishTreeCreatesExclusiveLockFile(t *testing.T) {
+	t.Parallel()
+	root := t.TempDir()
+	if err := PublishTree(root, map[string][]byte{"AGENTS.md": []byte("# v1\n")}, "d1"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Lstat(filepath.Join(root, "reconcile.lock")); err != nil {
+		t.Fatalf("missing reconcile.lock: %v", err)
 	}
 }
 

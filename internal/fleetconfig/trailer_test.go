@@ -15,8 +15,7 @@ func TestApplyAgentsCreatesAndPreservesTrailer(t *testing.T) {
 	if !bytes.Contains(created, []byte(TrailerStart)) || !bytes.Contains(created, []byte(TrailerEnd)) {
 		t.Fatalf("missing trailer markers: %s", created)
 	}
-	_, trailer, ok := SplitAgents(created)
-	if !ok {
+	if _, _, ok := SplitAgents(created); !ok {
 		t.Fatal("created file missing trailer")
 	}
 	withLocal := ComposeAgents([]byte("# fleet v1\n"), []byte("\nmachine note\n"))
@@ -24,7 +23,7 @@ func TestApplyAgentsCreatesAndPreservesTrailer(t *testing.T) {
 	if err != nil || result.Collision || result.Drift {
 		t.Fatalf("update result=%#v err=%v", result, err)
 	}
-	_, trailer, ok = SplitAgents(updated)
+	_, trailer, ok := SplitAgents(updated)
 	if !ok || !strings.Contains(string(trailer), "machine note") || !strings.Contains(string(updated), "# fleet v2") {
 		t.Fatalf("trailer lost: %s", updated)
 	}

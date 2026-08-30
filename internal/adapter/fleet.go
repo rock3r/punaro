@@ -12,7 +12,6 @@ func ReconcileFleet(root string, tree fleetconfig.Tree, existing map[string][]by
 		return trailers, nil
 	}
 	if err := fleetconfig.PublishTree(root, files, digest); err != nil {
-		_ = fleetconfig.RestoreLastGood(root)
 		return trailers, err
 	}
 	return trailers, nil

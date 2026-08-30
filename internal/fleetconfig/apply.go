@@ -29,6 +29,11 @@ func PublishTree(root string, files map[string][]byte, digest string) error {
 	if root == "" || digest == "" || len(files) == 0 {
 		return errors.New("fleet-config apply input is invalid")
 	}
+	unlockFile, err := lockReconcile(filepath.Join(root, "reconcile.lock"))
+	if err != nil {
+		return errors.New("fleet-config reconcile lock failed")
+	}
+	defer unlockFile()
 	unlock := ReconcileLock()
 	defer unlock()
 	live := filepath.Join(root, "current")
@@ -47,20 +52,27 @@ func PublishTree(root string, files map[string][]byte, digest string) error {
 			return errors.New("fleet-config staging failed")
 		}
 	}
+	nextGood := lastGood + ".next"
+	if err := recoverPublishSwap(live, lastGood, nextGood); err != nil {
+		return err
+	}
 	if info, err := os.Lstat(live); err == nil {
 		if !info.IsDir() || info.Mode()&os.ModeSymlink != 0 {
 			return errors.New("fleet-config live tree is unsafe")
 		}
-		_ = os.RemoveAll(lastGood)
-		if err := os.Rename(live, lastGood); err != nil {
+		if err := os.Rename(live, nextGood); err != nil {
 			return errors.New("fleet-config last-known-good failed")
 		}
 	}
 	if err := os.Rename(stage, live); err != nil {
-		if _, lastErr := os.Lstat(lastGood); lastErr == nil {
-			_ = os.Rename(lastGood, live)
+		if _, nextErr := os.Lstat(nextGood); nextErr == nil {
+			_ = os.Rename(nextGood, live)
 		}
 		return errors.New("fleet-config apply failed")
+	}
+	if _, err := os.Lstat(nextGood); err == nil {
+		_ = os.RemoveAll(lastGood)
+		_ = os.Rename(nextGood, lastGood)
 	}
 	state := ApplyState{Digest: digest, LastGoodDigest: digest}
 	body, err := json.Marshal(state)
@@ -73,8 +85,39 @@ func PublishTree(root string, files map[string][]byte, digest string) error {
 	return nil
 }
 
+func recoverPublishSwap(live, lastGood, nextGood string) error {
+	liveInfo, liveErr := os.Lstat(live)
+	nextInfo, nextErr := os.Lstat(nextGood)
+	liveOK := liveErr == nil && liveInfo.IsDir() && liveInfo.Mode()&os.ModeSymlink == 0
+	nextOK := nextErr == nil && nextInfo.IsDir() && nextInfo.Mode()&os.ModeSymlink == 0
+	if liveErr == nil && !liveOK {
+		return errors.New("fleet-config live tree is unsafe")
+	}
+	if nextErr == nil && !nextOK {
+		return errors.New("fleet-config last-known-good failed")
+	}
+	if liveErr != nil && nextOK {
+		if err := os.Rename(nextGood, live); err != nil {
+			return errors.New("fleet-config last-known-good failed")
+		}
+		return nil
+	}
+	if liveOK && nextOK {
+		_ = os.RemoveAll(lastGood)
+		if err := os.Rename(nextGood, lastGood); err != nil {
+			return errors.New("fleet-config last-known-good failed")
+		}
+	}
+	return nil
+}
+
 // RestoreLastGood puts the retained tree back after a failed activation.
 func RestoreLastGood(root string) error {
+	unlockFile, err := lockReconcile(filepath.Join(root, "reconcile.lock"))
+	if err != nil {
+		return errors.New("fleet-config reconcile lock failed")
+	}
+	defer unlockFile()
 	unlock := ReconcileLock()
 	defer unlock()
 	live := filepath.Join(root, "current")
