@@ -105,6 +105,16 @@ func canonicalPath(path string) (string, error) {
 	if len(path) > 255 {
 		return "", errors.New("fleet-config path is invalid")
 	}
+	slash := strings.LastIndex(path, "/")
+	name := path
+	prefix := ""
+	if slash >= 0 {
+		name = path[slash+1:]
+		prefix = path[:slash]
+	}
+	if len(name) > 100 || len(prefix) > 155 {
+		return "", errors.New("fleet-config path is invalid")
+	}
 	for i := 0; i < len(path); i++ {
 		if path[i] > 127 {
 			return "", errors.New("fleet-config path is invalid")
@@ -122,6 +132,11 @@ func canonicalPath(path string) (string, error) {
 func windowsSafeName(part string) bool {
 	if strings.HasSuffix(part, " ") || strings.HasSuffix(part, ".") {
 		return false
+	}
+	for i := 0; i < len(part); i++ {
+		if part[i] < 32 {
+			return false
+		}
 	}
 	if strings.ContainsAny(part, `<>:"|?*`) {
 		return false

@@ -188,7 +188,7 @@ func TestValidateRejectsOversizedAndDuplicateCasePaths(t *testing.T) {
 	}}
 	if err := Validate(Tree{Files: []File{
 		{Path: "AGENTS.md", Data: []byte("# fleet\n")},
-		{Path: "skills/demo/" + strings.Repeat("a", 250), Data: []byte("too long\n")},
+		{Path: "skills/demo/" + strings.Repeat("a", 101), Data: []byte("too long\n")},
 	}}); err == nil {
 		t.Fatal("accepted USTAR-oversized path")
 	}
