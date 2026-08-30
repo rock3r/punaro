@@ -6,6 +6,8 @@ import (
 	"net"
 	"net/http"
 	"net/url"
+	"strconv"
+	"strings"
 )
 
 // ValidateOrigin permits HTTPS origins and plaintext only to a literal
@@ -15,6 +17,9 @@ func ValidateOrigin(raw string) error {
 	if err != nil || origin.Host == "" || origin.User != nil || origin.RawQuery != "" || origin.Fragment != "" || (origin.Path != "" && origin.Path != "/") {
 		return errors.New("canopi endpoint must be an origin without credentials, path, query, or fragment")
 	}
+	if err := validatePort(origin); err != nil {
+		return errors.New("canopi endpoint must use a canonical port in range 1-65535")
+	}
 	if origin.Scheme == "https" {
 		return nil
 	}
@@ -23,6 +28,21 @@ func ValidateOrigin(raw string) error {
 		return nil
 	}
 	return errors.New("canopi endpoint must use HTTPS except for a literal loopback address")
+}
+
+func validatePort(origin *url.URL) error {
+	if strings.HasSuffix(origin.Host, ":") {
+		return errors.New("invalid port")
+	}
+	port := origin.Port()
+	if port == "" {
+		return nil
+	}
+	value, err := strconv.ParseUint(port, 10, 16)
+	if err != nil || value == 0 || strconv.FormatUint(value, 10) != port {
+		return errors.New("invalid port")
+	}
+	return nil
 }
 
 // DoWithoutRedirects sends one request without allowing credentials to cross

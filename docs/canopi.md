@@ -112,7 +112,9 @@ with owner-only access (or an equivalent protected current-user ACL on Windows);
 symlinks and files replaced during open are rejected. The collector, Claude
 adapter, and simulator all use this same protected loader. Adapter and simulator
 origins likewise require HTTPS except for HTTP to a literal loopback address,
-and bearer-authenticated requests never follow redirects.
+and bearer-authenticated requests never follow redirects. An explicit origin
+port must be canonical decimal in the range 1-65535; empty, zero, leading-zero,
+and out-of-range ports are rejected instead of falling back to a scheme default.
 
 ## Run the vertical slice
 
