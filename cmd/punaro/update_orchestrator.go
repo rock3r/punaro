@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"errors"
+	"time"
 
 	punaropostgres "github.com/rock3r/punaro/internal/postgres"
 )
@@ -14,6 +15,11 @@ type updateExecution struct {
 }
 
 type updateExecutor interface {
+	ReleaseStartGuard()
+	RevalidateStart(context.Context) error
+	StartTransactionDurable() bool
+	AbortUnpublishedStart(context.Context) error
+	AbortPendingStart(context.Context) error
 	Active(context.Context) (punaropostgres.UpdateTransaction, error)
 	PreflightAndPull(context.Context) error
 	PrepareResume(context.Context, punaropostgres.UpdateTransaction) error
@@ -33,15 +39,38 @@ func executeUpdate(ctx context.Context, execution updateExecution, executor upda
 	if executor == nil || execution.Request.Validate() != nil {
 		return punaropostgres.UpdateTransaction{}, errors.New("update execution is invalid")
 	}
+	defer executor.ReleaseStartGuard()
 	transaction, err := executor.Active(ctx)
 	if errors.Is(err, punaropostgres.ErrNotFound) {
 		if execution.Abort || execution.RecoveryMode != "" {
 			return punaropostgres.UpdateTransaction{}, errors.New("no update transaction is active")
 		}
 		if err := executor.PreflightAndPull(ctx); err != nil {
-			return punaropostgres.UpdateTransaction{}, err
+			return punaropostgres.UpdateTransaction{}, errors.Join(err, executor.AbortUnpublishedStart(ctx))
+		}
+		if err := executor.RevalidateStart(ctx); err != nil {
+			return punaropostgres.UpdateTransaction{}, errors.Join(err, executor.AbortUnpublishedStart(ctx))
 		}
 		transaction, err = executor.Fence(ctx, execution.Request)
+		if err != nil {
+			fenceErr := err
+			reconcileCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), time.Minute)
+			defer cancel()
+			transaction, err = executor.Active(reconcileCtx)
+			switch {
+			case errors.Is(err, punaropostgres.ErrNotFound):
+				return punaropostgres.UpdateTransaction{}, errors.Join(fenceErr, executor.AbortUnpublishedStart(reconcileCtx))
+			case err != nil:
+				return punaropostgres.UpdateTransaction{}, errors.Join(fenceErr, errors.New("update fence outcome could not be reconciled"))
+			case transaction.UpdateRequest != execution.Request:
+				return transaction, errors.Join(fenceErr, errors.New("reconciled update target does not match the requested release"))
+			default:
+				err = nil
+			}
+		}
+		if err == nil && executor.StartTransactionDurable() {
+			executor.ReleaseStartGuard()
+		}
 	}
 	if err != nil {
 		return punaropostgres.UpdateTransaction{}, err
@@ -85,10 +114,22 @@ func executeUpdate(ctx context.Context, execution updateExecution, executor upda
 	for {
 		switch transaction.Phase {
 		case punaropostgres.UpdateFenced:
+			startCommitPending := !executor.StartTransactionDurable()
 			if err := executor.StopWriters(ctx); err != nil {
+				if startCommitPending {
+					return transaction, errors.Join(err, executor.AbortPendingStart(ctx))
+				}
 				return transaction, err
 			}
+			if startCommitPending {
+				if err := executor.RevalidateStart(ctx); err != nil {
+					return transaction, errors.Join(err, executor.AbortPendingStart(ctx))
+				}
+			}
 			transaction, err = executor.Advance(ctx, transaction, punaropostgres.UpdateWritersStopped, nil)
+			if startCommitPending {
+				executor.ReleaseStartGuard()
+			}
 		case punaropostgres.UpdateWritersStopped:
 			var marker punaropostgres.UpdateBackupMarker
 			marker, err = executor.Backup(ctx, transaction)

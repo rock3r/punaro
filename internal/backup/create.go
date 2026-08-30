@@ -49,14 +49,19 @@ type CreateOptions struct {
 	ComposeFile      string
 	OwnerDSNFile     string
 	AppDSNFile       string
-	Now              func() time.Time
-	NewID            func() string
-	Update           *UpdateTarget
+	// ServerCatalogSequence is the effective accepted release-catalog
+	// high-water at backup start. It is content-free security state and is
+	// restored atomically with the installation configuration.
+	ServerCatalogSequence int64
+	Now                   func() time.Time
+	NewID                 func() string
+	Update                *UpdateTarget
 }
 
-// UpdateTarget requests a v2 manifest for one update transaction. Source
-// coordinates are derived from the exported snapshot and cannot be supplied by
-// the caller.
+// UpdateTarget requests update-bound recovery metadata for one transaction.
+// Legacy callers without a catalog high-water produce v2; release-bound callers
+// with a positive ServerCatalogSequence produce v3. Source coordinates are
+// derived from the exported snapshot and cannot be supplied by the caller.
 type UpdateTarget struct {
 	UpdateID          string
 	TargetRelease     string
@@ -66,7 +71,7 @@ type UpdateTarget struct {
 // Create publishes a backup only after its exact snapshot dump, configuration,
 // credentials, and READY blobs all pass size/hash verification.
 func Create(ctx context.Context, options CreateOptions, source Source) (Manifest, string, error) {
-	if source == nil || trustedPrivateDirectory(options.BackupRoot) != nil || !filepath.IsAbs(options.BlobRoot) || filepath.Clean(options.BlobRoot) != options.BlobRoot {
+	if source == nil || options.ServerCatalogSequence < 0 || trustedPrivateDirectory(options.BackupRoot) != nil || !filepath.IsAbs(options.BlobRoot) || filepath.Clean(options.BlobRoot) != options.BlobRoot {
 		return Manifest{}, "", errors.New("backup inputs are unavailable or unsafe")
 	}
 	if options.Now == nil {
@@ -98,7 +103,7 @@ func Create(ctx context.Context, options CreateOptions, source Source) (Manifest
 	if err := validateSnapshot(snapshot); err != nil {
 		return Manifest{}, "", err
 	}
-	manifest := Manifest{Version: 1, BackupID: backupID, CreatedAt: createdAt, SnapshotID: snapshot.ID, SchemaVersion: snapshot.SchemaVersion, State: snapshot.State, ExternalDependencies: []string{"host-tls", "oauth", "reverse-proxy", "telegram", "tunnel"}}
+	manifest := Manifest{Version: 1, BackupID: backupID, CreatedAt: createdAt, SnapshotID: snapshot.ID, SchemaVersion: snapshot.SchemaVersion, State: snapshot.State, ServerCatalogSequence: options.ServerCatalogSequence, ExternalDependencies: []string{"host-tls", "oauth", "reverse-proxy", "telegram", "tunnel"}}
 	if options.Update != nil {
 		manifest.Version = 2
 		manifest.Update = &UpdateMetadata{
@@ -110,6 +115,9 @@ func Create(ctx context.Context, options CreateOptions, source Source) (Manifest
 		if err := validateUpdateMetadata(*manifest.Update); err != nil {
 			return Manifest{}, "", errors.New("backup update target is invalid")
 		}
+	}
+	if options.ServerCatalogSequence > 0 {
+		manifest.Version = 3
 	}
 	if len(snapshot.ReadyBlobs) != 0 && trustedPrivateDirectory(options.BlobRoot) != nil {
 		return Manifest{}, "", errors.New("READY blob root is unavailable or unsafe")

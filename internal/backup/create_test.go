@@ -13,6 +13,7 @@ import (
 
 func TestCreatePublishesOnlyVerifiedSnapshot(t *testing.T) {
 	root, options := createTestInputs(t)
+	options.ServerCatalogSequence = 7
 	blobBody := []byte("immutable ready blob")
 	blobPath := filepath.Join(options.BlobRoot, "sha256", "ready")
 	if err := os.MkdirAll(filepath.Dir(blobPath), 0o700); err != nil {
@@ -55,7 +56,7 @@ func TestCreatePublishesOnlyVerifiedSnapshot(t *testing.T) {
 	if err != nil {
 		t.Fatalf("verify published backup: %v", err)
 	}
-	if verified.BackupID != manifest.BackupID || verified.State != source.snapshot.State {
+	if verified.Version != 3 || verified.BackupID != manifest.BackupID || verified.State != source.snapshot.State || verified.ServerCatalogSequence != 7 {
 		t.Fatalf("published manifest mismatch: %#v", verified)
 	}
 	// #nosec G304 -- fixed child of the private test backup.

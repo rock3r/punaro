@@ -649,10 +649,12 @@ selected immutable blob has been copied, length/digest checked, synchronized,
 and the complete hidden stage verifies. Only then is the backup renamed into
 view. Failures before rename leave no published backup; a parent-directory sync
 failure reports the published path as durability-uncertain so the operator can
-verify it explicitly. A backup contains the custom
-database dump, generated Punaro configuration, both Punaro database credential
-files, and verified READY blobs. Its manifest lists host TLS, proxy/tunnel,
-Telegram, and OAuth state as external dependencies rather than copying them.
+verify it explicitly. A backup contains the custom database dump, generated
+Punaro configuration, both Punaro database credential files, and verified READY
+blobs. Its verified manifest also records the effective accepted release-catalog
+high-water, including a crash-synced pending acceptance. Its manifest lists host
+TLS, proxy/tunnel, Telegram, and OAuth state as external dependencies rather
+than copying them.
 Keep the backup directory private; optional storage encryption and an off-host
 copy are recommended operational controls.
 
@@ -679,29 +681,34 @@ independent receipt written by the failed update before migration:
 ```
 
 Keep that receipt until the update is committed, recovered, or aborted. It is
-deliberately outside the backup; a v2 update backup cannot authorize its own
-restore.
+deliberately outside the backup; neither a legacy v2 nor a catalog-aware v3
+update backup can authorize its own restore.
 
 Restore re-verifies the complete backup before mutation, stages and verifies
 all blobs, restores the database in one `pg_restore` transaction, preserves the
 installation ID, rotates the timeline, and publishes the new data and generated
-configuration only at the end. Each boundary is recorded in a private durable
-journal beside the new data path. If any post-mutation step fails, stop the old
-stack and retry the exact same command: it resumes the bound journal without
-repeating completed database or timeline mutation. Do not delete or edit the
-journal or target paths. Existing targets on a new request, overlaps,
-symlinks, permissive paths, non-pristine databases, identity drift, and an
-unrotated timeline fail closed. Clients observing the new timeline must discard later
-cursors/caches and re-enumerate authoritative state. Optional gateways remain
-not ready until their external dependencies are supplied or re-enrolled.
+configuration only at the end. The backed-up release-catalog high-water is
+staged and published atomically with that configuration, so disaster recovery
+cannot reopen a release retired before the backup. Each boundary is recorded in
+a private durable journal beside the new data path. If any post-mutation step
+fails, stop the old stack and retry the exact same command: it resumes the bound
+journal without repeating completed database or timeline mutation. Do not
+delete or edit the journal or target paths. Existing targets on a new request,
+overlaps, symlinks, permissive paths, non-pristine databases, identity drift,
+and an unrotated timeline fail closed. Clients observing the new timeline must
+discard later cursors/caches and re-enumerate authoritative state. Optional
+gateways remain not ready until their external dependencies are supplied or
+re-enrolled.
 
-Update-created version 2 backups additionally bind the exact update ID, source
-schema and state coordinates, target release/image digest, exported snapshot,
-and raw manifest digest. Before the database accepts that backup marker, the
-host writes a protected receipt outside the backup. Restore requires both and
-binds the receipt path and digest into its resume journal before mutation.
-Restoring one automatically reconstructs the same fenced update transaction on
-the rotated timeline; it does not reopen writes.
+Update-created backups additionally bind the exact update ID, source schema and
+state coordinates, target release/image digest, exported snapshot, and raw
+manifest digest. Legacy update backups are version 2; release-bound updates
+also bind the accepted catalog high-water and are version 3. Before the
+database accepts that backup marker, the host writes a protected receipt
+outside the backup. Restore requires both and binds the receipt path and digest
+into its resume journal before mutation. Restoring one automatically
+reconstructs the same fenced update transaction on the rotated timeline; it
+does not reopen writes.
 Run restore drills and retain a verified off-host copy before admitting
 irreplaceable data.
 
@@ -715,18 +722,60 @@ bundled production PostgreSQL/profile shape remains M-23.
 
 Run the host-side `punaro` wrapper shipped by the target release; its embedded
 migration manifest and generated Compose template are part of the target
-boundary and a source-release wrapper is intentionally rejected. Use the
-target release's published, protected metadata whose `image` is digest-pinned,
-`release_sha256` equals that image digest without the `sha256:` prefix,
-`compose_sha256` matches the generated Compose artifact, and migration-manifest,
-schema-range, rollback-floor, and PostgreSQL-major values match the target
-release. The file must be an absolute private regular file. On the first update
-from an installation without a release-name lock, supply the current release:
+boundary and a source-release wrapper is intentionally rejected. Use the exact
+published `punaro-release.json` and `punaro-release.sig` for the target, the
+fresh live `punaro-catalog.json` and `punaro-catalog.sig`, and the independently
+provisioned `punaro-release.pub` trust root. Copy all five into single-link
+private regular files owned by the invoking operator and reachable only through
+trusted, non-writable ancestors. Before a new transaction, `punaro update`
+verifies the catalog signature and lifetime and requires its exact
+release/sequence/manifest-digest entry to remain allowed. It verifies the
+detached signature over the exact manifest bytes before projecting the
+digest-pinned image, release/image digest, Compose digest, migration-manifest
+digest, schema range, rollback floor, PostgreSQL major, and `supported_from`
+direct-update allowlist. After recovering the current source release from the
+durable transaction, host stage, or explicit first-update argument, it must
+appear in that signed allowlist before any preflight or database fencing. An
+empty allowlist permits initial installation only, not a server update. There is
+no supported unsigned server-metadata projection. On the first update from an
+installation without a release-name lock, supply the current release:
+
+For every new transaction, the updater also durably records the accepted
+catalog sequence in `accepted-server-catalog.json` under the installation
+directory and publishes the durable anti-rollback requirement marker beside
+it. It rejects a catalog older than either that high-water or the catalog
+sequence embedded in the running target-release wrapper. A crash after the
+pending record is synced cannot lower the accepted sequence: the next new start
+reconciles it before authorization. The catalog-acceptance lock stays held
+through preflight and durable transaction creation. On Windows the updater
+also pins the installation directory and its ancestor chain against rename and
+rejects an ancestor that grants unprivileged delete-child or ACL-takeover
+authority. Catalog freshness is rechecked immediately after preflight and
+before fencing, so a slow image pull cannot carry expired authorization into a
+new transaction. A concurrent new start fails closed instead of overtaking an
+already authorized older catalog. Do not edit or remove the accepted, pending,
+or requirement record;
+`release_catalog_acceptance` in server doctor validates this state without
+changing it. Exact durable transaction resumes bypass catalog reauthorization
+and therefore remain recoverable after retirement.
+
+If a process crash leaves an unpublished host stage but no durable database
+transaction, clean it up without target-release or catalog inputs:
+
+```sh
+punaro update --directory INSTALLATION_DIR --abort
+```
+
+This recovery mode trusts only the protected stage journal, takes the normal
+update-start lock, confirms both the exact update ID and the active transaction
+slot are absent, restarts the previous writer when necessary, and then removes
+the stage. It refuses published, mismatched, unreadable, or transaction-backed
+state. Use the full exact update command for any durable transaction.
 
 The supported host-binary handoff starts from one downloaded target-release
 directory containing `punaro-release.json`, `punaro-release.sig`, and every
-native artifact named by that manifest, plus the independently configured
-public release key. First verify the detached manifest signature with the
+native artifact named by that manifest, plus the fresh live catalog/signature
+pair and independently configured public release key. First verify the detached manifest signature with the
 trusted `punaro-release verify` tool, then verify the complete artifact
 directory against that verified manifest with `punaro-release
 verify-artifacts`. Select the matching verified `punaro-linux-ARCH` artifact
@@ -742,7 +791,11 @@ doctor to replace the executable itself.
 ```sh
 punaro update \
   --directory /absolute/private/punaro-installation \
-  --release-metadata /absolute/private/releases/v0.7.0.json \
+  --release-manifest /absolute/private/releases/v0.7.0/punaro-release.json \
+  --release-signature /absolute/private/releases/v0.7.0/punaro-release.sig \
+  --release-catalog /absolute/private/releases/catalog/punaro-catalog.json \
+  --release-catalog-signature /absolute/private/releases/catalog/punaro-catalog.sig \
+  --release-keys-file /absolute/private/trust/punaro-release.pub \
   --source-release v0.6.0
 ```
 
@@ -758,15 +811,24 @@ configuration is published and the database commit reopens writes.
 
 Rerun the exact command after a crash or uncertain external command. It resumes
 the durable PostgreSQL phase and private host journal without repeating completed
-work or requiring another registry pull. Do not edit `.update`, the release
-metadata, database update rows, or the verified backup. A pre-migration failure
+work, requiring another registry pull, or re-authorizing an already-started
+transaction against a later catalog: retirement prevents new starts but cannot
+strand exact recovery. Do not edit `.update`, the signed release files, database
+update rows, or the verified backup. At the one-time schema-5 bridge, an
+unpublished or uncertain writer-stop outcome is reconciled against the exact
+database update ID; if no transaction became durable, Punaro restarts and
+verifies the previous writer before removing the host stage. A pre-migration failure
 may be abandoned only with the same arguments plus `--abort`; the previous
 digest must start and pass doctor before the fence is released:
 
 ```sh
 punaro update \
   --directory /absolute/private/punaro-installation \
-  --release-metadata /absolute/private/releases/v0.7.0.json \
+  --release-manifest /absolute/private/releases/v0.7.0/punaro-release.json \
+  --release-signature /absolute/private/releases/v0.7.0/punaro-release.sig \
+  --release-catalog /absolute/private/releases/catalog/punaro-catalog.json \
+  --release-catalog-signature /absolute/private/releases/catalog/punaro-catalog.sig \
+  --release-keys-file /absolute/private/trust/punaro-release.pub \
   --source-release v0.6.0 \
   --abort
 ```
@@ -782,7 +844,11 @@ resume the reconstructed transaction from the restored installation:
 ```sh
 punaro update \
   --directory /absolute/private/restored-installation \
-  --release-metadata /absolute/private/releases/v0.7.0.json \
+  --release-manifest /absolute/private/releases/v0.7.0/punaro-release.json \
+  --release-signature /absolute/private/releases/v0.7.0/punaro-release.sig \
+  --release-catalog /absolute/private/releases/catalog/punaro-catalog.json \
+  --release-catalog-signature /absolute/private/releases/catalog/punaro-catalog.sig \
+  --release-keys-file /absolute/private/trust/punaro-release.pub \
   --recover restore
 ```
 

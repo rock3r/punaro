@@ -152,6 +152,10 @@ func Init(ctx context.Context, options InitOptions, bootstrap BootstrapOwner) (I
 	if err := os.Mkdir(options.Directory, 0o700); err != nil {
 		return Installation{}, errors.New("installation directory must be new")
 	}
+	if err := protectNewOperatorDirectory(options.Directory); err != nil {
+		_ = os.Remove(options.Directory)
+		return Installation{}, errors.New("installation directory could not be protected")
+	}
 	if err := requireTrustedPrivateDirectory(options.Directory); err != nil {
 		_ = os.Remove(options.Directory)
 		return Installation{}, errors.New("installation directory must have trusted ancestors")
@@ -519,6 +523,9 @@ func writeExclusiveWithPersist(path string, body []byte, persist func(*os.File, 
 		_ = file.Close()
 		_ = os.Remove(temporary)
 	}()
+	if err = protectNewOperatorFile(file); err != nil {
+		return err
+	}
 	if err = persist(file, body); err != nil {
 		return err
 	}
@@ -545,6 +552,27 @@ func requireProtectedFile(path string, maximum int64) error {
 		return errors.New("must be a regular file inaccessible to group and other")
 	}
 	return nil
+}
+
+// RequireTrustedProtectedFile validates an owner-controlled bounded file and
+// its ancestor chain for security-sensitive operator inputs.
+func RequireTrustedProtectedFile(path string, maximum int64) error {
+	return requireTrustedProtectedFile(path, maximum)
+}
+
+// RequireTrustedExternalFile applies the stronger no-alias and platform ACL
+// policy required for operator-supplied trust and release inputs. Internal
+// crash-published state intentionally uses RequireTrustedProtectedFile because
+// its completed inode can temporarily retain a known staging link.
+func RequireTrustedExternalFile(path string, maximum int64) error {
+	return requireTrustedExternalFile(path, maximum)
+}
+
+// OpenTrustedExternalFile opens a bounded operator-supplied input and keeps
+// the validated object pinned for the caller. Platform implementations bind
+// ownership and ACL checks to that same open handle where required.
+func OpenTrustedExternalFile(path string, maximum int64) (*os.File, error) {
+	return openTrustedExternalFile(path, maximum)
 }
 
 // CheckPaths returns actionable, content-free failures for installation paths.

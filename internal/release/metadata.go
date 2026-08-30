@@ -44,6 +44,7 @@ type SchemaRange struct {
 // exact database compatibility boundary.
 type Metadata struct {
 	Release                 string      `json:"release"`
+	SupportedFrom           []string    `json:"supported_from,omitempty"`
 	Image                   string      `json:"image"`
 	Schema                  SchemaRange `json:"schema"`
 	PostgreSQLMajor         int         `json:"postgres_major"`
@@ -78,9 +79,50 @@ func Parse(body []byte, environment Environment) (Metadata, error) {
 	return metadata, nil
 }
 
+// ParseSignedManifest verifies the exact public release-manifest bytes against
+// the supplied release trust root, then projects the server update boundary.
+// Every projected value comes from the verified manifest; callers cannot add
+// unsigned server metadata during projection.
+func ParseSignedManifest(manifestBody, signatureBody, publicKeysBody []byte, environment Environment) (Metadata, error) {
+	keys, err := ParsePublicKeys(publicKeysBody)
+	if err != nil {
+		return Metadata{}, errors.New("signed release manifest is invalid")
+	}
+	envelope, err := ParseEnvelope(signatureBody)
+	if err != nil || Verify(manifestBody, envelope, keys) != nil {
+		return Metadata{}, errors.New("signed release manifest is invalid")
+	}
+	manifest, err := ParseReleaseManifest(manifestBody)
+	if err != nil {
+		return Metadata{}, errors.New("signed release manifest is invalid")
+	}
+	metadata := Metadata{
+		Release:                 manifest.Release,
+		SupportedFrom:           append([]string(nil), manifest.SupportedFrom...),
+		Image:                   manifest.Image,
+		Schema:                  manifest.Database,
+		PostgreSQLMajor:         manifest.PostgreSQLMajor,
+		ReleaseSHA256:           manifest.ReleaseSHA256,
+		ComposeSHA256:           manifest.ComposeSHA256,
+		MigrationManifestSHA256: manifest.MigrationManifestSHA256,
+	}
+	if metadata.validate(environment) != nil {
+		return Metadata{}, errors.New("signed release manifest is invalid")
+	}
+	return metadata, nil
+}
+
 func (metadata Metadata) validate(environment Environment) error {
 	if !releaseNamePattern.MatchString(metadata.Release) || !validImageDigest(metadata.Image) || !validSHA256(metadata.ReleaseSHA256) || !validSHA256(metadata.ComposeSHA256) || !validSHA256(metadata.MigrationManifestSHA256) {
 		return errors.New("invalid release binding")
+	}
+	if err := validReleaseNameList(metadata.SupportedFrom, maxSupportedFrom); err != nil {
+		return errors.New("invalid release binding")
+	}
+	for _, source := range metadata.SupportedFrom {
+		if source == metadata.Release {
+			return errors.New("invalid release binding")
+		}
 	}
 	_, imageDigest, _ := strings.Cut(metadata.Image, "@sha256:")
 	if metadata.ReleaseSHA256 != imageDigest {
@@ -97,6 +139,18 @@ func (metadata Metadata) validate(environment Environment) error {
 		return errors.New("schema target is incompatible")
 	}
 	return nil
+}
+
+// SupportsDirectUpdateFrom reports whether the signed release policy names
+// source as a permitted direct update edge. An empty list permits no server
+// update; initial installation is handled by the installer instead.
+func (metadata Metadata) SupportsDirectUpdateFrom(source string) bool {
+	for _, supported := range metadata.SupportedFrom {
+		if source == supported {
+			return true
+		}
+	}
+	return false
 }
 
 func validImageDigest(value string) bool {
