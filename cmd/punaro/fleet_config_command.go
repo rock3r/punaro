@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bufio"
 	"bytes"
 	"context"
 	"crypto/sha256"
@@ -288,33 +289,57 @@ func persistFleetReleaseDefault(ctx context.Context, ownerDSNFile string, releas
 func boundFleetGitTree(repository, commit string) error {
 	listed := exec.CommandContext(context.Background(), "git", "-C", repository, "ls-tree", "-r", "-l", "--full-tree", commit) // #nosec G204 -- fixed git argv, commit already parsed.
 	listed.Stderr = io.Discard
-	out, err := listed.Output()
+	stdout, err := listed.StdoutPipe()
 	if err != nil {
 		return errors.New("commit is unavailable")
 	}
+	if err := listed.Start(); err != nil {
+		return errors.New("commit is unavailable")
+	}
+	stop := func() {
+		_ = listed.Process.Kill()
+		_ = listed.Wait()
+	}
+	scanner := bufio.NewScanner(stdout)
 	var files int
 	var total int64
-	for _, line := range strings.Split(strings.TrimRight(string(out), "\n"), "\n") {
+	for scanner.Scan() {
+		line := scanner.Text()
 		if line == "" {
 			continue
 		}
 		meta, _, ok := strings.Cut(line, "\t")
 		if !ok {
+			stop()
 			return errors.New("fleet-config git tree is too large")
 		}
 		fields := strings.Fields(meta)
-		if len(fields) < 4 || fields[1] != "blob" {
-			continue
+		if len(fields) < 3 || fields[1] != "blob" || fields[0] == "120000" {
+			stop()
+			return errors.New("fleet-config source contains a special file")
+		}
+		if len(fields) < 4 {
+			stop()
+			return errors.New("fleet-config git tree is too large")
 		}
 		size, err := strconv.ParseInt(fields[3], 10, 64)
 		if err != nil || size < 0 || size > fleetconfig.MaxFileBytes {
+			stop()
 			return errors.New("fleet-config git tree is too large")
 		}
 		files++
 		total += size
 		if files > fleetconfig.MaxFiles || total > fleetconfig.MaxTotalBytes {
+			stop()
 			return errors.New("fleet-config git tree is too large")
 		}
+	}
+	if err := scanner.Err(); err != nil {
+		stop()
+		return errors.New("commit is unavailable")
+	}
+	if err := listed.Wait(); err != nil {
+		return errors.New("commit is unavailable")
 	}
 	if files < 1 || total < 1 {
 		return errors.New("fleet-config git tree is too large")

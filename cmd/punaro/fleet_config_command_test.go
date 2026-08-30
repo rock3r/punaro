@@ -305,6 +305,9 @@ func writeFleetSource(t *testing.T, directory string) {
 
 func writeGitSource(t *testing.T) string {
 	t.Helper()
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("git is required")
+	}
 	repo := t.TempDir()
 	write := func(path, body string) {
 		full := filepath.Join(append([]string{repo}, strings.Split(path, "/")...)...)
