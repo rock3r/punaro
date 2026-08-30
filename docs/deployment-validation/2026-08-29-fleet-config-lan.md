@@ -177,3 +177,46 @@ are code-signed for Local Network. Status PUT requires
 `auth.client_installations`; JSON-only machines apply but cannot report.
 Official security-release-gate boxes stay unchecked. Production was not
 migrated.
+
+## Contract-fix retry (2026-08-30)
+
+Candidate: `agent/fleet-config-adapter-http` `66e269c` (last-known-good only
+after live is displaced; harness/alias apply; doctor/Canopi fleet checks;
+stale client reports expire to `offline`). lan-test `punarod` and the three
+named-host adapters were rebuilt from that commit. Production listeners on
+`127.0.0.1:8080` / `127.0.0.1:5432` stayed untouched; lan-test remained on
+`192.168.1.254:8080`, health `127.0.0.1:18081`, Postgres `127.0.0.1:15432`,
+schema 59.
+
+| Host | Live apply after `66e269c` |
+| --- | --- |
+| `mac-studio` | PASS via SSH `-L` loopback; operator status `current` |
+| `coso` | PASS via threaded loopback forwarder + path override; PUT 403 |
+| `mattone` | PASS direct LAN HTTP; `CLAUDE.md` reparse point; PUT 403 |
+
+Post-contract publish of exact source `0870c8b2…` became desired generation
+10, digest `688048f6…`. Signed WebSocket capture:
+`{"type":"wake","topic_id":"fleet-config","sequence":10}` with three JSON
+keys and `extra_keys=0`. All three named hosts applied that digest; machine-local
+trailer token survived; unmatched `other` was not written; `coso` wrote
+`canopi` only at the override path.
+
+A later exact-commit publish (`114f4677…`, generation 11, digest `db856b83…`)
+was used for last-known-good. With a keepalive-aware truncating proxy in
+front of the mac-studio loopback, the adapter logged
+`fleet-config archive is invalid` and kept last-good `688048f6…`. Restoring
+the uncorrupted path applied `db856b83…`; trailer token remained. `coso` and
+`mattone` applied generation 11 directly.
+
+Unpublished working-tree edit left desired generation 10 unchanged. Extra
+top-level `README.md` refused materialize (`preview_rc=1`); desired
+unchanged. After the new `punarod`, operator status showed
+`fleet-lan-lxc` as `offline` (stale report expired) and
+`fleet-lan-mac-studio` `current` at generation 11. `punaro doctor` emitted
+content-free `fleet_config_desired` pass and `fleet_config_client_stale` fail
+for that offline row; no configuration contents. A `.cursor` directory in
+the mac-studio sandbox home did not block apply.
+
+README split remains the earlier `722c3ac` relocation; this retry did not
+re-duplicate operator/runbook detail into `README.md`. Security-release-gate
+boxes stay unchecked. Same Darwin HTTP and JSON-only PUT residuals as above.
