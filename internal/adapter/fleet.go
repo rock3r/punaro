@@ -349,13 +349,16 @@ func aliasState(enabled bool, results map[string]fleetconfig.AliasResult) string
 	if !enabled {
 		return "disabled"
 	}
-	state := "linked"
+	state := "disabled"
 	for _, result := range results {
 		if result.State == "unsupported" {
 			return "unsupported"
 		}
 		if result.State == "collision" {
 			state = "collision"
+		}
+		if result.State == "linked" && state != "collision" {
+			state = "linked"
 		}
 	}
 	return state

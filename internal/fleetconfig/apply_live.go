@@ -130,7 +130,8 @@ func RollbackLive(req ApplyLiveRequest) error {
 		if live == "" {
 			return nil
 		}
-		if err := writeRegularDest(live, body); err != nil {
+		existing, _ := readRegularFile(live)
+		if err := writeRegularDest(live, restoreDestBody(slash, body, existing)); err != nil {
 			return err
 		}
 		if skillDir, ok := skillDirForRel(slash, live); ok {
@@ -271,6 +272,9 @@ func destCollision(rel, live string) (bool, error) {
 		return false, errors.New("fleet-config live tree is unsafe")
 	}
 	if info.Mode()&os.ModeSymlink != 0 || destIsJunctionOrReparse(info) {
+		if isPunaroClaudeAlias(rel, live) {
+			return false, nil
+		}
 		return false, errors.New("fleet-config live tree is unsafe")
 	}
 	if info.IsDir() {
@@ -338,7 +342,13 @@ func markManagedSkillDir(dir string) error {
 func writeRegularDest(path string, body []byte) error {
 	info, statErr := os.Lstat(path)
 	if statErr == nil && (info.Mode()&os.ModeSymlink != 0 || destIsJunctionOrReparse(info)) {
-		return errors.New("fleet-config live tree is unsafe")
+		if !isPunaroClaudeAlias("", path) {
+			return errors.New("fleet-config live tree is unsafe")
+		}
+		if err := os.Remove(path); err != nil {
+			return errors.New("fleet-config live tree is unsafe")
+		}
+		statErr = os.ErrNotExist
 	}
 	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
 		return errors.New("fleet-config apply failed")
@@ -580,6 +590,68 @@ func stagedHasPrefix(staged map[string][]byte, prefix string) bool {
 		}
 	}
 	return false
+}
+
+func restoreDestBody(rel string, snapshot, live []byte) []byte {
+	if !rehydrateRel(rel) {
+		return snapshot
+	}
+	prefix, _, ok := SplitUser(snapshot)
+	if !ok {
+		return snapshot
+	}
+	user := live
+	if _, extracted, ok := SplitUser(live); ok {
+		user = extracted
+	} else if IsManagedContent(live) || bytes.Contains(live, []byte(AddendumStart)) {
+		user = nil
+	}
+	return stitchUser(prefix, user)
+}
+
+func stitchUser(prefix, user []byte) []byte {
+	var buf bytes.Buffer
+	if len(prefix) > 0 {
+		buf.Write(bytes.TrimRight(prefix, "\n"))
+		buf.WriteByte('\n')
+	}
+	buf.WriteString(UserStart)
+	if len(user) > 0 && user[0] != '\n' {
+		buf.WriteByte('\n')
+	}
+	buf.Write(user)
+	if len(user) == 0 || user[len(user)-1] != '\n' {
+		buf.WriteByte('\n')
+	}
+	buf.WriteString(UserEnd)
+	buf.WriteByte('\n')
+	return buf.Bytes()
+}
+
+func isPunaroClaudeAlias(rel, live string) bool {
+	if rel != "" && rel != "CLAUDE.md" && !strings.HasSuffix(rel, "/CLAUDE.md") {
+		return false
+	}
+	if rel == "" && filepath.Base(live) != "CLAUDE.md" {
+		return false
+	}
+	info, err := os.Lstat(live)
+	if err != nil || info.Mode()&os.ModeSymlink == 0 {
+		return false
+	}
+	got, err := os.Readlink(live)
+	if err != nil {
+		return false
+	}
+	expected := filepath.Join(filepath.Dir(live), "AGENTS.md")
+	cleaned := filepath.Clean(got)
+	if cleaned == filepath.Clean(expected) {
+		return true
+	}
+	if filepath.IsAbs(got) {
+		return false
+	}
+	return filepath.Clean(filepath.Join(filepath.Dir(live), got)) == filepath.Clean(expected)
 }
 
 func destSnapshotDigest(files map[string][]byte) string {

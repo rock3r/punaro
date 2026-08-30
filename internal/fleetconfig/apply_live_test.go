@@ -355,6 +355,114 @@ func TestApplyLiveRemovesManagedDestsWhenProjectDropped(t *testing.T) {
 	}
 }
 
+func TestApplyLiveReplacesClaudeAliasWithRegularFile(t *testing.T) {
+	t.Parallel()
+	home := t.TempDir()
+	project := filepath.Join(home, "src", "punaro")
+	if err := os.MkdirAll(project, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	agents := filepath.Join(project, "AGENTS.md")
+	if err := os.WriteFile(agents, []byte("# leftover\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	alias := filepath.Join(project, "CLAUDE.md")
+	if err := os.Symlink(agents, alias); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := ApplyLive(ApplyLiveRequest{
+		Tree:    Tree{Files: []File{{Path: "AGENTS.md", Data: []byte("# fleet\n")}, {Path: "projects/punaro/AGENTS.md", Data: []byte("# punaro\n")}}},
+		Root:    t.TempDir(),
+		Home:    home,
+		Matches: []ProjectMatch{{Name: "punaro", Path: project, Kind: "matched"}},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	assertRegularCopiedSkill(t, alias)
+	body, err := os.ReadFile(alias) //nolint:gosec // G304: test fixture under t.TempDir.
+	if err != nil || !strings.Contains(string(body), "# punaro") || !IsManagedContent(body) {
+		t.Fatalf("did not replace Punaro Claude alias: %q err=%v", body, err)
+	}
+}
+
+func TestApplyLiveRejectsUnrelatedClaudeSymlink(t *testing.T) {
+	t.Parallel()
+	home := t.TempDir()
+	project := filepath.Join(home, "src", "punaro")
+	if err := os.MkdirAll(project, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	outside := filepath.Join(home, "outside.md")
+	if err := os.WriteFile(outside, []byte("keep-out\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(outside, filepath.Join(project, "CLAUDE.md")); err != nil {
+		t.Fatal(err)
+	}
+	_, err := ApplyLive(ApplyLiveRequest{
+		Tree:    Tree{Files: []File{{Path: "AGENTS.md", Data: []byte("# fleet\n")}, {Path: "projects/punaro/AGENTS.md", Data: []byte("# punaro\n")}}},
+		Root:    t.TempDir(),
+		Home:    home,
+		Matches: []ProjectMatch{{Name: "punaro", Path: project, Kind: "matched"}},
+	})
+	if err == nil {
+		t.Fatal("accepted an unrelated CLAUDE.md symlink")
+	}
+}
+
+func TestApplyLiveRollbackPreservesCurrentUserRegion(t *testing.T) {
+	t.Parallel()
+	home := t.TempDir()
+	project := filepath.Join(home, "src", "punaro")
+	if err := os.MkdirAll(project, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	root := t.TempDir()
+	matches := []ProjectMatch{{Name: "punaro", Path: project, Kind: "matched"}}
+	v1 := Tree{Files: []File{
+		{Path: "AGENTS.md", Data: []byte("# fleet v1\n")},
+		{Path: "projects/punaro/AGENTS.md", Data: []byte("# punaro v1\n")},
+	}}
+	req := ApplyLiveRequest{Tree: v1, Root: root, Home: home, Matches: matches}
+	if _, err := ApplyLive(req); err != nil {
+		t.Fatal(err)
+	}
+	v2 := Tree{Files: []File{
+		{Path: "AGENTS.md", Data: []byte("# fleet v2\n")},
+		{Path: "projects/punaro/AGENTS.md", Data: []byte("# punaro v2\n")},
+	}}
+	req.Tree = v2
+	if _, err := ApplyLive(req); err != nil {
+		t.Fatal(err)
+	}
+	dest := filepath.Join(project, "AGENTS.md")
+	live, err := os.ReadFile(dest) //nolint:gosec // G304: test fixture under t.TempDir.
+	if err != nil {
+		t.Fatal(err)
+	}
+	prefix, _, ok := SplitUser(live)
+	if !ok {
+		t.Fatalf("v2 apply did not create user markers: %s", live)
+	}
+	if err := os.WriteFile(dest, Rehydrate(prefix, nil, []byte("\n"+userBodyProbe+"\n")), 0o600); err != nil { //nolint:gosec // G703: test fixture under t.TempDir.
+		t.Fatal(err)
+	}
+	if err := RollbackLive(req); err != nil {
+		t.Fatal(err)
+	}
+	got, err := os.ReadFile(dest) //nolint:gosec // G304: test fixture under t.TempDir.
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(got), "# punaro v1") || strings.Contains(string(got), "# punaro v2") {
+		t.Fatalf("rollback did not restore last-good prefix: %s", got)
+	}
+	_, user, ok := SplitUser(got)
+	if !ok || !strings.Contains(string(user), userBodyProbe) {
+		t.Fatalf("rollback discarded current user region: %s", got)
+	}
+}
+
 func TestApplyLiveRollbackRemovesDestsAbsentFromLastGood(t *testing.T) {
 	t.Parallel()
 	home := t.TempDir()

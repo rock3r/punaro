@@ -269,6 +269,9 @@ func TestReconcileFleetOnceProjectsClaudeAliasesAndUnsupportedHarness(t *testing
 	if result.State != "unsupported" {
 		t.Fatalf("result=%#v", result)
 	}
+	if result.AliasState != "disabled" {
+		t.Fatalf("claude aliases reported %q: %#v", result.AliasState, result)
+	}
 	claude := filepath.Join(home, "CLAUDE.md")
 	info, err := os.Lstat(claude)
 	if err != nil || !info.Mode().IsRegular() || info.Mode()&os.ModeSymlink != 0 {
