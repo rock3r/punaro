@@ -3,6 +3,7 @@ package fleetconfig
 import (
 	"encoding/json"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -32,7 +33,7 @@ func PublishTree(root string, files map[string][]byte, digest string) error {
 	}
 	unlockFile, err := lockReconcile(filepath.Join(root, "reconcile.lock"))
 	if err != nil {
-		return errors.New("fleet-config reconcile lock failed")
+		return fmt.Errorf("fleet-config reconcile lock failed: %w", err)
 	}
 	defer unlockFile()
 	unlock := ReconcileLock()
@@ -127,7 +128,7 @@ func recoverPublishSwap(live, lastGood, nextGood string) error {
 func RestoreLastGood(root string) error {
 	unlockFile, err := lockReconcile(filepath.Join(root, "reconcile.lock"))
 	if err != nil {
-		return errors.New("fleet-config reconcile lock failed")
+		return fmt.Errorf("fleet-config reconcile lock failed: %w", err)
 	}
 	defer unlockFile()
 	unlock := ReconcileLock()

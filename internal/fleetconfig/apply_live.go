@@ -78,6 +78,9 @@ func ApplyLive(req ApplyLiveRequest) (ApplyLiveResult, error) {
 		result.Written++
 	}
 	if req.Root != "" && len(staged) > 0 {
+		if err := os.MkdirAll(req.Root, 0o700); err != nil {
+			return result, errors.New("fleet-config apply failed")
+		}
 		if err := PublishTree(req.Root, staged, destSnapshotDigest(staged)); err != nil {
 			return result, err
 		}
