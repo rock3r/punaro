@@ -11,6 +11,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -131,6 +132,17 @@ func TestBuildRelayCanSelectPostgresBackendWithoutOpeningSQLite(t *testing.T) {
 	}, nil, backend)
 	if err != nil || handler == nil || sqliteStore != nil {
 		t.Fatalf("handler=%v sqlite=%v err=%v", handler, sqliteStore, err)
+	}
+}
+
+func TestPunaroDHasOneFleetWatcher(t *testing.T) {
+	t.Parallel()
+	body, err := os.ReadFile("main.go")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Count(string(body), "WatchFleetDesired") != 1 {
+		t.Fatal("punarod starts more than one fleet desired watcher")
 	}
 }
 

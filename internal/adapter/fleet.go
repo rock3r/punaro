@@ -382,7 +382,18 @@ func writeLiveFile(path string, body []byte) error {
 		return errors.New("fleet-config apply failed")
 	}
 	tmp := path + ".punaro-tmp"
-	if err := os.WriteFile(tmp, body, 0o600); err != nil {
+	_ = os.Remove(tmp)
+	file, err := os.OpenFile(tmp, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600) // #nosec G304 -- tmp is a sibling of a validated destination.
+	if err != nil {
+		return errors.New("fleet-config apply failed")
+	}
+	if _, err := file.Write(body); err != nil {
+		_ = file.Close()
+		_ = os.Remove(tmp)
+		return errors.New("fleet-config apply failed")
+	}
+	if err := file.Close(); err != nil {
+		_ = os.Remove(tmp)
 		return errors.New("fleet-config apply failed")
 	}
 	if statErr == nil && info.Mode().IsRegular() {

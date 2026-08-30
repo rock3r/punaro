@@ -24,7 +24,7 @@ func FleetConvergenceEvent(generation int64, digest, state string, now time.Time
 	}
 	event := protocol.Event{
 		SpecVersion:     protocol.SpecVersion,
-		EventID:         "fleet-config-" + strconv.FormatInt(generation, 10),
+		EventID:         "fleet-config-" + strconv.FormatInt(generation, 10) + "-" + state,
 		Source:          protocol.SourceOther,
 		Machine:         protocol.Machine{ID: "fleet-config", Label: "fleet-config"},
 		SessionID:       "fleet-config",

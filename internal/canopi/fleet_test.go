@@ -41,4 +41,8 @@ func TestStoreAppliesFleetConvergenceEvent(t *testing.T) {
 	if err != nil || !result.Applied {
 		t.Fatalf("apply=%#v err=%v", result, err)
 	}
+	again, err := store.ApplyFleetConvergence(4, strings.Repeat("ab", 32), "failed", now)
+	if err != nil || !again.Applied {
+		t.Fatalf("state change=%#v err=%v", again, err)
+	}
 }

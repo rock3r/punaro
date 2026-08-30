@@ -822,9 +822,6 @@ func buildRelayHandler(cfg config.Config, fleet relay.FleetConfigStore, postgres
 	notifier := relay.NewNotifier()
 	handlerOptions := relay.HandlerOptions{Metrics: metrics, FleetConfig: fleet, Notifier: notifier}
 	handler := relay.NewHandler(backend, authenticator, handlerOptions)
-	if fleet != nil {
-		go relay.WatchFleetDesired(context.Background(), fleet, notifier, 2*time.Second)
-	}
 	if cfg.AccessIssuer != "" {
 		verifier, err := newAccessVerifier(cfg)
 		if err != nil {
