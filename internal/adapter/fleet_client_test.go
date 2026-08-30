@@ -191,6 +191,25 @@ func TestReconcileFleetOnceFetchesAppliesAndReports(t *testing.T) {
 	if len(reported) == 0 || !strings.Contains(strings.Join(reported, ""), `"current"`) {
 		t.Fatalf("status writes=%v", reported)
 	}
+	if err := os.WriteFile(filepath.Join(home, "AGENTS.md"), []byte("# unmanaged\n"), 0o600); err != nil { //nolint:gosec // G306: test fixture under t.TempDir.
+		t.Fatal(err)
+	}
+	result, err = ReconcileFleetOnce(context.Background(), FleetReconcileRequest{
+		Client: client,
+		Root:   root,
+		Home:   home,
+		Local:  fleetconfig.LocalConfig{Schema: 1, ProjectBasePath: base},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.State == "current" || result.TrailerState != "collision" {
+		t.Fatalf("unmanaged AGENTS.md reported as current: %#v", result)
+	}
+	unmanaged, err := os.ReadFile(filepath.Join(home, "AGENTS.md")) //nolint:gosec // G304: test fixture under t.TempDir.
+	if err != nil || !strings.Contains(string(unmanaged), "unmanaged") {
+		t.Fatalf("overwrote unmanaged AGENTS.md: %q err=%v", unmanaged, err)
+	}
 }
 
 func TestReconcileFleetOnceProjectsClaudeAliasesAndUnsupportedHarness(t *testing.T) {
@@ -258,6 +277,149 @@ func TestReconcileFleetOnceProjectsClaudeAliasesAndUnsupportedHarness(t *testing
 	}
 	if _, err := os.Lstat(filepath.Join(base, "punaro", "CLAUDE.md")); err != nil {
 		t.Fatalf("project alias missing: %v", err)
+	}
+}
+
+func TestReconcileFleetOncePersistsReportGenerationAcrossCurrentAndNextDigest(t *testing.T) {
+	_, private, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	first, err := fleetconfig.Materialize(fleetconfig.Tree{Files: []fleetconfig.File{{Path: "AGENTS.md", Data: []byte("# a\n")}}}, "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa")
+	if err != nil {
+		t.Fatal(err)
+	}
+	second, err := fleetconfig.Materialize(fleetconfig.Tree{Files: []fleetconfig.File{{Path: "AGENTS.md", Data: []byte("# b\n")}}}, "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var keys []string
+	var bodies []string
+	seen := map[string]string{}
+	desired := first
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodGet && r.URL.Path == "/v1/fleet-config/desired":
+			w.Header().Set("Content-Type", "application/json")
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"generation": 2, "digest": desired.Digest, "source_commit": desired.SourceCommit,
+				"skill_count": desired.SkillCount, "total_bytes": desired.TotalBytes,
+			})
+		case r.Method == http.MethodGet && strings.HasPrefix(r.URL.Path, "/v1/fleet-config/releases/"):
+			w.Header().Set("Content-Type", "application/octet-stream")
+			if strings.HasSuffix(r.URL.Path, second.Digest) {
+				_, _ = w.Write(second.Archive)
+				return
+			}
+			_, _ = w.Write(first.Archive)
+		case r.Method == http.MethodPut && r.URL.Path == "/v1/fleet-config/status":
+			body, _ := io.ReadAll(r.Body)
+			key := r.Header.Get("Idempotency-Key")
+			if previous, ok := seen[key]; ok && previous != string(body) {
+				http.Error(w, "conflict", http.StatusConflict)
+				return
+			}
+			seen[key] = string(body)
+			keys = append(keys, key)
+			bodies = append(bodies, string(body))
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`{"status":"recorded"}`))
+		default:
+			t.Fatalf("unexpected %s %s", r.Method, r.URL.Path)
+		}
+	}))
+	defer server.Close()
+	client, err := NewHTTPRelayClient(server.URL, "machine-a", private, server.Client(), AccessServiceToken{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	home := t.TempDir()
+	root := t.TempDir()
+	req := FleetReconcileRequest{Client: client, Root: root, Home: home, Local: fleetconfig.LocalConfig{Schema: 1, ProjectBasePath: filepath.Join(home, "src")}}
+	if _, err := ReconcileFleetOnce(context.Background(), req); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := ReconcileFleetOnce(context.Background(), req); err != nil {
+		t.Fatal(err)
+	}
+	desired = second
+	if _, err := ReconcileFleetOnce(context.Background(), req); err != nil {
+		t.Fatal(err)
+	}
+	if len(keys) != 3 || keys[0] == keys[1] || keys[1] == keys[2] {
+		t.Fatalf("reused status idempotency keys: %v bodies=%v", keys, bodies)
+	}
+	state := loadFleetApplyState(root)
+	if state.ReportGeneration != 3 {
+		t.Fatalf("report_generation=%d", state.ReportGeneration)
+	}
+}
+
+func TestReconcileFleetOnceCurrentPathLiveFailureReportsFailed(t *testing.T) {
+	_, private, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	release, err := fleetconfig.Materialize(fleetconfig.Tree{Files: []fleetconfig.File{{Path: "AGENTS.md", Data: []byte("# fleet\n")}}}, "0123456789abcdef0123456789abcdef01234567")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var keys []string
+	var states []string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodGet && r.URL.Path == "/v1/fleet-config/desired":
+			w.Header().Set("Content-Type", "application/json")
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"generation": 2, "digest": release.Digest, "source_commit": release.SourceCommit,
+				"skill_count": release.SkillCount, "total_bytes": release.TotalBytes,
+			})
+		case r.Method == http.MethodGet && strings.HasPrefix(r.URL.Path, "/v1/fleet-config/releases/"):
+			w.Header().Set("Content-Type", "application/octet-stream")
+			_, _ = w.Write(release.Archive)
+		case r.Method == http.MethodPut && r.URL.Path == "/v1/fleet-config/status":
+			body, _ := io.ReadAll(r.Body)
+			keys = append(keys, r.Header.Get("Idempotency-Key"))
+			var payload map[string]any
+			_ = json.Unmarshal(body, &payload)
+			if state, _ := payload["state"].(string); state != "" {
+				states = append(states, state)
+			}
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`{"status":"recorded"}`))
+		default:
+			t.Fatalf("unexpected %s %s", r.Method, r.URL.Path)
+		}
+	}))
+	defer server.Close()
+	client, err := NewHTTPRelayClient(server.URL, "machine-a", private, server.Client(), AccessServiceToken{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	home := t.TempDir()
+	root := t.TempDir()
+	req := FleetReconcileRequest{Client: client, Root: root, Home: home, Local: fleetconfig.LocalConfig{Schema: 1, ProjectBasePath: filepath.Join(home, "src")}}
+	if _, err := ReconcileFleetOnce(context.Background(), req); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Remove(filepath.Join(home, "AGENTS.md")); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(filepath.Join(home, "missing"), filepath.Join(home, "AGENTS.md")); err != nil {
+		t.Fatal(err)
+	}
+	result, err := ReconcileFleetOnce(context.Background(), req)
+	if err == nil {
+		t.Fatal("live apply failure was not reported")
+	}
+	if result.State != "failed" {
+		t.Fatalf("result=%#v", result)
+	}
+	if len(states) < 2 || states[len(states)-1] != "failed" {
+		t.Fatalf("status states=%v", states)
+	}
+	if len(keys) < 2 || keys[0] == keys[1] {
+		t.Fatalf("reused status key after live failure: %v", keys)
 	}
 }
 

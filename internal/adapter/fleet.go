@@ -64,55 +64,74 @@ func ReconcileFleetOnce(ctx context.Context, request FleetReconcileRequest) (Fle
 		reportGeneration = 1
 	}
 	if state.Digest == desired.Digest {
+		tree := readManagedTree(request.Root)
 		result := FleetReconcileResult{
-			State:         "current",
 			AppliedDigest: desired.Digest,
 			Generation:    desired.Generation,
-			TrailerState:  "present",
 			AliasState:    aliasState(request.Local.ClaudeAliases, nil),
 		}
-		if err := projectLiveTree(request, readManagedTree(request.Root), state.PrefixDigests); err != nil {
+		matches := fleetconfig.MatchProjects(request.Local.ProjectBasePath, request.Local.ProjectPathOverrides, tree.Projects(), nil)
+		result.ProjectMatchState = projectMatchState(matches)
+		liveTrailers, projectErr := projectLiveTree(request, tree, state.PrefixDigests)
+		result.TrailerState = trailerState(liveTrailers)
+		if projectErr != nil {
 			result.State = "failed"
+		} else {
+			result.State = reconcileState(liveTrailers)
+			if request.Local.ClaudeAliases {
+				result.AliasState = aliasState(request.Local.ClaudeAliases, applyClaudeAliases(request, tree, matches))
+			}
+			if result.State == "current" && unsupportedHarness(request.Home) {
+				result.State = "unsupported"
+			}
 		}
-		_ = request.Client.PutFleetStatus(ctx, statusReport(desired, result, reportGeneration, "fleet-status-"+strconv.FormatInt(reportGeneration, 10)))
+		putErr := putFleetStatus(ctx, request, desired, result, reportGeneration)
+		if putErr != nil {
+			return result, putErr
+		}
+		if projectErr != nil {
+			return result, projectErr
+		}
 		return result, nil
 	}
 	archive, err := request.Client.FleetRelease(ctx, desired.Digest)
 	if err != nil {
 		result := FleetReconcileResult{State: "failed", Generation: desired.Generation}
-		_ = request.Client.PutFleetStatus(ctx, statusReport(desired, result, reportGeneration, "fleet-status-"+strconv.FormatInt(reportGeneration, 10)))
+		_ = putFleetStatus(ctx, request, desired, result, reportGeneration)
 		return result, err
 	}
 	tree, err := fleetconfig.ReadArchive(archive)
 	if err != nil {
 		result := FleetReconcileResult{State: "failed", Generation: desired.Generation}
-		_ = request.Client.PutFleetStatus(ctx, statusReport(desired, result, reportGeneration, "fleet-status-"+strconv.FormatInt(reportGeneration, 10)))
+		_ = putFleetStatus(ctx, request, desired, result, reportGeneration)
 		return result, err
 	}
 	release, err := fleetconfig.Materialize(tree, desired.SourceCommit)
 	if err != nil || release.Digest != desired.Digest {
 		result := FleetReconcileResult{State: "failed", Generation: desired.Generation}
-		_ = request.Client.PutFleetStatus(ctx, statusReport(desired, result, reportGeneration, "fleet-status-"+strconv.FormatInt(reportGeneration, 10)))
+		_ = putFleetStatus(ctx, request, desired, result, reportGeneration)
 		return result, errors.New("fleet-config release digest mismatch")
 	}
 	existing := readManagedAgents(request.Root)
 	trailers, err := ReconcileFleet(request.Root, tree, existing, state.PrefixDigests, desired.Digest)
 	if err != nil {
 		result := FleetReconcileResult{State: "failed", Generation: desired.Generation, TrailerState: trailerState(trailers)}
-		_ = request.Client.PutFleetStatus(ctx, statusReport(desired, result, reportGeneration, "fleet-status-"+strconv.FormatInt(reportGeneration, 10)))
+		_ = putFleetStatus(ctx, request, desired, result, reportGeneration)
 		return result, err
 	}
 	prefixes := prefixDigests(tree)
 	if err := writeFleetApplyState(request.Root, fleetconfig.ApplyState{Digest: desired.Digest, LastGoodDigest: desired.Digest, PrefixDigests: prefixes, ReportGeneration: reportGeneration}); err != nil {
 		result := FleetReconcileResult{State: "failed", Generation: desired.Generation, AppliedDigest: desired.Digest, TrailerState: trailerState(trailers)}
-		_ = request.Client.PutFleetStatus(ctx, statusReport(desired, result, reportGeneration, "fleet-status-"+strconv.FormatInt(reportGeneration, 10)))
+		_ = putFleetStatus(ctx, request, desired, result, reportGeneration)
 		return result, err
 	}
 	matches := fleetconfig.MatchProjects(request.Local.ProjectBasePath, request.Local.ProjectPathOverrides, tree.Projects(), nil)
 	aliases := map[string]fleetconfig.AliasResult{}
-	if err := projectLiveTree(request, tree, prefixes); err != nil {
+	liveTrailers, err := projectLiveTree(request, tree, prefixes)
+	trailers = mergeTrailerResults(trailers, liveTrailers)
+	if err != nil {
 		result := FleetReconcileResult{State: "failed", AppliedDigest: desired.Digest, Generation: desired.Generation, TrailerState: trailerState(trailers), ProjectMatchState: projectMatchState(matches)}
-		_ = request.Client.PutFleetStatus(ctx, statusReport(desired, result, reportGeneration, "fleet-status-"+strconv.FormatInt(reportGeneration, 10)))
+		_ = putFleetStatus(ctx, request, desired, result, reportGeneration)
 		return result, err
 	}
 	if request.Local.ClaudeAliases {
@@ -129,10 +148,39 @@ func ReconcileFleetOnce(ctx context.Context, request FleetReconcileRequest) (Fle
 	if result.State == "current" && unsupportedHarness(request.Home) {
 		result.State = "unsupported"
 	}
-	if err := request.Client.PutFleetStatus(ctx, statusReport(desired, result, reportGeneration, "fleet-status-"+strconv.FormatInt(reportGeneration, 10))); err != nil {
+	if err := putFleetStatus(ctx, request, desired, result, reportGeneration); err != nil {
 		return result, err
 	}
 	return result, nil
+}
+
+func putFleetStatus(ctx context.Context, request FleetReconcileRequest, desired relay.FleetDesiredMetadata, result FleetReconcileResult, reportGeneration int64) error {
+	putErr := request.Client.PutFleetStatus(ctx, statusReport(desired, result, reportGeneration, "fleet-status-"+strconv.FormatInt(reportGeneration, 10)))
+	state := loadFleetApplyState(request.Root)
+	state.ReportGeneration = reportGeneration
+	_ = writeFleetApplyState(request.Root, state)
+	return putErr
+}
+
+func mergeTrailerResults(parts ...map[string]fleetconfig.TrailerResult) map[string]fleetconfig.TrailerResult {
+	out := map[string]fleetconfig.TrailerResult{}
+	for _, part := range parts {
+		for path, trailer := range part {
+			existing := out[path]
+			if trailer.Collision {
+				existing.Collision = true
+				existing.State = "collision"
+			}
+			if trailer.Drift {
+				existing.Drift = true
+			}
+			if existing.State == "" {
+				existing.State = trailer.State
+			}
+			out[path] = existing
+		}
+	}
+	return out
 }
 
 func statusReport(desired relay.FleetDesiredMetadata, result FleetReconcileResult, reportGeneration int64, key string) relay.FleetStatusReport {
@@ -234,13 +282,14 @@ func prefixDigests(tree fleetconfig.Tree) map[string]string {
 	return digests
 }
 
-func projectLiveTree(request FleetReconcileRequest, tree fleetconfig.Tree, lastPrefixDigests map[string]string) error {
+func projectLiveTree(request FleetReconcileRequest, tree fleetconfig.Tree, lastPrefixDigests map[string]string) (map[string]fleetconfig.TrailerResult, error) {
+	trailers := map[string]fleetconfig.TrailerResult{}
 	home := request.Home
 	if home == "" {
 		var err error
 		home, err = os.UserHomeDir()
 		if err != nil || home == "" {
-			return errors.New("fleet-config home is unavailable")
+			return trailers, errors.New("fleet-config home is unavailable")
 		}
 	}
 	matches := fleetconfig.MatchProjects(request.Local.ProjectBasePath, request.Local.ProjectPathOverrides, tree.Projects(), nil)
@@ -260,18 +309,19 @@ func projectLiveTree(request FleetReconcileRequest, tree fleetconfig.Tree, lastP
 			existing, existed := readExisting(dest)
 			next, result, err := fleetconfig.ApplyAgents(file.Data, existing, existed, lastPrefixDigests[file.Path])
 			if err != nil {
-				return err
+				return trailers, err
 			}
+			trailers[file.Path] = result
 			if result.Collision {
 				continue
 			}
 			body = next
 		}
 		if err := writeLiveFile(dest, body); err != nil {
-			return err
+			return trailers, err
 		}
 	}
-	return nil
+	return trailers, nil
 }
 
 func liveDestination(home string, matched map[string]string, path string) (string, bool) {
