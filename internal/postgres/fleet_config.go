@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"errors"
 	"strings"
+	"time"
 
 	"github.com/rock3r/punaro/internal/fleetconfig"
 	"github.com/rock3r/punaro/internal/relay"
@@ -29,6 +30,16 @@ type FleetClientStatus struct {
 	AliasState        string `json:"alias_state"`
 	ProjectMatchState string `json:"project_match_state"`
 	Generation        int64  `json:"generation"`
+}
+
+const fleetClientOfflineAfter = 10 * time.Minute
+
+// ExpireFleetClientState records offline when a report is missing or older than twice the maximum adapter poll.
+func ExpireFleetClientState(state string, reportedAt, now time.Time) string {
+	if state == "" || reportedAt.IsZero() || now.Sub(reportedAt) > fleetClientOfflineAfter {
+		return "offline"
+	}
+	return state
 }
 
 // LoadFleetDesired returns the current desired revision, or a zero value when none exists.
@@ -200,24 +211,25 @@ func (a *Administration) ListFleetClientStatus(ctx context.Context) ([]FleetClie
 		return nil, errors.New("fleet-config store is unavailable")
 	}
 	rows, err := a.db.QueryContext(ctx, `
-SELECT client.machine_id, COALESCE(status.applied_digest, ''), COALESCE(status.state, 'offline'),
-       COALESCE(status.activation, ''), COALESCE(status.trailer_state, ''), COALESCE(status.alias_state, ''),
-       COALESCE(status.project_match_state, ''), COALESCE(status.generation, 0)
-FROM auth.client_installations AS client
-LEFT JOIN fleet.client_status AS status ON status.client_id = client.id
-WHERE client.lifecycle_state = 'active'
-ORDER BY client.machine_id
+SELECT machine_id, COALESCE(applied_digest, ''), COALESCE(state, ''),
+       COALESCE(activation, ''), COALESCE(trailer_state, ''), COALESCE(alias_state, ''),
+       COALESCE(project_match_state, ''), generation, reported_at
+FROM fleet.client_status
+ORDER BY machine_id
 LIMIT 256`)
 	if err != nil {
 		return nil, errors.New("fleet-config status is unavailable")
 	}
 	defer func() { _ = rows.Close() }()
-	var result []FleetClientStatus
+	result := []FleetClientStatus{}
+	now := time.Now().UTC()
 	for rows.Next() {
 		var row FleetClientStatus
-		if err := rows.Scan(&row.MachineID, &row.AppliedDigest, &row.State, &row.Activation, &row.TrailerState, &row.AliasState, &row.ProjectMatchState, &row.Generation); err != nil {
+		var reportedAt time.Time
+		if err := rows.Scan(&row.MachineID, &row.AppliedDigest, &row.State, &row.Activation, &row.TrailerState, &row.AliasState, &row.ProjectMatchState, &row.Generation, &reportedAt); err != nil {
 			return nil, errors.New("fleet-config status is unavailable")
 		}
+		row.State = ExpireFleetClientState(row.State, reportedAt, now)
 		result = append(result, row)
 	}
 	if err := rows.Err(); err != nil {
