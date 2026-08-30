@@ -220,3 +220,16 @@ the mac-studio sandbox home did not block apply.
 README split remains the earlier `722c3ac` relocation; this retry did not
 re-duplicate operator/runbook detail into `README.md`. Security-release-gate
 boxes stay unchecked. Same Darwin HTTP and JSON-only PUT residuals as above.
+
+## Apply/status/LKG retry (2026-08-30)
+
+Candidate: `agent/fleet-config-adapter-http` `23e64b2`. Adapters on the three
+named hosts were rebuilt from that commit. Exact-commit publish
+`4b36b696…` became desired generation 12, digest `82d51a0d…`. Wake:
+`{"type":"wake","topic_id":"fleet-config","sequence":12}` with three JSON
+keys and `extra_keys=0`. mac-studio, coso, and mattone applied that digest
+with surviving trailer tokens and no unmatched `other` tree. mac-studio
+operator status was `unsupported` while a leftover `.cursor` dir existed in
+the sandbox home, then `current` generation 12 after that dir was removed.
+`report_generation` incremented across current-path polls instead of reusing
+one status key. Coso/mattone still PUT 403 without installation rows.
