@@ -69,8 +69,11 @@ func Validate(tree Tree) error {
 			dataSkills[kind.skillKey] = struct{}{}
 		}
 	}
-	if !hasGlobalAgents {
-		return errors.New("fleet-config source requires AGENTS.md")
+	if !hasGlobalAgents || total < 1 {
+		if !hasGlobalAgents {
+			return errors.New("fleet-config source requires AGENTS.md")
+		}
+		return errors.New("fleet-config source layout is invalid")
 	}
 	for key := range dataSkills {
 		if _, ok := skills[key]; !ok {
@@ -109,12 +112,12 @@ func classifyPath(path string) (classifiedPath, error) {
 			return classifiedPath{}, errors.New("fleet-config skill path is invalid")
 		}
 		if rest == "SKILL.md" {
-			return classifiedPath{class: pathSkillMarkdown, skill: skill, skillKey: "global/" + skill}, nil
+			return classifiedPath{class: pathSkillMarkdown, skill: skill, skillKey: "./skills/" + skill}, nil
 		}
 		if _, err := canonicalPath(rest); err != nil {
 			return classifiedPath{}, err
 		}
-		return classifiedPath{class: pathSkillData, skill: skill, skillKey: "global/" + skill}, nil
+		return classifiedPath{class: pathSkillData, skill: skill, skillKey: "./skills/" + skill}, nil
 	case strings.HasPrefix(path, "projects/"):
 		project, rest, ok := splitFirst(strings.TrimPrefix(path, "projects/"))
 		if !ok || !entryNamePattern.MatchString(project) || rest == "" {

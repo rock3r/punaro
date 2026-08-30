@@ -74,7 +74,7 @@ func InspectRoot(root string) (Tree, error) {
 			return errors.New("fleet-config source walk failed")
 		}
 		opened, statErr := file.Stat()
-		if statErr != nil || !opened.Mode().IsRegular() || opened.Mode()&os.ModeSymlink != 0 {
+		if statErr != nil || !opened.Mode().IsRegular() || opened.Mode()&os.ModeSymlink != 0 || !os.SameFile(info, opened) {
 			_ = file.Close()
 			return errors.New("fleet-config source contains a special file")
 		}

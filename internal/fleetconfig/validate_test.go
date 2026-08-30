@@ -99,6 +99,7 @@ func TestInspectRootRejectsUnsafeLayout(t *testing.T) {
 			"projects/Punaro/AGENTS.md": "# p\n",
 		}},
 		{"nul in agents", map[string]string{"AGENTS.md": "ok\x00nope"}},
+		{"empty agents", map[string]string{"AGENTS.md": ""}},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
