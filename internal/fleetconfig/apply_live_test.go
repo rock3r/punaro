@@ -1,0 +1,274 @@
+package fleetconfig
+
+import (
+	"bytes"
+	"os"
+	"path/filepath"
+	"strings"
+	"testing"
+)
+
+const (
+	skillBodyProbe       = "unique-skill-body-probe"
+	addendumBodyProbe    = "unique-addendum-body-probe"
+	userBodyProbe        = "unique-user-body-probe"
+	claudeAddendumProbe  = "unique-claude-addendum-probe"
+	globalAddendumProbe  = "unique-global-addendum-probe"
+	projectAddendumProbe = "unique-project-addendum-probe"
+)
+
+func TestApplyLiveSkipsCommonSkillWhenMemberProjectMissing(t *testing.T) {
+	t.Parallel()
+	home := t.TempDir()
+	root := t.TempDir()
+	tree := commonMemberTree(skillMarkdown("shared", skillBodyProbe), false)
+	result, err := ApplyLive(ApplyLiveRequest{
+		Tree:    tree,
+		Root:    root,
+		Home:    home,
+		Matches: []ProjectMatch{{Name: "punaro", Kind: "unmatched"}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.Drift {
+		t.Fatalf("missing member reported drift: %#v", result)
+	}
+	if _, err := os.Lstat(filepath.Join(home, "src", "punaro", ".agents", "skills", "shared", "SKILL.md")); !os.IsNotExist(err) {
+		t.Fatal("copied common skill onto an absent member project")
+	}
+	assertCommonSkillAbsentFromHomeAgents(t, home)
+}
+
+func TestApplyLiveReportsUnmanagedDestCollisionWithoutOverwrite(t *testing.T) {
+	t.Parallel()
+	home := t.TempDir()
+	project := filepath.Join(home, "src", "punaro")
+	if err := os.MkdirAll(project, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	unmanaged := []byte("unmanaged-dest-bytes-keep\n")
+	dest := filepath.Join(project, "AGENTS.md")
+	if err := os.WriteFile(dest, unmanaged, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	skillDestDir := filepath.Join(project, ".agents", "skills", "shared")
+	if err := os.MkdirAll(skillDestDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	skillDest := filepath.Join(skillDestDir, "SKILL.md")
+	if err := os.WriteFile(skillDest, []byte("unmanaged-skill-keep\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	tree := commonMemberTree(skillMarkdown("shared", skillBodyProbe), false)
+	result, err := ApplyLive(ApplyLiveRequest{
+		Tree:    tree,
+		Root:    t.TempDir(),
+		Home:    home,
+		Matches: []ProjectMatch{{Name: "punaro", Path: project, Kind: "matched"}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !result.Drift {
+		t.Fatal("unmanaged dest collision did not report drift")
+	}
+	if !result.Collisions["projects/punaro/AGENTS.md"] {
+		t.Fatalf("missing AGENTS collision: %#v", result.Collisions)
+	}
+	got, err := os.ReadFile(dest) //nolint:gosec // G304: test fixture under t.TempDir.
+	if err != nil || !bytes.Equal(got, unmanaged) {
+		t.Fatalf("overwrote unmanaged AGENTS.md: %q err=%v", got, err)
+	}
+	gotSkill, err := os.ReadFile(skillDest) //nolint:gosec // G304: test fixture under t.TempDir.
+	if err != nil || string(gotSkill) != "unmanaged-skill-keep\n" {
+		t.Fatalf("overwrote unmanaged skill dest: %q err=%v", gotSkill, err)
+	}
+	if _, err := os.Lstat(filepath.Join(skillDestDir, "scripts", "run.sh")); !os.IsNotExist(err) {
+		t.Fatal("copied nested skill file into an unmanaged skill tree")
+	}
+	if IsManagedDir(skillDestDir) {
+		t.Fatal("marked an unmanaged skill directory as managed")
+	}
+	if result.Collisions["projects/punaro/skills/shared/scripts/run.sh"] != true {
+		t.Fatalf("nested unmanaged skill file was not a collision: %#v", result.Collisions)
+	}
+}
+
+func TestApplyLiveNestedSkillFileBeforeSkillMarkdownStillCopies(t *testing.T) {
+	t.Parallel()
+	home := t.TempDir()
+	project := filepath.Join(home, "src", "punaro")
+	if err := os.MkdirAll(project, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	tree := commonMemberTree(skillMarkdown("shared", skillBodyProbe), false)
+	if _, err := ApplyLive(ApplyLiveRequest{
+		Tree:    tree,
+		Root:    t.TempDir(),
+		Home:    home,
+		Matches: []ProjectMatch{{Name: "punaro", Path: project, Kind: "matched"}},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	skillRoot := filepath.Join(project, ".agents", "skills", "shared")
+	skillDest := filepath.Join(skillRoot, "SKILL.md")
+	nested := filepath.Join(skillRoot, "scripts", "run.sh")
+	assertRegularCopiedSkill(t, nested)
+	assertRegularCopiedSkill(t, skillDest)
+	if !IsManagedDir(skillRoot) {
+		t.Fatal("skill root is not marked managed after nested-file-first copy")
+	}
+	if IsManagedDir(filepath.Join(skillRoot, "scripts")) {
+		t.Fatal("marked nested parent instead of the skills/<name> root")
+	}
+	body, err := os.ReadFile(skillDest) //nolint:gosec // G304: test fixture under t.TempDir.
+	if err != nil || !strings.Contains(string(body), skillBodyProbe) {
+		t.Fatalf("SKILL.md missing after nested copy: %q err=%v", body, err)
+	}
+}
+
+func TestApplyLiveCopiesCommonSkillAsRegularFileOnPOSIX(t *testing.T) {
+	t.Parallel()
+	home, project, dest, _ := applyCopiedCommonSkill(t, skillMarkdown("shared", skillBodyProbe), nil)
+	assertRegularCopiedSkill(t, dest)
+	body, err := os.ReadFile(dest) //nolint:gosec // G304: test fixture under t.TempDir.
+	if err != nil || !strings.Contains(string(body), skillBodyProbe) {
+		t.Fatalf("dest missing published common skill: %q err=%v", body, err)
+	}
+	if !IsManagedContent(body) {
+		t.Fatal("copied skill file is not marked managed")
+	}
+	skillRoot := filepath.Dir(dest)
+	if !IsManagedDir(skillRoot) {
+		t.Fatal("copied skill directory is not marked managed")
+	}
+	assertRegularCopiedSkill(t, filepath.Join(skillRoot, "scripts", "run.sh"))
+	agents, err := os.ReadFile(filepath.Join(project, "AGENTS.md")) //nolint:gosec // G304: test fixture under t.TempDir.
+	if err != nil || !IsManagedContent(agents) {
+		t.Fatalf("project AGENTS.md unmanaged: %q err=%v", agents, err)
+	}
+	claude := filepath.Join(project, "CLAUDE.md")
+	assertRegularCopiedSkill(t, claude)
+	claudeBody, err := os.ReadFile(claude) //nolint:gosec // G304: test fixture under t.TempDir.
+	if err != nil || !IsManagedContent(claudeBody) {
+		t.Fatalf("project CLAUDE.md unmanaged: %q err=%v", claudeBody, err)
+	}
+	assertCommonSkillAbsentFromHomeAgents(t, home)
+	if _, err := os.Lstat(filepath.Join(home, ".agents", "skills", "global-demo", "SKILL.md")); err != nil {
+		t.Fatalf("global skill missing from ~/.agents/skills: %v", err)
+	}
+}
+
+func TestApplyLiveRollbackRestoresCopiedSkill(t *testing.T) {
+	t.Parallel()
+	home := t.TempDir()
+	project := filepath.Join(home, "src", "punaro")
+	if err := os.MkdirAll(project, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	root := t.TempDir()
+	matches := []ProjectMatch{{Name: "punaro", Path: project, Kind: "matched"}}
+	v1 := commonMemberTree(skillMarkdown("shared", "copied-skill-v1"), false)
+	req := ApplyLiveRequest{Tree: v1, Root: root, Home: home, Matches: matches}
+	if _, err := ApplyLive(req); err != nil {
+		t.Fatal(err)
+	}
+	v2 := commonMemberTree(skillMarkdown("shared", "copied-skill-v2"), false)
+	req.Tree = v2
+	if _, err := ApplyLive(req); err != nil {
+		t.Fatal(err)
+	}
+	dest := filepath.Join(project, ".agents", "skills", "shared", "SKILL.md")
+	got, err := os.ReadFile(dest) //nolint:gosec // G304: test fixture under t.TempDir.
+	if err != nil || !strings.Contains(string(got), "copied-skill-v2") {
+		t.Fatalf("expected v2 dest %q err=%v", got, err)
+	}
+	if err := RollbackLive(req); err != nil {
+		t.Fatal(err)
+	}
+	got, err = os.ReadFile(dest) //nolint:gosec // G304: test fixture under t.TempDir.
+	if err != nil || !strings.Contains(string(got), "copied-skill-v1") || strings.Contains(string(got), "copied-skill-v2") {
+		t.Fatalf("rollback did not restore copied skill: %q err=%v", got, err)
+	}
+	assertRegularCopiedSkill(t, dest)
+}
+
+func applyCopiedCommonSkill(t *testing.T, skillBody string, addendums map[string]string) (home, project, skillDest, addendumRoot string) {
+	t.Helper()
+	home = t.TempDir()
+	project = filepath.Join(home, "src", "punaro")
+	if err := os.MkdirAll(project, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	addendumRoot = filepath.Join(home, "punaro", "addendums")
+	if len(addendums) > 0 {
+		writeTreeAt(t, addendumRoot, addendums)
+	}
+	tree := commonMemberTree(skillBody, true)
+	if _, err := ApplyLive(ApplyLiveRequest{
+		Tree:         tree,
+		Root:         t.TempDir(),
+		Home:         home,
+		AddendumRoot: addendumRoot,
+		Matches:      []ProjectMatch{{Name: "punaro", Path: project, Kind: "matched"}},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	skillDest = filepath.Join(project, ".agents", "skills", "shared", "SKILL.md")
+	return home, project, skillDest, addendumRoot
+}
+
+func assertRegularCopiedSkill(t *testing.T, dest string) {
+	t.Helper()
+	info, err := os.Lstat(dest)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !info.Mode().IsRegular() {
+		t.Fatalf("dest %s is not a regular file mode=%v", dest, info.Mode())
+	}
+	if info.Mode()&os.ModeSymlink != 0 || destIsJunctionOrReparse(info) {
+		t.Fatalf("dest %s is a symlink, junction, or reparse point", dest)
+	}
+	if _, err := os.Readlink(dest); err == nil {
+		t.Fatalf("dest %s is a symlink", dest)
+	}
+}
+
+func assertCommonSkillAbsentFromHomeAgents(t *testing.T, home string) {
+	t.Helper()
+	if _, err := os.Lstat(filepath.Join(home, ".agents", "skills", "shared")); !os.IsNotExist(err) {
+		t.Fatal("wrote common skill to ~/.agents/skills")
+	}
+}
+
+func commonMemberTree(skillBody string, includeGlobal bool) Tree {
+	files := []File{
+		{Path: "AGENTS.md", Data: []byte("# fleet\n")},
+		{Path: "common/shared/SKILL.md", Data: []byte(skillBody)},
+		{Path: "common/shared/scripts/run.sh", Data: []byte("#!/bin/sh\necho unused\n")},
+		{Path: "projects/punaro/AGENTS.md", Data: []byte("# punaro\n")},
+		{Path: "projects/punaro/skills/shared/COMMON", Data: []byte("shared\n")},
+	}
+	if includeGlobal {
+		files = append(files, File{
+			Path: "skills/global-demo/SKILL.md",
+			Data: []byte(skillMarkdown("global-demo", "Global demo skill.")),
+		})
+	}
+	return Tree{Files: files}
+}
+
+func writeTreeAt(t *testing.T, root string, files map[string]string) {
+	t.Helper()
+	for path, body := range files {
+		full := filepath.Join(append([]string{root}, strings.Split(path, "/")...)...)
+		if err := os.MkdirAll(filepath.Dir(full), 0o700); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(full, []byte(body), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+}

@@ -292,131 +292,36 @@ func projectLiveTree(request FleetReconcileRequest, tree fleetconfig.Tree, lastP
 			return trailers, errors.New("fleet-config home is unavailable")
 		}
 	}
+	_ = lastPrefixDigests
 	matches := fleetconfig.MatchProjects(request.Local.ProjectBasePath, request.Local.ProjectPathOverrides, tree.Projects(), nil)
-	matched := map[string]string{}
-	for _, match := range matches {
-		if match.Path != "" {
-			matched[match.Name] = match.Path
+	result, err := fleetconfig.ApplyLive(fleetconfig.ApplyLiveRequest{
+		Tree:    tree,
+		Root:    filepath.Join(request.Root, "dest"),
+		Home:    home,
+		Matches: matches,
+	})
+	if err != nil {
+		return trailers, err
+	}
+	for path, collided := range result.Collisions {
+		if collided {
+			trailers[path] = fleetconfig.TrailerResult{State: "collision", Collision: true}
 		}
 	}
-	for _, file := range tree.Files {
-		dest, agents := liveDestination(home, matched, file.Path)
-		if dest == "" {
-			continue
-		}
-		body := file.Data
-		if agents {
-			existing, existed := readExisting(dest)
-			next, result, err := fleetconfig.ApplyAgents(file.Data, existing, existed, lastPrefixDigests[file.Path])
-			if err != nil {
-				return trailers, err
-			}
-			trailers[file.Path] = result
-			if result.Collision {
-				continue
-			}
-			body = next
-		}
-		if err := writeLiveFile(dest, body); err != nil {
-			return trailers, err
-		}
+	if result.Drift && len(trailers) == 0 {
+		trailers["drift"] = fleetconfig.TrailerResult{State: "present", Drift: true}
+	}
+	if len(trailers) == 0 {
+		trailers["AGENTS.md"] = fleetconfig.TrailerResult{State: "present"}
 	}
 	return trailers, nil
 }
 
-func liveDestination(home string, matched map[string]string, path string) (string, bool) {
-	switch {
-	case path == "AGENTS.md":
-		return filepath.Join(home, "AGENTS.md"), true
-	case strings.HasPrefix(path, "skills/"):
-		return filepath.Join(append([]string{home, ".agents"}, strings.Split(path, "/")...)...), false
-	case strings.HasPrefix(path, "projects/"):
-		name, rest, ok := strings.Cut(strings.TrimPrefix(path, "projects/"), "/")
-		if !ok {
-			return "", false
-		}
-		root, found := matched[name]
-		if !found {
-			return "", false
-		}
-		if rest == "AGENTS.md" {
-			return filepath.Join(root, "AGENTS.md"), true
-		}
-		if skillRest, ok := strings.CutPrefix(rest, "skills/"); ok {
-			return filepath.Join(append([]string{root, ".agents", "skills"}, strings.Split(skillRest, "/")...)...), false
-		}
-	}
-	return "", false
-}
-
 func applyClaudeAliases(request FleetReconcileRequest, tree fleetconfig.Tree, matches []fleetconfig.ProjectMatch) map[string]fleetconfig.AliasResult {
-	results := map[string]fleetconfig.AliasResult{}
-	home := request.Home
-	if home != "" {
-		if result, err := fleetconfig.CreateAlias(filepath.Join(home, "AGENTS.md"), filepath.Join(home, "CLAUDE.md"), true); err == nil || result.State != "" {
-			results["global"] = result
-		}
-		if result, _ := fleetconfig.CreateAlias(filepath.Join(home, ".agents", "skills"), filepath.Join(home, ".claude", "skills"), true); result.State != "" {
-			results["global-skills"] = result
-		}
-	}
-	for _, match := range matches {
-		if match.Path == "" {
-			continue
-		}
-		result, _ := fleetconfig.CreateAlias(filepath.Join(match.Path, "AGENTS.md"), filepath.Join(match.Path, "CLAUDE.md"), true)
-		results[match.Name] = result
-		skillResult, _ := fleetconfig.CreateAlias(filepath.Join(match.Path, ".agents", "skills"), filepath.Join(match.Path, ".claude", "skills"), true)
-		results[match.Name+"-skills"] = skillResult
-	}
+	_ = request
 	_ = tree
-	return results
-}
-
-func writeLiveFile(path string, body []byte) error {
-	info, statErr := os.Lstat(path)
-	if statErr == nil && info.Mode()&os.ModeSymlink != 0 {
-		return errors.New("fleet-config live tree is unsafe")
-	}
-	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
-		return errors.New("fleet-config apply failed")
-	}
-	tmp := path + ".punaro-tmp"
-	_ = os.Remove(tmp)
-	file, err := os.OpenFile(tmp, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600) // #nosec G304 -- tmp is a sibling of a validated destination.
-	if err != nil {
-		return errors.New("fleet-config apply failed")
-	}
-	if _, err := file.Write(body); err != nil {
-		_ = file.Close()
-		_ = os.Remove(tmp)
-		return errors.New("fleet-config apply failed")
-	}
-	if err := file.Close(); err != nil {
-		_ = os.Remove(tmp)
-		return errors.New("fleet-config apply failed")
-	}
-	if statErr == nil && info.Mode().IsRegular() {
-		_ = os.Remove(path)
-	}
-	if err := os.Rename(tmp, path); err != nil {
-		_ = os.Remove(tmp)
-		return errors.New("fleet-config apply failed")
-	}
-	return nil
-}
-
-func readExisting(path string) ([]byte, bool) {
-	info, err := os.Lstat(path)
-	if err != nil || !info.Mode().IsRegular() {
-		return nil, false
-	}
-	// #nosec G304 -- live destination fenced by Lstat as a regular file.
-	body, err := os.ReadFile(path)
-	if err != nil {
-		return nil, false
-	}
-	return body, true
+	_ = matches
+	return map[string]fleetconfig.AliasResult{"claude": {State: "disabled"}}
 }
 
 func trailerState(trailers map[string]fleetconfig.TrailerResult) string {

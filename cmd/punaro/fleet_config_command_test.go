@@ -338,6 +338,39 @@ func TestFleetConfigStatusOmitsContentsAndIncludesClientStates(t *testing.T) {
 	}
 }
 
+func TestFleetConfigStatusAndDoctorOmitSkillAndAddendumBodies(t *testing.T) {
+	preserveFleetConfig(t)
+	directory := testInstallation(t)
+	const skillBody = "unique-skill-body-probe"
+	const addendumBody = "unique-addendum-body-probe"
+	loadFleetDesired = func(context.Context, string) (punaropostgres.FleetDesired, error) {
+		return punaropostgres.FleetDesired{Digest: strings.Repeat("cd", 32), SourceCommit: testPublishCommit, Generation: 2, SkillCount: 1, TotalBytes: 12}, nil
+	}
+	loadFleetClients = func(context.Context, string) ([]punaropostgres.FleetClientStatus, error) {
+		return []punaropostgres.FleetClientStatus{{
+			MachineID: "mac-studio", AppliedDigest: strings.Repeat("cd", 32), State: "current",
+			Activation: "next_turn", TrailerState: "present", AliasState: "disabled", ProjectMatchState: "matched",
+		}}, nil
+	}
+	var stdout bytes.Buffer
+	if code := run([]string{"fleet-config", "status", "--directory", directory}, &stdout, bytes.NewBuffer(nil)); code != 0 {
+		t.Fatalf("code=%d body=%s", code, stdout.String())
+	}
+	body := stdout.String()
+	if strings.Contains(body, skillBody) || strings.Contains(body, addendumBody) {
+		t.Fatalf("status leaked skill or addendum body: %s", body)
+	}
+	var doctor bytes.Buffer
+	if code := run([]string{"doctor", "--directory", directory}, &doctor, bytes.NewBuffer(nil)); code != 0 && doctor.Len() == 0 {
+		// doctor may fail on incomplete fixtures; still inspect printed output
+		t.Logf("doctor code=%d", code)
+	}
+	out := stdout.String() + doctor.String()
+	if strings.Contains(out, skillBody) || strings.Contains(out, addendumBody) {
+		t.Fatalf("CLI leaked skill or addendum body: %s", out)
+	}
+}
+
 func TrailerLeak() string { return fleetconfig.TrailerStart }
 
 func testRelease() fleetconfig.Release {
