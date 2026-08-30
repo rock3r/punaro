@@ -266,17 +266,25 @@ func TestReconcileFleetOnceProjectsClaudeAliasesAndUnsupportedHarness(t *testing
 	if err != nil {
 		t.Fatal(err)
 	}
-	if result.State != "unsupported" || result.AliasState != "linked" {
+	if result.State != "unsupported" {
 		t.Fatalf("result=%#v", result)
 	}
-	if _, err := os.Lstat(filepath.Join(home, "CLAUDE.md")); err != nil {
-		t.Fatalf("global alias missing: %v", err)
+	if result.AliasState != "disabled" {
+		t.Fatalf("claude aliases reported %q: %#v", result.AliasState, result)
 	}
-	if _, err := os.Lstat(filepath.Join(home, ".claude", "skills")); err != nil {
-		t.Fatalf("global skills alias missing: %v", err)
+	claude := filepath.Join(home, "CLAUDE.md")
+	info, err := os.Lstat(claude)
+	if err != nil || !info.Mode().IsRegular() || info.Mode()&os.ModeSymlink != 0 {
+		t.Fatalf("global CLAUDE.md must be a regular file info=%v err=%v", info, err)
 	}
-	if _, err := os.Lstat(filepath.Join(base, "punaro", "CLAUDE.md")); err != nil {
-		t.Fatalf("project alias missing: %v", err)
+	body, err := os.ReadFile(claude) //nolint:gosec // G304: test fixture under t.TempDir.
+	if err != nil || !strings.Contains(string(body), "# fleet") {
+		t.Fatalf("CLAUDE.md missing AGENTS.md text: %q err=%v", body, err)
+	}
+	projectClaude := filepath.Join(base, "punaro", "CLAUDE.md")
+	info, err = os.Lstat(projectClaude)
+	if err != nil || !info.Mode().IsRegular() || info.Mode()&os.ModeSymlink != 0 {
+		t.Fatalf("project CLAUDE.md must be a regular file info=%v err=%v", info, err)
 	}
 }
 

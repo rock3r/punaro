@@ -639,16 +639,24 @@ names are never desired state. Publication validates and materializes a
 content-addressed archive **before** changing fleet desired revision; a failed
 publish leaves the prior desired revision unchanged.
 
-v1 source layout is `AGENTS.md`, optional `skills/<name>/` trees rooted by
-`SKILL.md`, and optional `projects/<name>/` trees with the same shape. Skill
-`name` frontmatter must match the directory. Machine-local `AGENTS.md` trailer
-markers are illegal in fleet source and are never archived. `scripts/` files
-may be present as regular files; Punaro never executes them and records no
-destinations or post-install commands.
+v1 source layout is `AGENTS.md`, optional global `skills/<name>/` trees rooted
+by `SKILL.md`, optional `common/<name>/` trees defined once, and optional
+`projects/<name>/` trees. A project opts into a common skill with a regular
+`projects/<name>/skills/<skill>/COMMON` file whose body is empty or the skill
+name. `COMMON` cannot sit next to a private skill tree; dangling `COMMON` is
+rejected; a common skill with no members is valid. Common skills count once
+toward the 64-skill cap and are never written to `~/.agents/skills`. Skill
+`name` frontmatter must match the directory. Reserved live markers
+(`<!-- punaro-managed -->`, `<!-- punaro-addendum -->` / `<!--/punaro-addendum-->`,
+`<!-- user -->` / `<!--/user-->`, and the retired trailer markers) are illegal
+in fleet source and are never archived. `scripts/` files may be present as
+regular files; Punaro never executes them and records no destinations or
+post-install commands.
 
 Validation rejects absolute paths, traversal, links, special files, duplicate
-or case-colliding paths, oversized files, excessive skill counts, and malformed
-skill metadata. Identical input yields identical archive bytes and digest.
+or case-colliding paths, oversized files, excessive skill counts, malformed
+skill metadata, dangling `COMMON`, and `COMMON` mixed with a private skill
+tree. Identical input yields identical archive bytes and digest.
 Product binary releases remain `internal/release`; this pipeline is a separate
 trust domain.
 
@@ -663,14 +671,26 @@ and may write only their own bounded status row (schema 59). There is no client
 publish route. Desired-generation advances emit a payload-free WebSocket wake
 with `topic_id=fleet-config` and `sequence` equal to the generation.
 
-The client reconciler stages a complete tree, applies `AGENTS.md` trailers
-without merging fleet-prefix edits, matches project names only as top-level
-directories under a configured base path (or an explicit override), and keeps
-last-known-good on failed activation. Concurrent reconcile is serialized.
+The client reconciler stages a complete tree, copies destinations as regular
+files only (never dest symlinks, junctions, or `CLAUDE.md` aliases), matches
+project names only as top-level directories under a configured base path (or an
+explicit override), and keeps last-known-good on failed activation. A common
+skill is copied into each present member-project dest; if that project is
+absent on the machine, the skill is absent there. Concurrent reconcile is
+serialized.
 
-Harness projection installs only Punaro-managed `AGENTS.md` and skills.
-Opt-in Claude aliases are POSIX symlinks; Windows uses `os.Symlink` or fails
-closed without copying. Unmanaged Claude files are never overwritten.
+Apply rehydrates each managed dest from the published file, then matching
+machine-local addendums under `~/punaro/addendums` (same layout as the
+published tree; project addendum overrides global), then the live
+`<!-- user -->` … `<!--/user-->` region (created empty if missing). Addendum
+text lives in a marked `<!-- punaro-addendum -->` block that is not the user
+block. `CLAUDE.md` is the composed `AGENTS.md` text plus Claude addendum(s),
+written as a regular file. Addendums are never published, uploaded, or logged.
+Skill bodies and addendums never appear in logs, status, or doctor output.
+
+Harness projection installs only Punaro-managed `AGENTS.md`, `CLAUDE.md`, and
+skills, each marked so a later apply can tell Punaro owns it. An unmarked
+unmanaged dest is a collision: report drift and do not overwrite.
 Activation is reported as immediate, next turn, next session, or restart
 required. Unknown installed harnesses are `unsupported`.
 

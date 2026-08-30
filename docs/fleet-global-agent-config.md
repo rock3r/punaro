@@ -2,8 +2,9 @@
 
 Status: accepted for implementation of GitHub issues
 [#210](https://github.com/rock3r/punaro/issues/210)–[#217](https://github.com/rock3r/punaro/issues/217)
-plus the three v1 operator additions (machine-global vs project-only trees,
-machine-local `AGENTS.md` trailers, and opt-in Claude aliases).
+plus copy-on-apply shared skills, managed-file marks, and machine-local
+addendum/user rehydration. This contract **replaces** the earlier #214
+trailer-marker and #215 dest-alias/symlink clauses.
 
 This document is the contract. `DESIGN.md` records the protocol and security
 invariants as they land. Binary product releases remain `internal/release`;
@@ -35,10 +36,13 @@ Goals: issues #211–#217 plus:
 1. Machine-global `AGENTS.md`/`skills/` **and** project-only trees matched by
    top-level directory names under a configured base path (default `~/src`) or
    an explicit machine-local path override that is never published back.
-2. A durable machine-local trailer at the bottom of every applied `AGENTS.md`.
-3. Opt-in Claude aliases (`CLAUDE.md` → `AGENTS.md`, and Claude skill dirs onto
-   Agents-flavoured trees): POSIX symlink; Windows supported surviving
-   equivalent or fail closed without copying.
+2. Shared skills defined once under `common/<skill>/`, opted in per project by
+   a regular `COMMON` file. Apply copies them into present member projects as
+   regular files. They are never written to `~/.agents/skills`.
+3. Rehydrate each managed dest from the published file, machine-local addendums
+   under `~/punaro/addendums`, and a preserved `<!-- user -->` region.
+   `CLAUDE.md` is `AGENTS.md` plus Claude addendum(s), as a regular file. No
+   dest symlinks, junctions, or `CLAUDE.md` aliases.
 
 Non-goals: general dotfile sync, arbitrary destinations, executable/plugin
 deployment, recursive workspace discovery, bidirectional editing,
@@ -64,9 +68,11 @@ boxes from a LAN run.
 5. **v1 is data only.** `scripts/` files may exist as regular files. Punaro
    never executes them, never records destinations or post-install commands,
    and never treats mode bits as activation.
-6. **Trailer markers are illegal in fleet source** and reserved on disk.
-   Punaro creates the trailer if missing and preserves it across
-   publish/rollback/reconverge. Fleet-prefix edits are drift, not a merge.
+6. **Reserved live markers are illegal in fleet source** and reserved on disk:
+   `<!-- punaro-managed -->`, `<!-- punaro-addendum -->` /
+   `<!--/punaro-addendum-->`, `<!-- user -->` / `<!--/user-->`. Punaro creates
+   an empty user region if missing and preserves it across
+   publish/rollback/reconverge. Unmarked unmanaged dests are collisions.
 7. **Operator CLI talks to PostgreSQL via the owner DSN** (same pattern as
    `punaro client add` in `cmd/punaro`). Clients talk to signed HTTP on
    `punarod`. Clients have no publish route.
@@ -80,24 +86,33 @@ boxes from a LAN run.
     `internal/release` (signed product artifacts).
 11. **Harness projection is a built-in adapter table**, not a plugin runtime.
     Unknown installed harnesses report `unsupported`.
-12. **Claude aliases are opt-in per machine** in local adapter config. Never
-    overwrite a colliding real Claude file that is not already a Punaro-managed
-    alias.
+12. **Destinations are always regular files.** Apply never creates dest
+    symlinks, junctions, or `CLAUDE.md` aliases. `CLAUDE.md` is composed from
+    `AGENTS.md` plus Claude addendum(s). Never overwrite a colliding real file
+    that is not already Punaro-managed.
 
 ## Source tree layout
 
 A published commit must contain:
 
 ```text
-AGENTS.md                         # required, machine-global
-skills/<skill>/SKILL.md           # optional bounded global skills
-skills/<skill>/**                 # optional data files (never executed)
-projects/<project>/AGENTS.md      # optional project-only
-projects/<project>/skills/...     # optional project skills
+AGENTS.md                              # required, machine-global
+skills/<skill>/SKILL.md                # optional bounded global skills
+skills/<skill>/**                      # optional data files (never executed)
+common/<skill>/SKILL.md                # optional shared skill, defined once
+common/<skill>/**                      # optional data files (never executed)
+projects/<project>/AGENTS.md           # optional project-only
+projects/<project>/skills/<skill>/...  # optional private project skills
+projects/<project>/skills/<skill>/COMMON  # opt-in to common/<skill>/
 ```
 
 No other top-level names. No extra files next to `AGENTS.md`. Empty
-directories are ignored (not archived).
+directories are ignored (not archived). Source still forbids symlinks.
+
+`COMMON` is a regular file whose body is empty or the skill name. It cannot
+sit next to a private skill tree. Dangling `COMMON` (no matching
+`common/<skill>/`) is rejected. A common skill with no members is valid.
+Common skills count once toward the 64 cap.
 
 Project and skill directory names match
 `^[a-z0-9]([a-z0-9._-]{0,62}[a-z0-9])?$` (same shape as `auth.client_installations.machine_id`).
@@ -120,8 +135,10 @@ keys are ignored and not executed.
 | More than 64 skills (global + all projects) | Bound |
 | More than 512 files or 4 MiB total | Bound |
 | Missing global `AGENTS.md` | Required |
-| Global `AGENTS.md` contains trailer start/end markers | Trailer is machine-local |
-| Project `AGENTS.md` contains trailer markers | Same |
+| Global or project `AGENTS.md` contains reserved live markers | Markers are machine-local |
+| `SKILL.md` contains reserved live markers | Same |
+| Dangling `COMMON` (no `common/<skill>/`) | Opt-in without a definition |
+| `COMMON` next to a private skill tree | Mix is illegal |
 | Malformed `SKILL.md` frontmatter | Contract |
 | UTF-8 invalid or NUL in text files (`AGENTS.md`, `SKILL.md`) | Text contract |
 | Executable activation fields, destination lists, or post-install commands in any Punaro-owned metadata | Data only |
@@ -149,7 +166,7 @@ keys are ignored and not executed.
    inside the USTAR name field.
 5. Identical input bytes yield identical archive bytes and digest.
 
-The archive does not include trailer text. Manifest `digest` is the release
+The archive does not include addendum or user text. Manifest `digest` is the release
 identity used as the desired-state key.
 
 ## Trust boundary
@@ -267,7 +284,7 @@ shape. Clients that miss the hint recover on the adapter poll interval.
 
 ## Client reconciler
 
-Lives in `internal/fleetconfig` (pure apply/trailer/match) +
+Lives in `internal/fleetconfig` (pure apply/rehydrate/match) +
 `internal/adapter` / `cmd/punaro-adapter` (HTTP, lock, I/O).
 
 On startup, poll, and `topic_id=fleet-config` wake:
@@ -279,7 +296,7 @@ On startup, poll, and `topic_id=fleet-config` wake:
 5. Stage into a new directory; fsync; atomic publish (`rename` on POSIX,
    `MoveFileEx` replace on Windows).
 6. On failure, retain last-known-good and report `failed` without contents.
-7. After success, project into harnesses and optional aliases.
+7. After success, project into harnesses as regular files, including composed `CLAUDE.md`.
 
 Protected live files: regular files/directories only. Reject symlinks,
 junctions, reparse points, unexpected hard links, world-writable ancestors,
@@ -296,20 +313,46 @@ Default base path `~/src`, overridable in machine-local config.
 - `project_path_overrides` in local config maps a project name to an absolute
   existing directory. Never uploaded.
 
-### Trailer
+### Rehydrate, addendums, and user region
 
-Markers (exact lines):
+Well-known addendum root: `~/punaro/addendums`, same layout as the published
+tree (`AGENTS.md`, `CLAUDE.md`, `skills/`, `common/`, `projects/<p>/…`).
+Addendums are machine-local, never published, never uploaded, never logged.
 
-```text
-<!-- punaro-local-trailer:start -->
-<!-- punaro-local-trailer:end -->
-```
+For each managed dest:
 
-Apply writes `fleet-prefix + "\n" + start + preserved-or-empty-body + end + "\n"`.
-If the live file is missing, create prefix + empty trailer. If the live file
-exists without markers, report collision (`drifted`) and do not overwrite.
-If markers are present, replace only the prefix. Interrupted apply must not
-delete the trailer: stage a complete file then atomic rename.
+1. Start from the published file (a common skill is copied into the member
+   project dest; it is never written to `~/.agents/skills`).
+2. Fold matching addendums. Project addendum overrides global addendum.
+   Put addendum text in:
+
+   ```text
+   <!-- punaro-addendum -->
+   …
+   <!--/punaro-addendum-->
+   ```
+
+   This block is not the user block.
+3. Keep the live user region, creating it empty if missing:
+
+   ```text
+   <!-- user -->
+   …
+   <!--/user-->
+   ```
+
+4. Write the result as a regular file. Mark it `<!-- punaro-managed -->`.
+   Managed skill directories also carry a `.punaro-managed` regular file.
+
+`CLAUDE.md` is `AGENTS.md` plus Claude addendum(s) (for example brevity /
+non-native-English), not a copy or symlink of `AGENTS.md` alone.
+
+If the live file is missing, create published + addendum block + empty user
+region. If the live file exists without the managed mark, report collision
+(`drifted`) and do not overwrite. User-section text survives re-apply.
+Addendum edits appear on the next apply. Interrupted apply must not delete
+the user region: stage a complete file then atomic rename. Last-known-good /
+rollback restores a copied skill.
 
 ### Machine-local config
 
@@ -325,6 +368,9 @@ Stored next to the adapter profile (already a protected file). Schema v1 JSON:
 ```
 
 Empty `project_base_path` means `~/src`. This file is never fleet source.
+`claude_aliases` is ignored: `CLAUDE.md` is always a regular composed file.
+Machine-local addendums are not this JSON file; they live at
+`~/punaro/addendums` and are never published.
 
 ## Harness projection
 
@@ -334,35 +380,34 @@ Built-in adapters, detection + destinations + activation:
 | --- | --- | --- | --- |
 | Portable Agents | project dir exists | `$project/AGENTS.md`, `$project/.agents/skills` | next_turn |
 | Codex plugin | Codex plugin/registration present | same Agents-flavoured paths | next_turn |
-| Claude Code | Claude plugin/registration or `~/.claude` | Agents paths; optional aliases | next_session |
-| Gemini CLI | `GEMINI.md` already present or `~/.gemini` | Agents paths; do not create `GEMINI.md` unless it is already a Punaro alias | next_session |
+| Claude Code | Claude plugin/registration or `~/.claude` | Agents paths plus composed `CLAUDE.md` | next_session |
+| Gemini CLI | `GEMINI.md` already present or `~/.gemini` | Agents paths; do not create `GEMINI.md` unless it is already Punaro-managed | next_session |
 | Unknown installed agent dir | other known vendor dirs | none | `unsupported` |
 
-Install **only** Punaro-managed `AGENTS.md` and skill trees. Never overwrite
-credentials, settings, sessions, caches, or unmanaged local skills. Collision
-or local modification of a managed file is `drifted`.
+Install **only** Punaro-managed `AGENTS.md`, `CLAUDE.md`, and skill trees.
+Never overwrite credentials, settings, sessions, caches, or unmanaged local
+skills. Collision or local modification of an unmarked dest is `drifted`.
 
-### Claude aliases
+Apply always copies regular files. Destinations are never symlinks, junctions,
+or `CLAUDE.md` aliases. A common skill is copied into each present
+member-project dest (`$project/.agents/skills/<skill>/`) and is never written
+to `~/.agents/skills`. If the member project is absent on the machine, that
+skill is absent there.
 
-When `claude_aliases` is true:
+### Claude files
 
-- `$project/CLAUDE.md` → `$project/AGENTS.md`
-- `$project/.claude/skills` → `$project/.agents/skills` if the Claude skills
-  directory is absent or already a Punaro-managed alias
-- Same idea for machine-global files under the Punaro-managed global tree
-
-POSIX: `os.Symlink`. Windows: `os.Symlink` (survives reboot, does not weaken
-ACLs). If symlink creation is unsupported, report `unsupported` and do not
-copy. A colliding regular Claude file that is not a Punaro-managed alias is
-never overwritten.
+`CLAUDE.md` is always a regular file: composed `AGENTS.md` plus Claude
+addendum(s). It is not a symlink, junction, or alias of `AGENTS.md`. A
+colliding regular Claude file that is not Punaro-managed is never overwritten.
 
 ## Status, doctor, Canopi
 
 `punaro fleet-config status` aggregates desired + each enrolled client's
 latest status row. States: `current`, `pending`, `applying`, `failed`,
 `offline`, `drifted`, `unsupported`, `restart_required`. Also print source
-commit, release digest, generation, trailer/alias/project-match **states**,
-and activation enum. Omit contents, host paths, raw errors.
+commit, release digest, generation, managed/user/project-match **states**,
+and activation enum. Omit contents, host paths, raw errors, skill bodies, and
+addendums.
 
 Doctor adds content-free checks with stable codes, for example
 `fleet_config_desired`, `fleet_config_client_stale`, `fleet_config_drifted`,
@@ -382,7 +427,8 @@ Offline: last report older than twice the adapter poll interval (recorded as
   project names, and alias choices cannot change desired fleet state.
 - Revoked clients cannot fetch or report.
 - At-least-once with durable digest identity; never claim exactly-once.
-- No credentials, JWTs, Access headers, `AGENTS.md`, or skill bytes in logs.
+- No credentials, JWTs, Access headers, `AGENTS.md`, skill bytes, or addendum
+  bytes in logs.
 - Independent deployability: `punarod` serves HTTP; adapters apply locally;
   Telegram gateway is untouched.
 - Public origin stays closed; Access is admission, not authorization.
@@ -390,6 +436,7 @@ Offline: last report older than twice the adapter poll interval (recorded as
 ## Observability
 
 Log only digest, generation, client id, state enum, and skill/file counts.
+Never log skill bodies or addendum bodies.
 Metrics: publish success/fail, fetch status codes (not bodies), apply
 success/fail, drift count. Audit events are content-free.
 
@@ -417,22 +464,30 @@ record `lan-unreachable` and stop; do not substitute path simulation.
 
 Minimum scenarios: the parent plan
 `.plans/210-fleet-global-agent-config.md` list (publish with two project trees,
-wake+fetch+apply on three clients, top-level match + override, trailer
-survival, Claude alias or unsupported on Windows, offline reconverge, revoked
+wake+fetch+apply on three clients, top-level match + override, user-section
+survival, regular-file `CLAUDE.md` (not a junction) on Windows, offline reconverge, revoked
 denial, invalid/corrupt/interrupted/drift/unsupported/rollback, repo change
 without publish is a no-op, content-free status/doctor).
 
 ## Tracker updates
 
-GitHub #210–#217 predate the three operator additions. Proposed additions
-(apply to issue bodies; do not silently ship undocumented behavior):
+GitHub #210–#217 predate copy-on-apply shared skills and addendum/user
+rehydration. Proposed additions (apply to issue bodies; do not silently ship
+undocumented behavior). Follow-on issue:
+[#236](https://github.com/rock3r/punaro/issues/236).
 
-- **#210 / #211:** source layout includes `projects/<name>/`; trailer markers
-  are illegal in source; v1 data-only includes `scripts/` as inert files.
-- **#214:** top-level project match, per-machine overrides, trailer create/preserve.
-- **#215:** opt-in Claude aliases, POSIX symlink / Windows fail-closed.
-- **#216:** expose trailer/alias/project-match states without contents.
+- **#210 / #211:** source layout includes `projects/<name>/` and
+  `common/<skill>/` with `COMMON` opt-in; reserved live markers are illegal in
+  source; v1 data-only includes `scripts/` as inert files.
+- **#214 (replaced):** top-level project match and per-machine overrides
+  remain. Machine-local trailer markers are replaced by the managed mark, the
+  addendum block, and the `<!-- user -->` region. Addendums live under
+  `~/punaro/addendums` and are never published.
+- **#215 (replaced):** dest `CLAUDE.md` is a regular composed file
+  (`AGENTS.md` plus Claude addendum(s)), never a symlink, junction, or alias.
+- **#216:** expose managed/user/project-match states without contents.
 - **#217:** LAN hosts `mac-studio`, `coso`, `mattone`; include those scenarios.
+  Copy-on-apply of common skills must stay regular files on POSIX and Windows.
 
 ## Alternatives Considered
 
@@ -442,20 +497,22 @@ GitHub #210–#217 predate the three operator additions. Proposed additions
    could diverge; Punaro would not have a single content-addressed release.
 3. **Reuse `internal/release` product artifacts.** Rejected: different trust
    domain (signed binaries vs operator Git data).
-4. **Copy Claude files instead of symlinks.** Rejected: duplicates drift and
-   weakens the “one fleet prefix” invariant; Windows copy would also bypass
-   the fail-closed ACL requirement.
+4. **Dest `CLAUDE.md` aliases/symlinks (#215).** Replaced: copy-on-apply as a
+   regular file composed from `AGENTS.md` plus Claude addendums avoids
+   Windows junction/reparse dests and keeps Claude-specific addendums off the
+   shared `AGENTS.md` prefix.
 5. **Filesystem blob store for archives.** Deferred: v1 size bound fits
    `bytea`; a blob root would be a new deployable path.
 
 ## Open Questions
 
-None. The parent execution plan already chose commit-only publish, trailer
-markers, top-level match, and fail-closed Windows aliases.
+None. The parent execution plan chose commit-only publish and top-level
+match. Dest copy is regular files only; trailer markers and dest aliases are
+replaced by addendum/user rehydration and composed `CLAUDE.md`.
 
 ## References
 
-- GitHub #210–#217
+- GitHub #210–#217 and [#236](https://github.com/rock3r/punaro/issues/236)
 - `.plans/210-fleet-global-agent-config.md`
 - `DESIGN.md` (wake hints, signed requests, enrollment)
 - `docs/platform-contracts.md`
@@ -466,7 +523,7 @@ markers, top-level match, and fail-closed Windows aliases.
 ## PR Plan
 
 ### PR 1: Define the immutable fleet-global configuration release contract
-- **Description:** Add `internal/fleetconfig` with source layout, strict validation, deterministic materialization, data-only classification, commit-id parsing, and trailer-not-in-source rules. Document the contract. No HTTP, no CLI publish yet.
+- **Description:** Add `internal/fleetconfig` with source layout including `common/` + `COMMON` opt-in, strict validation, deterministic materialization, data-only classification, commit-id parsing, and reserved-live-marker-not-in-source rules. Document the contract. No HTTP, no CLI publish yet.
 - **Files/components affected:** `internal/fleetconfig/`, `docs/fleet-global-agent-config.md`, `DESIGN.md`
 - **Dependencies:** None
 
@@ -481,17 +538,17 @@ markers, top-level match, and fail-closed Windows aliases.
 - **Dependencies:** PR 2
 
 ### PR 4: Add the cross-platform fleet configuration reconciler
-- **Description:** Adapter reconcile on start/poll/wake: fetch, verify, stage, atomic apply, last-known-good, serialized lock, protected files, top-level project match, per-machine overrides, trailer create/preserve, drift on fleet-prefix edits.
-- **Files/components affected:** `internal/fleetconfig/` apply/trailer/match, `internal/adapter/`, `cmd/punaro-adapter/`, `//go:build` platform files
+- **Description:** Adapter reconcile on start/poll/wake: fetch, verify, stage, atomic apply, last-known-good, serialized lock, protected files, top-level project match, per-machine overrides, copy-on-apply regular files, addendum/user rehydrate, drift on unmarked dests.
+- **Files/components affected:** `internal/fleetconfig/` apply/rehydrate/match, `internal/adapter/`, `cmd/punaro-adapter/`, `//go:build` platform files
 - **Dependencies:** PR 3
 
 ### PR 5: Project fleet-global instructions and skills into coding-agent harnesses
-- **Description:** Built-in harness adapters, drift vs merge, activation enums, opt-in Claude aliases (POSIX symlink, Windows equivalent or fail closed, never overwrite unmanaged Claude files).
+- **Description:** Built-in harness adapters, drift vs merge, activation enums, copy-on-apply managed `AGENTS.md`/`CLAUDE.md`/skills (regular files only; `CLAUDE.md` is `AGENTS.md` plus Claude addendum(s); never overwrite unmanaged dests).
 - **Files/components affected:** `internal/fleetconfig/harness.go`, `internal/fleetconfig/alias_*.go`, `cmd/punaro-adapter/`
 - **Dependencies:** PR 4
 
 ### PR 6: Expose fleet configuration convergence in status, doctor, and Canopi
-- **Description:** `punaro fleet-config status` and doctor checks; content-free Canopi/dashboard hooks; trailer/alias/project-match states; no contents/paths/raw errors.
+- **Description:** `punaro fleet-config status` and doctor checks; content-free Canopi/dashboard hooks; managed/user/project-match states; no contents/paths/raw errors/skill bodies/addendums.
 - **Files/components affected:** `cmd/punaro/`, `internal/diagnostic/`, `internal/canopi/`, `docs/user-guide.md`, `docs/operator-guide.md`
 - **Dependencies:** PR 5
 

@@ -10,6 +10,20 @@ const (
 	TrailerStart = "<!-- punaro-local-trailer:start -->"
 	// TrailerEnd closes the machine-local trailer.
 	TrailerEnd = "<!-- punaro-local-trailer:end -->"
+	// UserStart opens the preserved live user region. It is illegal in fleet source.
+	UserStart = "<!-- user -->"
+	// UserEnd closes the preserved live user region.
+	UserEnd = "<!--/user-->"
+	// AddendumStart opens the machine-local addendum block. It is illegal in fleet source.
+	AddendumStart = "<!-- punaro-addendum -->"
+	// AddendumEnd closes the machine-local addendum block.
+	AddendumEnd = "<!--/punaro-addendum-->"
+	// ManagedMark records that Punaro owns a live AGENTS.md, CLAUDE.md, or skill file.
+	ManagedMark = "<!-- punaro-managed -->"
+	// ManagedDirMarker is the regular file that marks a managed skill directory.
+	ManagedDirMarker = ".punaro-managed"
+	// CommonMarkerName is the project opt-in file for a shared common skill.
+	CommonMarkerName = "COMMON"
 	// MaxFileBytes is the per-file bound for v1 source files.
 	MaxFileBytes = 256 << 10
 	// MaxSkills bounds global plus project skills.
