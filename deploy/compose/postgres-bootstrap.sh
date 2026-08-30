@@ -118,7 +118,7 @@ BEGIN
     SELECT 1 FROM pg_class relation JOIN pg_namespace namespace ON namespace.oid = relation.relnamespace
     CROSS JOIN LATERAL aclexplode(coalesce(relation.relacl, acldefault(CASE WHEN relation.relkind = 'S' THEN 'S'::"char" ELSE 'r'::"char" END, relation.relowner))) privilege
     WHERE privilege.grantee = (SELECT oid FROM pg_roles WHERE rolname = 'punaro_app')
-      AND namespace.nspname NOT IN ('auth', 'relay', 'attachment', 'brain', 'audit', 'jobs', 'public')
+      AND namespace.nspname NOT IN ('auth', 'relay', 'attachment', 'brain', 'audit', 'jobs', 'fleet', 'public')
   ) THEN
     RAISE EXCEPTION 'refusing to rotate punaro_app while it retains object grants outside Punaro schemas; revoke them and rerun bootstrap';
   END IF;
@@ -126,7 +126,7 @@ BEGIN
     SELECT 1 FROM pg_class relation JOIN pg_namespace namespace ON namespace.oid = relation.relnamespace
     CROSS JOIN LATERAL aclexplode(coalesce(relation.relacl, acldefault(CASE WHEN relation.relkind = 'S' THEN 'S'::"char" ELSE 'r'::"char" END, relation.relowner))) privilege
     WHERE relation.relowner = (SELECT oid FROM pg_roles WHERE rolname = 'punaro_owner')
-      AND namespace.nspname NOT IN ('auth', 'relay', 'attachment', 'brain', 'audit', 'jobs', 'public')
+      AND namespace.nspname NOT IN ('auth', 'relay', 'attachment', 'brain', 'audit', 'jobs', 'fleet', 'public')
       AND namespace.nspname !~ '^pg_'
       AND namespace.nspname <> 'information_schema'
       AND relation.relkind IN ('r', 'p', 'v', 'm', 'f', 'S')
@@ -138,7 +138,7 @@ BEGIN
     SELECT 1 FROM pg_class relation JOIN pg_namespace namespace ON namespace.oid = relation.relnamespace
     CROSS JOIN LATERAL aclexplode(coalesce(relation.relacl, acldefault(CASE WHEN relation.relkind = 'S' THEN 'S'::"char" ELSE 'r'::"char" END, relation.relowner))) privilege
     WHERE relation.relowner = (SELECT oid FROM pg_roles WHERE rolname = 'punaro_owner')
-      AND namespace.nspname IN ('auth', 'relay', 'attachment', 'brain', 'audit', 'jobs', 'public')
+      AND namespace.nspname IN ('auth', 'relay', 'attachment', 'brain', 'audit', 'jobs', 'fleet', 'public')
       AND privilege.grantee = (SELECT oid FROM pg_roles WHERE rolname = 'punaro_app')
       AND (privilege.is_grantable OR (relation.relkind = 'S' AND privilege.privilege_type NOT IN ('USAGE', 'SELECT')) OR (relation.relkind <> 'S' AND privilege.privilege_type NOT IN ('SELECT', 'INSERT', 'UPDATE', 'DELETE')))
   ) THEN
@@ -150,7 +150,7 @@ BEGIN
     CROSS JOIN LATERAL aclexplode(coalesce(attribute.attacl, acldefault('c'::"char", relation.relowner))) privilege
     WHERE attribute.attnum > 0 AND NOT attribute.attisdropped
       AND privilege.grantee = (SELECT oid FROM pg_roles WHERE rolname = 'punaro_app')
-      AND namespace.nspname NOT IN ('auth', 'relay', 'attachment', 'brain', 'audit', 'jobs', 'public')
+      AND namespace.nspname NOT IN ('auth', 'relay', 'attachment', 'brain', 'audit', 'jobs', 'fleet', 'public')
   ) THEN
     RAISE EXCEPTION 'refusing to rotate punaro_app while it retains column grants outside Punaro schemas; revoke them and rerun bootstrap';
   END IF;
@@ -160,7 +160,7 @@ BEGIN
     CROSS JOIN LATERAL aclexplode(coalesce(attribute.attacl, acldefault('c'::"char", relation.relowner))) privilege
     WHERE attribute.attnum > 0 AND NOT attribute.attisdropped
       AND relation.relowner = (SELECT oid FROM pg_roles WHERE rolname = 'punaro_owner')
-      AND namespace.nspname IN ('auth', 'relay', 'attachment', 'brain', 'audit', 'jobs', 'public')
+      AND namespace.nspname IN ('auth', 'relay', 'attachment', 'brain', 'audit', 'jobs', 'fleet', 'public')
       AND privilege.grantee = (SELECT oid FROM pg_roles WHERE rolname = 'punaro_app')
       AND (privilege.is_grantable OR privilege.privilege_type NOT IN ('SELECT', 'INSERT', 'UPDATE'))
   ) THEN
@@ -168,7 +168,7 @@ BEGIN
   END IF;
   IF EXISTS (
     SELECT 1 FROM pg_class relation JOIN pg_namespace namespace ON namespace.oid = relation.relnamespace
-    WHERE namespace.nspname IN ('auth', 'relay', 'attachment', 'brain', 'audit', 'jobs', 'public')
+    WHERE namespace.nspname IN ('auth', 'relay', 'attachment', 'brain', 'audit', 'jobs', 'fleet', 'public')
       AND relation.relkind IN ('r', 'p', 'v', 'm', 'f', 'S')
       AND relation.relowner NOT IN ((SELECT oid FROM pg_roles WHERE rolname = 'punaro_owner'), (SELECT oid FROM pg_roles WHERE rolname = 'punaro_app'))
   ) THEN
@@ -176,7 +176,7 @@ BEGIN
   END IF;
   IF EXISTS (
     SELECT 1 FROM pg_proc procedure JOIN pg_namespace namespace ON namespace.oid = procedure.pronamespace
-    WHERE namespace.nspname IN ('auth', 'relay', 'attachment', 'brain', 'audit', 'jobs', 'public')
+    WHERE namespace.nspname IN ('auth', 'relay', 'attachment', 'brain', 'audit', 'jobs', 'fleet', 'public')
       AND procedure.proowner NOT IN ((SELECT oid FROM pg_roles WHERE rolname = 'punaro_owner'), (SELECT oid FROM pg_roles WHERE rolname = 'punaro_app'))
   ) THEN
     RAISE EXCEPTION 'refusing to rotate punaro_app while a Punaro routine has an unexpected owner; repair ownership and rerun bootstrap';
@@ -213,7 +213,7 @@ BEGIN
     SELECT 1 FROM pg_namespace namespace
     CROSS JOIN LATERAL aclexplode(coalesce(namespace.nspacl, acldefault('n'::"char", namespace.nspowner))) privilege
     WHERE namespace.nspowner = (SELECT oid FROM pg_roles WHERE rolname = 'punaro_owner')
-      AND namespace.nspname IN ('auth', 'relay', 'attachment', 'brain', 'audit', 'jobs', 'public')
+      AND namespace.nspname IN ('auth', 'relay', 'attachment', 'brain', 'audit', 'jobs', 'fleet', 'public')
       AND privilege.grantee NOT IN (namespace.nspowner, (SELECT oid FROM pg_roles WHERE rolname = 'punaro_app'))
   ) THEN
     RAISE EXCEPTION 'refusing to rotate punaro_app while an owner Punaro schema grants a third-party role access; revoke it and rerun bootstrap';
@@ -279,7 +279,7 @@ BEGIN
   FOR schema_name IN
     SELECT nspname
     FROM pg_namespace
-    WHERE nspname NOT IN ('auth', 'relay', 'attachment', 'brain', 'audit', 'jobs', 'public', 'information_schema')
+    WHERE nspname NOT IN ('auth', 'relay', 'attachment', 'brain', 'audit', 'jobs', 'fleet', 'public', 'information_schema')
       AND nspname !~ '^pg_'
       AND has_schema_privilege('punaro_app', oid, 'USAGE')
   LOOP
@@ -330,7 +330,7 @@ BEGIN
     SELECT namespace.nspname, relation.relname, relation.relkind, relation.relacl, relation.relowner
     FROM pg_class relation JOIN pg_namespace namespace ON namespace.oid = relation.relnamespace
     WHERE relation.relowner = (SELECT oid FROM pg_roles WHERE rolname = 'punaro_owner')
-      AND namespace.nspname IN ('auth', 'relay', 'attachment', 'brain', 'audit', 'jobs', 'public')
+      AND namespace.nspname IN ('auth', 'relay', 'attachment', 'brain', 'audit', 'jobs', 'fleet', 'public')
       AND relation.relkind IN ('r', 'p', 'v', 'm', 'f', 'S')
   LOOP
     IF object.relkind = 'S' THEN EXECUTE format('REVOKE ALL PRIVILEGES ON SEQUENCE %I.%I FROM PUBLIC', object.nspname, object.relname);
@@ -349,7 +349,7 @@ BEGIN
     SELECT namespace.nspname, relation.relname, attribute.attname, attribute.attacl, relation.relowner
     FROM pg_attribute attribute JOIN pg_class relation ON relation.oid = attribute.attrelid JOIN pg_namespace namespace ON namespace.oid = relation.relnamespace
     WHERE relation.relowner = (SELECT oid FROM pg_roles WHERE rolname = 'punaro_owner')
-      AND namespace.nspname IN ('auth', 'relay', 'attachment', 'brain', 'audit', 'jobs', 'public')
+      AND namespace.nspname IN ('auth', 'relay', 'attachment', 'brain', 'audit', 'jobs', 'fleet', 'public')
       AND attribute.attnum > 0 AND NOT attribute.attisdropped AND attribute.attacl IS NOT NULL
   LOOP
     EXECUTE format('REVOKE ALL PRIVILEGES (%I) ON TABLE %I.%I FROM PUBLIC', object.attname, object.nspname, object.relname);
@@ -363,7 +363,7 @@ BEGIN
     SELECT namespace.nspname, procedure.proname, pg_get_function_identity_arguments(procedure.oid) AS arguments, procedure.prokind, procedure.proacl, procedure.proowner
     FROM pg_proc procedure JOIN pg_namespace namespace ON namespace.oid = procedure.pronamespace
     WHERE procedure.proowner = (SELECT oid FROM pg_roles WHERE rolname = 'punaro_owner')
-      AND namespace.nspname IN ('auth', 'relay', 'attachment', 'brain', 'audit', 'jobs', 'public')
+      AND namespace.nspname IN ('auth', 'relay', 'attachment', 'brain', 'audit', 'jobs', 'fleet', 'public')
       AND NOT EXISTS (
         SELECT 1 FROM pg_depend dependency
         WHERE dependency.classid = 'pg_proc'::regclass

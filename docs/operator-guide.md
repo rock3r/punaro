@@ -170,8 +170,8 @@ database and investigate. The digest-pinned `make test-postgres` stack is epheme
 test infrastructure, publishes no database port, and deletes its volume on
 exit.
 
-The current binary requires schema version 57 and supports an intact schema
-from version 10 through 57 as an update boundary. Versions 10 through 56 are
+The current binary requires schema version 58 and supports an intact schema
+from version 10 through 58 as an update boundary. Versions 10 through 57 are
 reported as `upgrade_required`; versions below the compatibility floor, newer
 versions, and damaged objects are `incompatible`. The embedded manifest and
 target release metadata are authoritative; check them instead of assuming a
@@ -182,9 +182,10 @@ relay invocation capability, migration 44 adds client lifecycle authority,
 migration 45 adds opt-in canonical role profiles, migration 46 adds durable
 mail rate-limit buckets, migration 47 adds idempotent direct-role
 conversations, migration 48 adds explicit pending-delivery capacity
-counters, migration 49 adds content-free terminal delivery metadata, and
+counters, migration 49 adds content-free terminal delivery metadata,
 migrations 50 through 57 add conversation display names, Telegram topic-claim
-cutover tables, and their idempotency and machine-key fences.
+cutover tables, and their idempotency and machine-key fences, and migration 58
+adds the fleet-global configuration release and desired-revision store.
 After migration 48, `punaro relay reconcile-capacity
 --directory DIR --yes` rebuilds those counters from pending deliveries if
 startup readiness reports inconsistency. Ordinary SQLite `Open` and PostgreSQL
@@ -208,7 +209,7 @@ consume the mail budget indefinitely.
 
 SQLite remains the default active relay. Maintainers may explicitly select an
 empty PostgreSQL relay with `PUNARO_RELAY_STORE=postgres` only after completing
-the supported update through the exact current schema (currently v57). This selector does not import the SQLite file,
+the supported update through the exact current schema (currently v58). This selector does not import the SQLite file,
 does not dual-write, and is incompatible with the superseded directory and
 attachment routes. Do not point an established installation at an empty
 PostgreSQL relay as a migration shortcut; the verified one-shot mail cutover is
@@ -218,7 +219,7 @@ again while retaining both stores unchanged.
 ### One-shot mail cutover
 
 First complete the supported update through the exact current schema (currently
-v57); the preview and execution both fail closed on any runtime-compatible older schema before
+v58); the preview and execution both fail closed on any runtime-compatible older schema before
 inspecting or preparing SQLite. Then stop ordinary operator changes, confirm every intended legacy machine is
 `migrated` or explicitly `retired`, and run the read-only preview:
 

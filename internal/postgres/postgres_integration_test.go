@@ -59,7 +59,7 @@ func TestPostgresPlatformSubstrateIntegration(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := pairDB.ExecContext(ctx, `DROP SCHEMA auth, relay, attachment, brain, jobs, audit CASCADE; REVOKE CONNECT ON DATABASE punaro_pair FROM punaro_app; REVOKE CONNECT ON DATABASE punaro_other FROM punaro_app`); err != nil {
+	if _, err := pairDB.ExecContext(ctx, `DROP SCHEMA IF EXISTS fleet, auth, relay, attachment, brain, jobs, audit CASCADE; REVOKE CONNECT ON DATABASE punaro_pair FROM punaro_app; REVOKE CONNECT ON DATABASE punaro_other FROM punaro_app`); err != nil {
 		_ = pairDB.Close()
 		t.Fatalf("auxiliary pair cleanup failed: %v", err)
 	}
@@ -71,7 +71,7 @@ func TestPostgresPlatformSubstrateIntegration(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := pairDB.ExecContext(ctx, `DROP SCHEMA auth, relay, attachment, brain, jobs, audit CASCADE; REVOKE CONNECT ON DATABASE punaro_pair FROM punaro_app; REVOKE CONNECT ON DATABASE punaro_other FROM punaro_app`); err != nil {
+	if _, err := pairDB.ExecContext(ctx, `DROP SCHEMA IF EXISTS fleet, auth, relay, attachment, brain, jobs, audit CASCADE; REVOKE CONNECT ON DATABASE punaro_pair FROM punaro_app; REVOKE CONNECT ON DATABASE punaro_other FROM punaro_app`); err != nil {
 		_ = pairDB.Close()
 		t.Fatalf("auxiliary pair cleanup after v26 upgrade test failed: %v", err)
 	}
@@ -83,7 +83,7 @@ func TestPostgresPlatformSubstrateIntegration(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := pairDB.ExecContext(ctx, `DROP SCHEMA auth, relay, attachment, brain, jobs, audit CASCADE; REVOKE CONNECT ON DATABASE punaro_pair FROM punaro_app; REVOKE CONNECT ON DATABASE punaro_other FROM punaro_app`); err != nil {
+	if _, err := pairDB.ExecContext(ctx, `DROP SCHEMA IF EXISTS fleet, auth, relay, attachment, brain, jobs, audit CASCADE; REVOKE CONNECT ON DATABASE punaro_pair FROM punaro_app; REVOKE CONNECT ON DATABASE punaro_other FROM punaro_app`); err != nil {
 		_ = pairDB.Close()
 		t.Fatalf("auxiliary pair cleanup after v33 upgrade test failed: %v", err)
 	}
@@ -467,6 +467,7 @@ RETURNS boolean LANGUAGE plpgsql SECURITY DEFINER SET search_path=pg_catalog AS 
 	}
 	testDeviceAuthIntegration(ctx, t, app, ownerDB)
 	testClientLifecycleSchemaDriftIntegration(ctx, t, app, ownerDB)
+	testFleetConfigSchemaDriftIntegration(ctx, t, app, ownerDB)
 	testTrustedAttachmentIntegration(ctx, t, app, ownerDB)
 	testProjectIdentityIntegration(ctx, t, app, ownerDB)
 	testCanonicalBrainSchemaDriftIntegration(ctx, t, app, ownerDB)
@@ -742,7 +743,7 @@ AS $function$ BEGIN RETURN NEW; END $function$`); err != nil {
 		t.Fatal("migrator silently repaired dirty schema")
 	}
 
-	if _, err := ownerDB.ExecContext(ctx, `DROP SCHEMA auth, relay, attachment, brain, jobs, audit CASCADE`); err != nil {
+	if _, err := ownerDB.ExecContext(ctx, `DROP SCHEMA IF EXISTS fleet, auth, relay, attachment, brain, jobs, audit CASCADE`); err != nil {
 		t.Fatal(err)
 	}
 	broken := Manifest{MinSupported: 1, MaxSupported: 1, Migrations: []Migration{{Version: 1, Name: "broken", Checksum: "broken-checksum", CompatibilityFloor: 1, SQL: `CREATE SCHEMA auth; SELECT deliberately_invalid_migration_statement`}}}
@@ -787,6 +788,22 @@ AS $function$ BEGIN RETURN NEW; END $function$`); err != nil {
 	var trackerExists bool
 	if err := ownerDB.QueryRowContext(ctx, `SELECT to_regclass('jobs.schema_migrations') IS NOT NULL`).Scan(&trackerExists); err != nil || trackerExists {
 		t.Fatalf("missing-role refusal mutated schema: tracker_exists=%t err=%v", trackerExists, err)
+	}
+}
+
+func testFleetConfigSchemaDriftIntegration(ctx context.Context, t *testing.T, app *Database, ownerDB *sql.DB) {
+	t.Helper()
+	if _, err := ownerDB.ExecContext(ctx, `ALTER TABLE fleet.releases DROP COLUMN archive`); err != nil {
+		t.Fatal(err)
+	}
+	if drifted, err := app.SchemaState(ctx); err != nil || drifted.Classification != Incompatible {
+		t.Fatalf("dropped fleet archive still compatible state=%#v err=%v", drifted, err)
+	}
+	if _, err := ownerDB.ExecContext(ctx, `ALTER TABLE fleet.releases ADD COLUMN archive bytea NOT NULL DEFAULT '\x00'`); err != nil {
+		t.Fatal(err)
+	}
+	if restored, err := app.SchemaState(ctx); err != nil || restored.Classification != Compatible {
+		t.Fatalf("restored fleet archive not compatible state=%#v err=%v", restored, err)
 	}
 }
 

@@ -178,8 +178,8 @@ Host-local `punaro` commands, owner DSN, installation directory:
 
 ```text
 punaro fleet-config configure --directory DIR --repository ABSOLUTE_GIT_DIR --yes
-punaro fleet-config publish COMMIT --directory DIR
-punaro fleet-config publish COMMIT --directory DIR --yes --preview-hash HASH
+punaro fleet-config publish --directory DIR COMMIT
+punaro fleet-config publish --directory DIR --yes --confirm-preview-hash HASH COMMIT
 punaro fleet-config status --directory DIR
 ```
 
@@ -236,9 +236,15 @@ No file contents, host paths, or raw errors in `client_status`. Revoked
 clients cannot insert or update. Application role uses security-definer
 routines with enrolled-client predicates in the same transaction.
 
-Desired mutation is one transaction: insert release if absent (conflict on
-digest is success), then update `fleet.desired` only when the digest changes,
-incrementing `generation`. Same digest: no generation bump.
+Desired mutation is one transaction through the shared maintenance fence
+(`jobs.assert_application_mutation()`). Insert release if absent (conflict on
+digest is success), lock the desired singleton, and reject a confirmed preview
+whose digest/generation no longer match. Update `fleet.desired` only when the
+digest changes, incrementing `generation` with `RETURNING`. Same digest: no
+generation bump.
+
+`git archive` is bounded first: `ls-tree` blob sizes must fit the v1 file/count
+and total-byte limits, and the archive stream is capped at 8 MiB.
 
 ## HTTP (enrolled client only)
 

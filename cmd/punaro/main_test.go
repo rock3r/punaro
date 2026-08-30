@@ -69,7 +69,7 @@ func TestRealPostgresBackupRestoreCleanStackAndRetry(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := targetDB.ExecContext(ctx, `DROP SCHEMA auth, relay, attachment, brain, jobs, audit CASCADE`); err != nil {
+	if _, err := targetDB.ExecContext(ctx, `DROP SCHEMA IF EXISTS fleet, auth, relay, attachment, brain, jobs, audit CASCADE`); err != nil {
 		_ = targetDB.Close()
 		t.Fatal(err)
 	}

@@ -652,6 +652,12 @@ skill metadata. Identical input yields identical archive bytes and digest.
 Product binary releases remain `internal/release`; this pipeline is a separate
 trust domain.
 
+Operators publish with `punaro fleet-config publish COMMIT` against an
+explicitly configured repository. The command materializes the release before
+changing the singleton desired row (schema 58). A failed publish leaves the
+prior desired revision unchanged; an identical digest is idempotent; rollback
+is the same command against a previously published commit.
+
 ## Canonical memory model
 
 Canonical memory is project-scoped PostgreSQL authority. Each item has an
