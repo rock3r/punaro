@@ -457,21 +457,29 @@ func loadAutoRollback(directory string) (autoRollbackState, error) {
 	if err != nil {
 		return autoRollbackState{}, err
 	}
-	if err := rejectDuplicateJSONFields(body); err != nil {
+	record, err := parseAutoRollback(body)
+	if err != nil {
 		return quarantineInvalidAutoRollback(directory)
+	}
+	return record, nil
+}
+
+func parseAutoRollback(body []byte) (autoRollbackState, error) {
+	if err := rejectDuplicateJSONFields(body); err != nil {
+		return autoRollbackState{}, errors.New("bootstrap auto-rollback state is invalid")
 	}
 	decoder := json.NewDecoder(strings.NewReader(string(body)))
 	decoder.DisallowUnknownFields()
 	var record autoRollbackState
 	if err := decoder.Decode(&record); err != nil {
-		return quarantineInvalidAutoRollback(directory)
+		return autoRollbackState{}, errors.New("bootstrap auto-rollback state is invalid")
 	}
 	var trailing any
 	if err := decoder.Decode(&trailing); !errors.Is(err, io.EOF) {
-		return quarantineInvalidAutoRollback(directory)
+		return autoRollbackState{}, errors.New("bootstrap auto-rollback state is invalid")
 	}
 	if record.Schema != 1 || record.Release == "" || record.Sequence < 1 || record.Generation < 0 || !validManifestDigest(record.ManifestSHA256) {
-		return quarantineInvalidAutoRollback(directory)
+		return autoRollbackState{}, errors.New("bootstrap auto-rollback state is invalid")
 	}
 	return record, nil
 }

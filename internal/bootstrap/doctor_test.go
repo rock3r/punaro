@@ -3,6 +3,7 @@ package bootstrap
 import (
 	"context"
 	"crypto/sha256"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
@@ -38,6 +39,229 @@ func TestDoctorVerifiesSignedSlotWithoutMutatingBootstrapState(t *testing.T) {
 	}
 	if after := bootstrapTreeDigest(t, directory); after != before {
 		t.Fatalf("doctor mutated bootstrap state\nbefore=%s\nafter=%s", before, after)
+	}
+}
+
+func TestDoctorAcceptsExplicitRollbackHighWaterStateWithoutMutation(t *testing.T) {
+	origin, directory, now, _ := doctorRollbackFixture(t)
+	if _, err := Rollback(directory); err != nil {
+		t.Fatal(err)
+	}
+	assertDoctorAcceptsRollbackHighWater(t, origin, directory, now)
+}
+
+func TestDoctorAcceptsAutomaticRollbackHighWaterStateWithoutMutation(t *testing.T) {
+	origin, directory, now, current := doctorRollbackFixture(t)
+	unlocked, rolled, err := rollbackIfAllowed(t.Context(), RunRequest{
+		Directory: directory,
+		Origin:    origin.URL,
+		Keys:      origin.Keys,
+		GOOS:      runtime.GOOS,
+		GOARCH:    runtime.GOARCH,
+		Now:       now,
+	}, current)
+	if err != nil || !unlocked || rolled.Release != "v0.1.0" {
+		t.Fatalf("automatic rollback unlocked=%t rolled=%#v err=%v", unlocked, rolled, err)
+	}
+	assertDoctorAcceptsRollbackHighWater(t, origin, directory, now)
+}
+
+func TestDoctorRejectsInvalidRollbackEvidenceWithoutMutation(t *testing.T) {
+	tests := []struct {
+		name               string
+		body               func(*testing.T, slotState) []byte
+		remove             bool
+		autoRollbackStatus punarodiagnostic.Status
+	}{
+		{
+			name: "missing",
+			body: func(*testing.T, slotState) []byte {
+				return nil
+			},
+			remove:             true,
+			autoRollbackStatus: punarodiagnostic.StatusPass,
+		},
+		{
+			name: "malformed",
+			body: func(*testing.T, slotState) []byte {
+				return []byte(`{"schema":1`)
+			},
+			autoRollbackStatus: punarodiagnostic.StatusFail,
+		},
+		{
+			name: "oversized",
+			body: func(*testing.T, slotState) []byte {
+				return []byte(strings.Repeat("x", maximumDoctorStateBytes+1))
+			},
+			autoRollbackStatus: punarodiagnostic.StatusFail,
+		},
+		{
+			name: "identity mismatch",
+			body: func(t *testing.T, rolledAway slotState) []byte {
+				t.Helper()
+				body, err := json.Marshal(autoRollbackState{
+					Schema:         1,
+					Release:        rolledAway.Release,
+					Sequence:       rolledAway.Sequence,
+					ManifestSHA256: rolledAway.ManifestSHA256,
+					Generation:     rolledAway.Generation + 1,
+				})
+				if err != nil {
+					t.Fatal(err)
+				}
+				return body
+			},
+			autoRollbackStatus: punarodiagnostic.StatusPass,
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			origin, directory, now, rolledAway := doctorRollbackFixture(t)
+			if _, err := Rollback(directory); err != nil {
+				t.Fatal(err)
+			}
+			path := filepath.Join(directory, autoRollbackFile)
+			if test.remove {
+				if err := os.Remove(path); err != nil {
+					t.Fatal(err)
+				}
+			} else {
+				if err := os.WriteFile(path, test.body(t, rolledAway), 0o600); err != nil {
+					t.Fatal(err)
+				}
+			}
+			before := bootstrapTreeDigest(t, directory)
+			report, err := Doctor(t.Context(), DoctorRequest{Directory: directory, Origin: origin.URL, Keys: origin.Keys, GOOS: runtime.GOOS, GOARCH: runtime.GOARCH, Now: now, BootstrapRelease: "v0.1.0", FreeBytes: func(string) (uint64, error) { return 1 << 40, nil }})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if doctorCheckStatus(report, "auto_rollback_state") != test.autoRollbackStatus || doctorCheckStatus(report, "accepted_state") != punarodiagnostic.StatusFail {
+				t.Fatalf("invalid rollback evidence passed: report=%#v", report)
+			}
+			if after := bootstrapTreeDigest(t, directory); after != before {
+				t.Fatalf("doctor mutated invalid rollback evidence\nbefore=%s\nafter=%s", before, after)
+			}
+		})
+	}
+}
+
+func TestDoctorRejectsRollbackEvidenceWithoutCurrentSlot(t *testing.T) {
+	origin, directory, now, _ := doctorRollbackFixture(t)
+	if _, err := Rollback(directory); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.RemoveAll(filepath.Join(directory, currentSlot)); err != nil {
+		t.Fatal(err)
+	}
+	before := bootstrapTreeDigest(t, directory)
+	report, err := Doctor(t.Context(), DoctorRequest{Directory: directory, Origin: origin.URL, Keys: origin.Keys, GOOS: runtime.GOOS, GOARCH: runtime.GOARCH, Now: now, BootstrapRelease: "v0.1.0", FreeBytes: func(string) (uint64, error) { return 1 << 40, nil }})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if doctorCheckStatus(report, "current_slot") != punarodiagnostic.StatusFail || doctorCheckStatus(report, "accepted_state") != punarodiagnostic.StatusFail {
+		t.Fatalf("rollback evidence without current slot passed: report=%#v", report)
+	}
+	if after := bootstrapTreeDigest(t, directory); after != before {
+		t.Fatalf("doctor mutated missing-current evidence\nbefore=%s\nafter=%s", before, after)
+	}
+}
+
+func TestDoctorRejectsRollbackHighWaterOlderThanCurrent(t *testing.T) {
+	origin, directory, now, _ := doctorRollbackFixture(t)
+	if _, err := Rollback(directory); err != nil {
+		t.Fatal(err)
+	}
+	current, err := readSlot(filepath.Join(directory, currentSlot))
+	if err != nil {
+		t.Fatal(err)
+	}
+	current.Release = "v0.3.0"
+	current.Sequence = 3
+	current.ManifestSHA256 = strings.Repeat("d", 64)
+	body, err := json.Marshal(current)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(directory, currentSlot, slotRecord), body, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	before := bootstrapTreeDigest(t, directory)
+	report, err := Doctor(t.Context(), DoctorRequest{Directory: directory, Origin: origin.URL, Keys: origin.Keys, GOOS: runtime.GOOS, GOARCH: runtime.GOARCH, Now: now, BootstrapRelease: "v0.1.0", FreeBytes: func(string) (uint64, error) { return 1 << 40, nil }})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if doctorCheckStatus(report, "accepted_state") != punarodiagnostic.StatusFail {
+		t.Fatalf("accepted state older than current passed: report=%#v", report)
+	}
+	if after := bootstrapTreeDigest(t, directory); after != before {
+		t.Fatalf("doctor mutated sequence-conflict evidence\nbefore=%s\nafter=%s", before, after)
+	}
+}
+
+func doctorRollbackFixture(t *testing.T) (*signedOrigin, string, time.Time, slotState) {
+	t.Helper()
+	now := time.Date(2026, 8, 20, 0, 0, 0, 0, time.UTC)
+	origin := newSignedOrigin(t, originSpec{payload: "previous-adapter", goos: runtime.GOOS, goarch: runtime.GOARCH, release: "v0.1.0", sequence: 1, catalogSequence: 1})
+	directory := privateDir(t)
+	request := Request{Directory: directory, Origin: origin.URL, Keys: origin.Keys, GOOS: runtime.GOOS, GOARCH: runtime.GOARCH, Now: now}
+	if _, err := Update(request); err != nil {
+		t.Fatal(err)
+	}
+	previous, err := readSlot(filepath.Join(directory, currentSlot))
+	if err != nil {
+		t.Fatal(err)
+	}
+	previousFiles := make(map[string][]byte)
+	for name, body := range origin.Files {
+		if strings.HasPrefix(name, previous.Release+"/") {
+			previousFiles[name] = body
+		}
+	}
+	origin.republish(t, originSpec{payload: "current-adapter", goos: runtime.GOOS, goarch: runtime.GOARCH, release: "v0.2.0", sequence: 2, catalogSequence: 2})
+	for name, body := range previousFiles {
+		origin.Files[name] = body
+	}
+	allowPreviousInCatalog(t, origin, previous.Release, previous.Sequence, previous.ManifestSHA256)
+	if _, err := Update(request); err != nil {
+		t.Fatal(err)
+	}
+	current, err := readSlot(filepath.Join(directory, currentSlot))
+	if err != nil {
+		t.Fatal(err)
+	}
+	return origin, directory, now, current
+}
+
+func assertDoctorAcceptsRollbackHighWater(t *testing.T, origin *signedOrigin, directory string, now time.Time) {
+	t.Helper()
+	accepted, err := loadAccepted(directory)
+	if err != nil {
+		t.Fatal(err)
+	}
+	before := bootstrapTreeDigest(t, directory)
+	report, err := Doctor(t.Context(), DoctorRequest{Directory: directory, Origin: origin.URL, Keys: origin.Keys, GOOS: runtime.GOOS, GOARCH: runtime.GOARCH, Now: now, BootstrapRelease: "v0.1.0", FreeBytes: func(string) (uint64, error) { return 1 << 40, nil }})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if report.Identity.Release != "v0.1.0" || report.Identity.ReleaseSequence != 1 {
+		t.Fatalf("identity=%#v", report.Identity)
+	}
+	if doctorCheckStatus(report, "accepted_state") != punarodiagnostic.StatusPass {
+		t.Fatalf("accepted state did not recognize rollback high-water: report=%#v", report)
+	}
+	if doctorCheckStatus(report, "auto_rollback_state") != punarodiagnostic.StatusPass {
+		t.Fatalf("auto-rollback state was not valid: report=%#v", report)
+	}
+	for _, code := range []string{"current_catalog_allowed", "current_manifest_signature", "current_platform_compatibility", "current_artifact_integrity", "previous_catalog_allowed", "previous_manifest_signature", "previous_platform_compatibility", "previous_artifact_integrity"} {
+		if doctorCheckStatus(report, code) != punarodiagnostic.StatusPass {
+			t.Fatalf("signed slot check %s did not pass: report=%#v", code, report)
+		}
+	}
+	if report.Identity.CatalogSequence != accepted.CatalogSequence {
+		t.Fatalf("catalog sequence=%d want=%d", report.Identity.CatalogSequence, accepted.CatalogSequence)
+	}
+	if after := bootstrapTreeDigest(t, directory); after != before {
+		t.Fatalf("doctor mutated rollback state\nbefore=%s\nafter=%s", before, after)
 	}
 }
 

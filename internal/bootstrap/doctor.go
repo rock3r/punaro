@@ -112,6 +112,7 @@ func Doctor(ctx context.Context, request DoctorRequest) (punarodiagnostic.Report
 	accepted, acceptedErr := doctorLoadAccepted(ctx, request.Directory)
 	current, currentErr := doctorReadOptionalSlot(ctx, filepath.Join(request.Directory, currentSlot))
 	previous, previousErr := doctorReadOptionalSlot(ctx, filepath.Join(request.Directory, previousSlot))
+	autoRollback, autoRollbackExists, autoRollbackErr := doctorLoadAutoRollback(ctx, request.Directory)
 	if currentErr != nil || current.Release == "" {
 		checks = append(checks, punarodiagnostic.Fail("current_slot", "reinstall_signed_release"))
 	} else {
@@ -127,7 +128,14 @@ func Doctor(ctx context.Context, request DoctorRequest) (punarodiagnostic.Report
 	default:
 		checks = append(checks, punarodiagnostic.Pass("previous_slot"))
 	}
-	if acceptedErr != nil || currentErr != nil || current.Release == "" || accepted.Release != current.Release || accepted.ReleaseSequence != current.Sequence || accepted.ManifestSHA256 != current.ManifestSHA256 {
+	if autoRollbackErr != nil {
+		checks = append(checks, punarodiagnostic.Fail("auto_rollback_state", "repair_bootstrap_state"))
+	} else {
+		checks = append(checks, punarodiagnostic.Pass("auto_rollback_state"))
+	}
+	acceptedMatchesCurrent := acceptedErr == nil && currentErr == nil && acceptedMatchesSlot(accepted, current)
+	acceptedMatchesRollback := acceptedErr == nil && currentErr == nil && current.Release != "" && previousErr == nil && autoRollbackErr == nil && autoRollbackExists && accepted.ReleaseSequence > current.Sequence && acceptedMatchesSlot(accepted, previous) && autoRollbackMatchesSlot(autoRollback, previous)
+	if !acceptedMatchesCurrent && !acceptedMatchesRollback {
 		checks = append(checks, punarodiagnostic.Fail("accepted_state", "repair_bootstrap_state"))
 	} else {
 		checks = append(checks, punarodiagnostic.Pass("accepted_state"))
@@ -230,6 +238,23 @@ func doctorLoadAccepted(ctx context.Context, directory string) (acceptedState, e
 	return parseAccepted(body)
 }
 
+func doctorLoadAutoRollback(ctx context.Context, directory string) (autoRollbackState, bool, error) {
+	body, exists, err := doctorReadOptionalState(ctx, filepath.Join(directory, autoRollbackFile), maximumDoctorStateBytes)
+	if err != nil || !exists {
+		return autoRollbackState{}, exists, err
+	}
+	record, err := parseAutoRollback(body)
+	return record, true, err
+}
+
+func acceptedMatchesSlot(accepted acceptedState, slot slotState) bool {
+	return slot.Release != "" && accepted.Release == slot.Release && accepted.ReleaseSequence == slot.Sequence && accepted.ManifestSHA256 == slot.ManifestSHA256
+}
+
+func autoRollbackMatchesSlot(record autoRollbackState, slot slotState) bool {
+	return record.Release == slot.Release && record.Sequence == slot.Sequence && record.ManifestSHA256 == slot.ManifestSHA256 && record.Generation == slot.Generation
+}
+
 func doctorReadOptionalSlot(ctx context.Context, directory string) (slotState, error) {
 	if err := ctx.Err(); err != nil {
 		return slotState{}, err
@@ -281,7 +306,7 @@ func doctorLoadRecovery(ctx context.Context, directory string) (recoveryState, e
 }
 
 func unavailableBootstrapStateChecks() []punarodiagnostic.Check {
-	codes := []string{"bootstrap_lock", "run_lock", "disk_space", "release_keys", "accepted_state", "current_slot", "previous_slot", "journal_state", "recovery_state", "candidate_state", "swap_state", "catalog_reachability", "catalog_signature", "catalog_freshness", "catalog_sequence", "current_catalog_allowed", "current_critical_block", "current_manifest_signature", "current_platform_compatibility", "minimum_bootstrap_release", "minimum_recovery_protocol", "current_artifact_integrity", "previous_catalog_allowed", "previous_critical_block", "previous_manifest_signature", "previous_platform_compatibility", "previous_artifact_integrity", "rollback_available", "running_artifact", "supervisor_process", "candidate_health"}
+	codes := []string{"bootstrap_lock", "run_lock", "disk_space", "release_keys", "accepted_state", "auto_rollback_state", "current_slot", "previous_slot", "journal_state", "recovery_state", "candidate_state", "swap_state", "catalog_reachability", "catalog_signature", "catalog_freshness", "catalog_sequence", "current_catalog_allowed", "current_critical_block", "current_manifest_signature", "current_platform_compatibility", "minimum_bootstrap_release", "minimum_recovery_protocol", "current_artifact_integrity", "previous_catalog_allowed", "previous_critical_block", "previous_manifest_signature", "previous_platform_compatibility", "previous_artifact_integrity", "rollback_available", "running_artifact", "supervisor_process", "candidate_health"}
 	checks := make([]punarodiagnostic.Check, 0, len(codes))
 	for _, code := range codes {
 		checks = append(checks, punarodiagnostic.Unavailable(code, "repair_bootstrap_directory"))
