@@ -24,6 +24,8 @@ type memoryFleetStore struct {
 }
 
 func (store *memoryFleetStore) FleetDesired(context.Context) (FleetDesiredMetadata, error) {
+	store.mu.Lock()
+	defer store.mu.Unlock()
 	return store.desired, nil
 }
 
@@ -150,6 +152,23 @@ func TestHTTPFleetConfigStatusIsBoundedIdempotentAndRejectsStaleGeneration(t *te
 	if len(fleet.status) != 2 || fleet.status["machine-a"].State != "current" || fleet.status["machine-b"].State != "pending" {
 		t.Fatalf("rows=%#v", fleet.status)
 	}
+	activation := serveSigned(t, handler, private, "machine-a", http.MethodPut, "/v1/fleet-config/status", `{"generation":1,"applied_digest":"`+strings.Repeat("ab", 32)+`","state":"current","activation":"next_session","trailer_state":"present","alias_state":"disabled","project_match_state":"matched","report_generation":2}`, "status-activation", "key-1")
+	if activation.Code != http.StatusConflict {
+		t.Fatalf("activation reuse status=%d body=%s", activation.Code, activation.Body.String())
+	}
+}
+
+func TestFleetStatusRequestHashIncludesOptionalFields(t *testing.T) {
+	t.Parallel()
+	base := FleetStatusReport{Generation: 1, AppliedDigest: strings.Repeat("ab", 32), State: "current", ReportGeneration: 2}
+	changed := base
+	changed.Activation = "next_turn"
+	changed.TrailerState = "present"
+	changed.AliasState = "linked"
+	changed.ProjectMatchState = "matched"
+	if fleetStatusRequestHash("machine-a", base) == fleetStatusRequestHash("machine-a", changed) {
+		t.Fatal("optional status fields omitted from idempotency hash")
+	}
 }
 
 func TestHTTPFleetConfigRejectsUnknownMachineAndClientPublish(t *testing.T) {
@@ -173,6 +192,41 @@ func TestHTTPFleetConfigRejectsUnknownMachineAndClientPublish(t *testing.T) {
 	revoked := serveSigned(t, handler, private, "machine-revoked", http.MethodGet, "/v1/fleet-config/desired", "", "revoked", "")
 	if revoked.Code != http.StatusUnauthorized {
 		t.Fatalf("revoked status=%d body=%s", revoked.Code, revoked.Body.String())
+	}
+}
+
+func TestWatchFleetDesiredBroadcastsGenerationAdvance(t *testing.T) {
+	t.Parallel()
+	store := &memoryFleetStore{desired: FleetDesiredMetadata{Generation: 2, Digest: strings.Repeat("ab", 32)}}
+	notifier := NewNotifier()
+	client := notifier.Register("machine-a")
+	t.Cleanup(client.Close)
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(cancel)
+	go WatchFleetDesired(ctx, store, notifier, 20*time.Millisecond)
+	deadline := time.Now().Add(time.Second)
+	for time.Now().Before(deadline) {
+		select {
+		case event := <-client.Events():
+			if event.TopicID == FleetConfigTopic && event.Sequence == 2 {
+				store.mu.Lock()
+				store.desired.Generation = 5
+				store.mu.Unlock()
+				goto advanced
+			}
+		default:
+			time.Sleep(10 * time.Millisecond)
+		}
+	}
+	t.Fatal("initial generation was not broadcast")
+advanced:
+	select {
+	case event := <-client.Events():
+		if event.TopicID != FleetConfigTopic || event.Sequence != 5 {
+			t.Fatalf("event=%#v", event)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("advanced generation was not broadcast")
 	}
 }
 

@@ -48,3 +48,28 @@ SELECT fleet_namespace_oid IS NOT NULL
 FROM objects`).Scan(&available)
 	return available, err
 }
+
+func fleetClientStatusControlsAvailable(ctx context.Context, q queryer) (bool, error) {
+	var available bool
+	err := q.QueryRowContext(ctx, `
+WITH objects AS (
+    SELECT to_regclass('fleet.client_status') AS status_oid,
+           to_regclass('fleet.client_status_idempotency') AS idempotency_oid,
+           to_regprocedure('fleet.put_client_status(text,bigint,text,text,text,text,text,text,bigint,text,text)') AS put_oid,
+           to_regprocedure('jobs.guard_application_mutation()') AS fence_oid
+)
+SELECT status_oid IS NOT NULL AND idempotency_oid IS NOT NULL AND put_oid IS NOT NULL AND fence_oid IS NOT NULL
+   AND (SELECT count(*) = 2 AND bool_and(relkind = 'r' AND pg_get_userbyid(relowner) = 'punaro_owner')
+        FROM pg_class WHERE oid = ANY(ARRAY[status_oid, idempotency_oid]))
+   AND EXISTS (SELECT 1 FROM pg_attribute WHERE attrelid = status_oid AND attname = 'report_generation' AND atttypid = 'bigint'::regtype AND attnotnull AND NOT attisdropped)
+   AND (SELECT count(*) = 2 FROM pg_trigger
+        WHERE tgrelid = ANY(ARRAY[status_oid, idempotency_oid])
+          AND tgname = 'application_mutation_fence' AND NOT tgisinternal AND tgenabled = 'O' AND tgfoid = fence_oid AND tgtype = 62)
+   AND has_table_privilege('punaro_app', 'fleet.client_status', 'SELECT')
+   AND has_function_privilege('punaro_app', put_oid, 'EXECUTE')
+   AND NOT has_table_privilege('punaro_app', 'fleet.client_status', 'INSERT')
+   AND NOT has_table_privilege('punaro_app', 'fleet.client_status', 'UPDATE')
+   AND NOT has_table_privilege('punaro_app', 'fleet.client_status_idempotency', 'INSERT')
+FROM objects`).Scan(&available)
+	return available, err
+}

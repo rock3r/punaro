@@ -198,6 +198,12 @@ func run(args []string, stderr io.Writer) int {
 		}
 	}
 	var postgresRelay relay.Backend
+	var fleetStore relay.FleetConfigStore
+	if platformDB != nil {
+		if fleet, ok := platformDB.(relay.FleetConfigStore); ok {
+			fleetStore = fleet
+		}
+	}
 	if cfg.RelayStore == "postgres" {
 		var ok bool
 		postgresRelay, ok = platformDB.(relay.Backend)
@@ -206,7 +212,7 @@ func run(args []string, stderr io.Writer) int {
 			return 2
 		}
 	}
-	relayHandler, relayStore, err := buildRelayHandler(cfg, postgresRelay)
+	relayHandler, relayStore, err := buildRelayHandler(cfg, fleetStore, postgresRelay)
 	if err != nil {
 		_, _ = fmt.Fprintf(stderr, "punarod relay configuration error: %v\n", err)
 		return 2
@@ -721,7 +727,7 @@ func shutdownHTTPServers(ctx context.Context, servers ...httpShutdowner) error {
 	return errors.Join(joined...)
 }
 
-func buildRelayHandler(cfg config.Config, postgresBackends ...relay.Backend) (http.Handler, *relay.Store, error) {
+func buildRelayHandler(cfg config.Config, fleet relay.FleetConfigStore, postgresBackends ...relay.Backend) (http.Handler, *relay.Store, error) {
 	if !cfg.RelayEnabled {
 		return nil, nil, nil
 	}
@@ -805,11 +811,17 @@ func buildRelayHandler(cfg config.Config, postgresBackends ...relay.Backend) (ht
 		}
 		return nil, nil, err
 	}
-	handlerOptions := relay.HandlerOptions{Metrics: metrics}
-	if fleet, ok := backend.(relay.FleetConfigStore); ok {
-		handlerOptions.FleetConfig = fleet
+	if fleet == nil {
+		if candidate, ok := backend.(relay.FleetConfigStore); ok {
+			fleet = candidate
+		}
 	}
+	notifier := relay.NewNotifier()
+	handlerOptions := relay.HandlerOptions{Metrics: metrics, FleetConfig: fleet, Notifier: notifier}
 	handler := relay.NewHandler(backend, authenticator, handlerOptions)
+	if fleet != nil {
+		go relay.WatchFleetDesired(context.Background(), fleet, notifier, 2*time.Second)
+	}
 	if cfg.AccessIssuer != "" {
 		verifier, err := newAccessVerifier(cfg)
 		if err != nil {

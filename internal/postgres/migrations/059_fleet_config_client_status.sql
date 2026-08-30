@@ -68,7 +68,8 @@ BEGIN
     END IF;
     SELECT report_generation INTO previous_generation
     FROM fleet.client_status
-    WHERE client_id = target;
+    WHERE client_id = target
+    FOR UPDATE;
     IF FOUND AND previous_generation >= p_report_generation THEN
         RAISE EXCEPTION 'fleet-config status generation is stale';
     END IF;
@@ -88,11 +89,19 @@ BEGIN
         alias_state = EXCLUDED.alias_state,
         project_match_state = EXCLUDED.project_match_state,
         reported_at = statement_timestamp(),
-        report_generation = EXCLUDED.report_generation;
+        report_generation = EXCLUDED.report_generation
+    WHERE fleet.client_status.report_generation < EXCLUDED.report_generation;
     INSERT INTO fleet.client_status_idempotency (client_id, idempotency_key, request_hash)
     VALUES (target, p_idempotency_key, p_request_hash);
 END;
 $function$;
+
+CREATE TRIGGER application_mutation_fence
+    BEFORE INSERT OR UPDATE OR DELETE OR TRUNCATE ON fleet.client_status
+    FOR EACH STATEMENT EXECUTE FUNCTION jobs.guard_application_mutation();
+CREATE TRIGGER application_mutation_fence
+    BEFORE INSERT OR UPDATE OR DELETE OR TRUNCATE ON fleet.client_status_idempotency
+    FOR EACH STATEMENT EXECUTE FUNCTION jobs.guard_application_mutation();
 
 REVOKE ALL ON fleet.client_status FROM PUBLIC;
 REVOKE ALL ON fleet.client_status_idempotency FROM PUBLIC;

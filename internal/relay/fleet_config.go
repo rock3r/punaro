@@ -4,11 +4,12 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
-	"errors"
 	"regexp"
 	"strconv"
+	"time"
 )
 
+// FleetConfigTopic is the payload-free wake topic for desired-generation advances.
 const FleetConfigTopic = "fleet-config"
 
 var fleetDigestPattern = regexp.MustCompile(`^[0-9a-f]{64}$`)
@@ -66,11 +67,9 @@ func validFleetStatus(report FleetStatusReport) bool {
 }
 
 func fleetStatusRequestHash(machineID string, report FleetStatusReport) string {
-	sum := sha256.Sum256([]byte(machineID + "\n" + report.AppliedDigest + "\n" + report.State + "\n" + strconv.FormatInt(report.Generation, 10) + "\n" + strconv.FormatInt(report.ReportGeneration, 10)))
+	sum := sha256.Sum256([]byte(machineID + "\n" + report.AppliedDigest + "\n" + report.State + "\n" + report.Activation + "\n" + report.TrailerState + "\n" + report.AliasState + "\n" + report.ProjectMatchState + "\n" + strconv.FormatInt(report.Generation, 10) + "\n" + strconv.FormatInt(report.ReportGeneration, 10)))
 	return hex.EncodeToString(sum[:])
 }
-
-func errFleetUnauthorized() error { return errors.New("fleet-config access is not authorized") }
 
 // BroadcastFleetWake emits a payload-free hint when desired generation advances.
 func BroadcastFleetWake(notifier *Notifier, previous, current int64) int64 {
@@ -79,4 +78,30 @@ func BroadcastFleetWake(notifier *Notifier, previous, current int64) int64 {
 	}
 	notifier.PublishAll(FleetConfigTopic, current)
 	return current
+}
+
+// WatchFleetDesired polls desired generation and emits payload-free wake hints.
+func WatchFleetDesired(ctx context.Context, store FleetConfigStore, notifier *Notifier, interval time.Duration) {
+	if store == nil || notifier == nil || interval <= 0 {
+		return
+	}
+	var previous int64
+	poll := func() {
+		desired, err := store.FleetDesired(ctx)
+		if err != nil {
+			return
+		}
+		previous = BroadcastFleetWake(notifier, previous, desired.Generation)
+	}
+	poll()
+	ticker := time.NewTicker(interval)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			poll()
+		}
+	}
 }

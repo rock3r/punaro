@@ -38,6 +38,7 @@ func (h *handler) fleetRelease(w http.ResponseWriter, r *http.Request, digest, m
 	_ = machineID
 	w.Header().Set("Content-Type", "application/octet-stream")
 	w.WriteHeader(http.StatusOK)
+	// #nosec G705 -- digest-pinned USTAR archive is emitted as octet-stream, never HTML.
 	_, _ = w.Write(archive)
 }
 

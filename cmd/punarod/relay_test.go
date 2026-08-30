@@ -64,7 +64,7 @@ func (d *transitionDatabaseDouble) ResolveMigratedLegacyPublicKey(_ context.Cont
 }
 
 func TestBuildRelayHandlerRejectsInvalidEnrollment(t *testing.T) {
-	_, closeRelay, err := buildRelayHandler(config.Config{DataDir: t.TempDir(), RelayEnabled: true, RelayMachinesJSON: `[{"id":"machine-a","public_key":"invalid","endpoint_prefixes":["agent/"]}]`})
+	_, closeRelay, err := buildRelayHandler(config.Config{DataDir: t.TempDir(), RelayEnabled: true, RelayMachinesJSON: `[{"id":"machine-a","public_key":"invalid","endpoint_prefixes":["agent/"]}]`}, nil)
 	if closeRelay != nil {
 		t.Fatal("invalid relay configuration returned a closer")
 	}
@@ -80,7 +80,7 @@ func TestBuildRelayHandlerRevokedEnrollmentFailsClosedAfterRestart(t *testing.T)
 	}
 	machines := `[{"id":"machine-a","public_key":"` + base64.RawURLEncoding.EncodeToString(public) + `","endpoint_prefixes":["agent/a/"]}]`
 	dataDir := t.TempDir()
-	first, firstStore, err := buildRelayHandler(config.Config{DataDir: dataDir, RelayEnabled: true, RelayMachinesJSON: machines})
+	first, firstStore, err := buildRelayHandler(config.Config{DataDir: dataDir, RelayEnabled: true, RelayMachinesJSON: machines}, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -94,7 +94,7 @@ func TestBuildRelayHandlerRevokedEnrollmentFailsClosedAfterRestart(t *testing.T)
 		t.Fatal(err)
 	}
 
-	restarted, restartedStore, err := buildRelayHandler(config.Config{DataDir: dataDir, RelayEnabled: true, RelayMachinesJSON: `[]`})
+	restarted, restartedStore, err := buildRelayHandler(config.Config{DataDir: dataDir, RelayEnabled: true, RelayMachinesJSON: `[]`}, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -128,9 +128,54 @@ func TestBuildRelayCanSelectPostgresBackendWithoutOpeningSQLite(t *testing.T) {
 	handler, sqliteStore, err := buildRelayHandler(config.Config{
 		DataDir: t.TempDir(), RelayEnabled: true, RelayStore: "postgres",
 		RelayMachinesJSON: `[{"id":"machine-a","public_key":"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA","endpoint_prefixes":["agent/a/"]}]`,
-	}, backend)
+	}, nil, backend)
 	if err != nil || handler == nil || sqliteStore != nil {
 		t.Fatalf("handler=%v sqlite=%v err=%v", handler, sqliteStore, err)
+	}
+}
+
+type fleetConfigDouble struct {
+	desired relay.FleetDesiredMetadata
+}
+
+func (d *fleetConfigDouble) FleetDesired(context.Context) (relay.FleetDesiredMetadata, error) {
+	return d.desired, nil
+}
+
+func (d *fleetConfigDouble) FleetRelease(context.Context, string) ([]byte, error) {
+	return nil, errors.New("missing")
+}
+
+func (d *fleetConfigDouble) PutFleetStatus(context.Context, string, relay.FleetStatusReport) error {
+	return nil
+}
+
+func TestBuildRelayHandlerServesFleetConfigWhenRelayIsSQLite(t *testing.T) {
+	public, private, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	machines := `[{"id":"machine-a","public_key":"` + base64.RawURLEncoding.EncodeToString(public) + `","endpoint_prefixes":["agent/a/"]}]`
+	fleet := &fleetConfigDouble{desired: relay.FleetDesiredMetadata{Generation: 3, Digest: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", SourceCommit: "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"}}
+	handler, store, err := buildRelayHandler(config.Config{DataDir: t.TempDir(), RelayEnabled: true, RelayMachinesJSON: machines}, fleet)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+	request := httptest.NewRequestWithContext(t.Context(), http.MethodGet, "/v1/fleet-config/desired", http.NoBody)
+	signed := relay.SignedRequest{MachineID: "machine-a", Method: request.Method, Path: request.URL.Path, Timestamp: time.Now().UTC(), Nonce: "fleet-desired"}
+	signed.Signature = ed25519.Sign(private, relay.CanonicalRequest(signed))
+	request.Header.Set("X-Punaro-Machine", signed.MachineID)
+	request.Header.Set("X-Punaro-Timestamp", signed.Timestamp.Format(time.RFC3339Nano))
+	request.Header.Set("X-Punaro-Nonce", signed.Nonce)
+	request.Header.Set("X-Punaro-Signature", base64.RawURLEncoding.EncodeToString(signed.Signature))
+	response := httptest.NewRecorder()
+	handler.ServeHTTP(response, request)
+	if response.Code != http.StatusOK {
+		t.Fatalf("status=%d body=%s", response.Code, response.Body.String())
+	}
+	if !bytes.Contains(response.Body.Bytes(), []byte(`"generation": 3`)) && !bytes.Contains(response.Body.Bytes(), []byte(`"generation":3`)) {
+		t.Fatalf("body=%s", response.Body.String())
 	}
 }
 
@@ -175,7 +220,7 @@ func TestBuildPermitHandlerRequiresEnrolledAttachmentDeviceBinding(t *testing.T)
 	if err := os.WriteFile(keyPath, []byte(base64.RawURLEncoding.EncodeToString(issuerPrivate)), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	_, store, err := buildRelayHandler(config.Config{DataDir: t.TempDir(), RelayEnabled: true, RelayMachinesJSON: `[{"id":"machine-a","public_key":"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA","endpoint_prefixes":["agent/a/"]}]`})
+	_, store, err := buildRelayHandler(config.Config{DataDir: t.TempDir(), RelayEnabled: true, RelayMachinesJSON: `[{"id":"machine-a","public_key":"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA","endpoint_prefixes":["agent/a/"]}]`}, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -201,7 +246,7 @@ func TestBuildV3AttachmentHandlersRequireEnrolledAttachmentDeviceBinding(t *test
 	}
 	dataDir := t.TempDir()
 	_, store, err := buildRelayHandler(config.Config{DataDir: dataDir, RelayEnabled: true, RelayMachinesJSON: `[{
-"id":"machine-a","public_key":"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA","endpoint_prefixes":["agent/a/"]}]`})
+"id":"machine-a","public_key":"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA","endpoint_prefixes":["agent/a/"]}]`}, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -230,7 +275,7 @@ func TestBuildPermitHandlerRejectsUnavailableDirectoryAtStartup(t *testing.T) {
 	}
 	dataDir := t.TempDir()
 	machines := `[{"id":"machine-a","public_key":"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA","endpoint_prefixes":["agent/a/"],"attachment_device_id":"AQEBAQEBAQEBAQEBAQEBAQ"}]`
-	_, store, err := buildRelayHandler(config.Config{DataDir: dataDir, RelayEnabled: true, RelayMachinesJSON: machines})
+	_, store, err := buildRelayHandler(config.Config{DataDir: dataDir, RelayEnabled: true, RelayMachinesJSON: machines}, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -308,7 +353,7 @@ func TestPermitRuntimeMintsPermitOnlyForBoundMachineHolder(t *testing.T) {
 	}
 	dataDir := t.TempDir()
 	machines := `[{"id":"machine-a","public_key":"` + base64.RawURLEncoding.EncodeToString(machinePublic) + `","endpoint_prefixes":["agent/a/"],"attachment_device_id":"` + base64.RawURLEncoding.EncodeToString(senderID[:]) + `"},{"id":"machine-b","public_key":"` + base64.RawURLEncoding.EncodeToString(machineBPublic) + `","endpoint_prefixes":["agent/b/"],"attachment_device_id":"` + base64.RawURLEncoding.EncodeToString(recipientID[:]) + `"}]`
-	_, store, err := buildRelayHandler(config.Config{DataDir: dataDir, RelayEnabled: true, RelayMachinesJSON: machines})
+	_, store, err := buildRelayHandler(config.Config{DataDir: dataDir, RelayEnabled: true, RelayMachinesJSON: machines}, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -418,7 +463,7 @@ func TestV3PermitRuntimeMintsOnlyForBoundMachineHolder(t *testing.T) {
 	}
 	dataDir := t.TempDir()
 	machines := `[{"id":"machine-a","public_key":"` + base64.RawURLEncoding.EncodeToString(machinePublic) + `","endpoint_prefixes":["agent/a/"],"attachment_device_id":"` + base64.RawURLEncoding.EncodeToString(senderID[:]) + `"},{"id":"machine-b","public_key":"` + base64.RawURLEncoding.EncodeToString(machineBPublic) + `","endpoint_prefixes":["agent/b/"],"attachment_device_id":"` + base64.RawURLEncoding.EncodeToString(recipientID[:]) + `"}]`
-	_, store, err := buildRelayHandler(config.Config{DataDir: dataDir, RelayEnabled: true, RelayMachinesJSON: machines})
+	_, store, err := buildRelayHandler(config.Config{DataDir: dataDir, RelayEnabled: true, RelayMachinesJSON: machines}, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -515,7 +560,7 @@ func permitHandlerConfig(t *testing.T, privateDir, keyPath string) legacyAttachm
 }
 
 func TestBuildDirectoryHandlerRequiresValidPrivateSnapshot(t *testing.T) {
-	_, closeRelay, err := buildRelayHandler(config.Config{DataDir: t.TempDir(), RelayEnabled: true, RelayMachinesJSON: `[{"id":"machine-a","public_key":"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA","endpoint_prefixes":["agent/a/"]}]`})
+	_, closeRelay, err := buildRelayHandler(config.Config{DataDir: t.TempDir(), RelayEnabled: true, RelayMachinesJSON: `[{"id":"machine-a","public_key":"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA","endpoint_prefixes":["agent/a/"]}]`}, nil)
 	if err != nil {
 		t.Fatal(err)
 	}

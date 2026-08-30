@@ -170,8 +170,8 @@ database and investigate. The digest-pinned `make test-postgres` stack is epheme
 test infrastructure, publishes no database port, and deletes its volume on
 exit.
 
-The current binary requires schema version 58 and supports an intact schema
-from version 10 through 58 as an update boundary. Versions 10 through 57 are
+The current binary requires schema version 59 and supports an intact schema
+from version 10 through 59 as an update boundary. Versions 10 through 58 are
 reported as `upgrade_required`; versions below the compatibility floor, newer
 versions, and damaged objects are `incompatible`. The embedded manifest and
 target release metadata are authoritative; check them instead of assuming a
@@ -210,7 +210,7 @@ consume the mail budget indefinitely.
 
 SQLite remains the default active relay. Maintainers may explicitly select an
 empty PostgreSQL relay with `PUNARO_RELAY_STORE=postgres` only after completing
-the supported update through the exact current schema (currently v58). This selector does not import the SQLite file,
+the supported update through the exact current schema (currently v59). This selector does not import the SQLite file,
 does not dual-write, and is incompatible with the superseded directory and
 attachment routes. Do not point an established installation at an empty
 PostgreSQL relay as a migration shortcut; the verified one-shot mail cutover is
@@ -220,7 +220,7 @@ again while retaining both stores unchanged.
 ### One-shot mail cutover
 
 First complete the supported update through the exact current schema (currently
-v58); the preview and execution both fail closed on any runtime-compatible older schema before
+v59); the preview and execution both fail closed on any runtime-compatible older schema before
 inspecting or preparing SQLite. Then stop ordinary operator changes, confirm every intended legacy machine is
 `migrated` or explicitly `retired`, and run the read-only preview:
 
