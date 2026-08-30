@@ -232,8 +232,7 @@ func materializeFleetCommitFromGit(repository, commit string) (fleetconfig.Relea
 	if _, err := fleetconfig.ParseCommitID(commit); err != nil {
 		return fleetconfig.Release{}, err
 	}
-	kind := exec.CommandContext(context.Background(), "git", "-C", repository, "cat-file", "-t", commit) // #nosec G204 -- fixed git argv, commit already parsed.
-	kind.Stderr = io.Discard
+	kind := fleetGitCommand("-C", repository, "cat-file", "-t", commit)
 	out, err := kind.Output()
 	if err != nil || strings.TrimSpace(string(out)) != "commit" {
 		return fleetconfig.Release{}, errors.New("commit is unavailable")
@@ -246,8 +245,7 @@ func materializeFleetCommitFromGit(repository, commit string) (fleetconfig.Relea
 		return fleetconfig.Release{}, errors.New("fleet-config checkout failed")
 	}
 	defer func() { _ = os.RemoveAll(dest) }()
-	archive := exec.CommandContext(context.Background(), "git", "-C", repository, "archive", commit) // #nosec G204 -- fixed git argv, commit already parsed.
-	archive.Stderr = io.Discard
+	archive := fleetGitCommand("-C", repository, "archive", commit)
 	extract := exec.CommandContext(context.Background(), "tar", "-x", "-C", dest) // #nosec G204 -- fixed tar argv, dest is MkdirTemp.
 	extract.Stderr = io.Discard
 	pipe, err := archive.StdoutPipe()
@@ -286,9 +284,15 @@ func persistFleetReleaseDefault(ctx context.Context, ownerDSNFile string, releas
 	return admin.PublishFleetRelease(ctx, release, previewHash, expected)
 }
 
+func fleetGitCommand(args ...string) *exec.Cmd {
+	cmd := exec.CommandContext(context.Background(), "git", args...) // #nosec G204 -- fixed git argv, commit already parsed.
+	cmd.Stderr = io.Discard
+	cmd.Env = append(os.Environ(), "GIT_NO_REPLACE_OBJECTS=1")
+	return cmd
+}
+
 func boundFleetGitTree(repository, commit string) error {
-	listed := exec.CommandContext(context.Background(), "git", "-C", repository, "ls-tree", "-r", "-l", "--full-tree", commit) // #nosec G204 -- fixed git argv, commit already parsed.
-	listed.Stderr = io.Discard
+	listed := fleetGitCommand("-C", repository, "ls-tree", "-r", "-l", "--full-tree", commit)
 	stdout, err := listed.StdoutPipe()
 	if err != nil {
 		return errors.New("commit is unavailable")

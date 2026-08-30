@@ -30,6 +30,16 @@ SELECT fleet_namespace_oid IS NOT NULL
    AND has_table_privilege('punaro_app', 'fleet.desired', 'SELECT')
    AND NOT has_table_privilege('punaro_app', 'fleet.releases', 'INSERT')
    AND NOT has_table_privilege('punaro_app', 'fleet.desired', 'INSERT')
+   AND NOT has_table_privilege('punaro_app', 'fleet.releases', 'UPDATE')
+   AND NOT has_table_privilege('punaro_app', 'fleet.desired', 'UPDATE')
+   AND NOT has_table_privilege('punaro_app', 'fleet.releases', 'DELETE')
+   AND NOT has_table_privilege('punaro_app', 'fleet.desired', 'DELETE')
+   AND NOT has_table_privilege('punaro_app', 'fleet.releases', 'TRUNCATE')
+   AND NOT has_table_privilege('punaro_app', 'fleet.desired', 'TRUNCATE')
+   AND NOT has_table_privilege('punaro_app', 'fleet.releases', 'REFERENCES')
+   AND NOT has_table_privilege('punaro_app', 'fleet.desired', 'REFERENCES')
+   AND NOT has_table_privilege('punaro_app', 'fleet.releases', 'TRIGGER')
+   AND NOT has_table_privilege('punaro_app', 'fleet.desired', 'TRIGGER')
 FROM objects`).Scan(&available)
 	return available, err
 }

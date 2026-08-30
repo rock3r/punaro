@@ -178,8 +178,8 @@ Host-local `punaro` commands, owner DSN, installation directory:
 
 ```text
 punaro fleet-config configure --directory DIR --repository ABSOLUTE_GIT_DIR --yes
-punaro fleet-config publish COMMIT --directory DIR
-punaro fleet-config publish COMMIT --directory DIR --yes --preview-hash HASH
+punaro fleet-config publish --directory DIR COMMIT
+punaro fleet-config publish --directory DIR --yes --confirm-preview-hash HASH COMMIT
 punaro fleet-config status --directory DIR
 ```
 
