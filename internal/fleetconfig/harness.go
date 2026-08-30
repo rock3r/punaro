@@ -1,6 +1,9 @@
 package fleetconfig
 
-import "os"
+import (
+	"os"
+	"path/filepath"
+)
 
 // HarnessProjection is one built-in coding-agent mapping.
 type HarnessProjection struct {
@@ -10,7 +13,7 @@ type HarnessProjection struct {
 }
 
 // DetectHarnesses reports supported and unsupported installed harnesses.
-func DetectHarnesses(home string, lookup func(string) bool) []HarnessProjection {
+func DetectHarnesses(home, project string, lookup func(string) bool) []HarnessProjection {
 	if lookup == nil {
 		lookup = func(path string) bool {
 			_, err := os.Lstat(path)
@@ -27,14 +30,16 @@ func DetectHarnesses(home string, lookup func(string) bool) []HarnessProjection 
 	}{
 		{name: "codex", marker: ".codex", activation: "next_turn"},
 		{name: "claude", marker: ".claude", activation: "next_session"},
-		{name: "gemini", marker: ".gemini", activation: "next_session"},
 	}
 	for _, harness := range known {
-		if lookup(home + "/" + harness.marker) {
+		if lookup(filepath.Join(home, harness.marker)) {
 			projections = append(projections, HarnessProjection{Name: harness.name, Activation: harness.activation, State: "current"})
 		}
 	}
-	if lookup(home+"/.cursor") || lookup(home+"/.windsurf") {
+	if lookup(filepath.Join(home, ".gemini")) || (project != "" && lookup(filepath.Join(project, "GEMINI.md"))) {
+		projections = append(projections, HarnessProjection{Name: "gemini", Activation: "next_session", State: "current"})
+	}
+	if lookup(filepath.Join(home, ".cursor")) || lookup(filepath.Join(home, ".windsurf")) {
 		projections = append(projections, HarnessProjection{Name: "unknown", Activation: "restart_required", State: "unsupported"})
 	}
 	return projections

@@ -23,14 +23,14 @@ func TestCreateAliasSymlinkDoesNotOverwriteUnmanagedFile(t *testing.T) {
 		t.Fatal("disabled alias created a file")
 	}
 	linked, err := CreateAlias(target, link, true)
+	if runtime.GOOS == "windows" && linked.State == "unsupported" {
+		return
+	}
 	if err != nil || linked.State != "linked" {
 		t.Fatalf("linked=%#v err=%v", linked, err)
 	}
 	info, err := os.Lstat(link)
 	if err != nil || info.Mode()&os.ModeSymlink == 0 {
-		if runtime.GOOS == "windows" && linked.State == "unsupported" {
-			return
-		}
 		t.Fatalf("expected symlink info=%v err=%v", info, err)
 	}
 	got, err := os.Readlink(link)
@@ -45,7 +45,7 @@ func TestCreateAliasSymlinkDoesNotOverwriteUnmanagedFile(t *testing.T) {
 	if err != nil || collision.State != "collision" {
 		t.Fatalf("collision=%#v err=%v", collision, err)
 	}
-	body, err := os.ReadFile(collisionPath)
+	body, err := os.ReadFile(collisionPath) //nolint:gosec // G304: test fixture path under t.TempDir.
 	if err != nil || string(body) != "local claude\n" {
 		t.Fatalf("overwrote unmanaged file %q", body)
 	}
