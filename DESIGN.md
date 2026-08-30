@@ -678,6 +678,11 @@ required. Unknown installed harnesses are `unsupported`.
 desired/applied generation, digest, and trailer/alias/project-match states
 without file contents, host paths, or raw errors.
 
+LAN qualification uses the owner-managed hosts in
+[`docs/fleet-config-lan-e2e.md`](docs/fleet-config-lan-e2e.md). A personal
+deployment-validation record is not official release evidence; the
+fleet-config boxes in `docs/security-release-gates.md` stay unchecked.
+
 ## Canonical memory model
 
 Canonical memory is project-scoped PostgreSQL authority. Each item has an

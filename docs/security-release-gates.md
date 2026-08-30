@@ -101,3 +101,20 @@ release-evidence record are complete.
       revocation drills as executable, tested infrastructure.
 - [ ] Validate the systemd and container sandboxes on the target Linux release
       image with `systemd-analyze security` and SQLite WAL smoke tests.
+
+## Fleet-global agent configuration (gated candidate; closed)
+
+These boxes stay unchecked until official `docs/release-evidence/` names the
+source commit, the three LAN hosts, and an independent security approver. A
+personal `docs/deployment-validation/` record is not release evidence.
+
+- [ ] Publish an immutable commit, materialize a v1 data-only release, and
+      change desired fleet state only after validation; prove a failed publish
+      leaves the prior desired revision unchanged.
+- [ ] Converge macOS, Linux, and Windows enrolled clients from a payload-free
+      wake plus authoritative HTTP fetch and atomic apply, including project
+      match, trailer preservation, and opt-in Claude aliases or fail-closed
+      Windows unsupported.
+- [ ] Prove revoked clients cannot fetch or report, offline clients reconverge,
+      and status/doctor omit configuration contents. Rollback is republish of a
+      previously stored immutable revision.
