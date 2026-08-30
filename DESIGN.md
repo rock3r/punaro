@@ -1961,8 +1961,11 @@ wildcard, public, and plaintext LAN binds fail closed. The panel accepts only an
 HTTPS render URL, synchronizes a valid wall clock over NTP before its first
 request, and validates the collector certificate against its configured CA.
 Adapter and simulator origins use the same HTTPS-except-literal-loopback
-policy and refuse redirects, so no reusable bearer is sent to an unvalidated
-target or over plaintext LAN traffic.
+policy, require every explicit port to be canonical decimal in the range
+1-65535, and refuse redirects, so no reusable bearer is sent to an unvalidated
+target or over plaintext LAN traffic. Empty, zero, leading-zero, non-numeric,
+and out-of-range explicit ports fail closed rather than falling back to a
+scheme default.
 This shared-token LAN MVP is not yet Punaro device-authenticated and must not be
 mounted on the public Punaro origin. Its bearer token must be a protected,
 current-user-owned regular file (or equivalent current-user-only Windows ACL),
