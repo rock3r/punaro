@@ -626,6 +626,32 @@ The opportunistic reconnect is rate-limited (for example, once per 30 seconds),
 single-flight per adapter, and allowed to bypass backoff only once while work
 remains. This prevents a large backlog from creating a reconnect storm.
 
+## Fleet-global agent configuration
+
+Punaro can distribute a user-published coding-agent configuration as a
+**data-only** v1 release. The contract lives in `internal/fleetconfig` and is
+documented in
+[`docs/fleet-global-agent-config.md`](docs/fleet-global-agent-config.md).
+
+The source of truth is an explicitly published immutable Git commit from a
+configured repository. Mutable branches, tags, `HEAD`, and abbreviated object
+names are never desired state. Publication validates and materializes a
+content-addressed archive **before** changing fleet desired revision; a failed
+publish leaves the prior desired revision unchanged.
+
+v1 source layout is `AGENTS.md`, optional `skills/<name>/` trees rooted by
+`SKILL.md`, and optional `projects/<name>/` trees with the same shape. Skill
+`name` frontmatter must match the directory. Machine-local `AGENTS.md` trailer
+markers are illegal in fleet source and are never archived. `scripts/` files
+may be present as regular files; Punaro never executes them and records no
+destinations or post-install commands.
+
+Validation rejects absolute paths, traversal, links, special files, duplicate
+or case-colliding paths, oversized files, excessive skill counts, and malformed
+skill metadata. Identical input yields identical archive bytes and digest.
+Product binary releases remain `internal/release`; this pipeline is a separate
+trust domain.
+
 ## Canonical memory model
 
 Canonical memory is project-scoped PostgreSQL authority. Each item has an
