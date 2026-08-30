@@ -267,6 +267,8 @@ func materializeFleetCommitFromGit(repository, commit string) (fleetconfig.Relea
 		return fleetconfig.Release{}, errors.New("fleet-config checkout failed")
 	}
 	if err := extract.Wait(); err != nil {
+		_ = archive.Process.Kill()
+		_ = pipe.Close()
 		_ = archive.Wait()
 		return fleetconfig.Release{}, errors.New("fleet-config checkout failed")
 	}

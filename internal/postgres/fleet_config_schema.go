@@ -25,6 +25,7 @@ SELECT fleet_namespace_oid IS NOT NULL
    AND EXISTS (SELECT 1 FROM pg_attribute WHERE attrelid = releases_oid AND attname = 'digest' AND atttypid = 'text'::regtype AND attnotnull AND NOT attisdropped)
    AND EXISTS (SELECT 1 FROM pg_attribute WHERE attrelid = desired_oid AND attname = 'release_digest' AND atttypid = 'text'::regtype AND attnotnull AND NOT attisdropped)
    AND EXISTS (SELECT 1 FROM pg_attribute WHERE attrelid = desired_oid AND attname = 'generation' AND atttypid = 'bigint'::regtype AND attnotnull AND NOT attisdropped)
+   AND EXISTS (SELECT 1 FROM pg_attribute WHERE attrelid = desired_oid AND attname = 'preview_hash' AND atttypid = 'text'::regtype AND attnotnull AND NOT attisdropped)
    AND (SELECT count(*) = 2 FROM pg_trigger
         WHERE tgrelid = ANY(ARRAY[releases_oid, desired_oid])
           AND tgname = 'application_mutation_fence' AND NOT tgisinternal AND tgenabled = 'O' AND tgfoid = fence_oid AND tgtype = 62)
