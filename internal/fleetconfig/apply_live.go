@@ -2,6 +2,7 @@ package fleetconfig
 
 import (
 	"bytes"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -81,8 +82,14 @@ func ApplyLive(req ApplyLiveRequest) (ApplyLiveResult, error) {
 		if err := os.MkdirAll(req.Root, 0o700); err != nil {
 			return result, errors.New("fleet-config apply failed")
 		}
-		if err := PublishTree(req.Root, staged, destSnapshotDigest(staged)); err != nil {
-			return result, err
+		digest := destSnapshotDigest(staged)
+		if !sameDestSnapshot(req.Root, digest) {
+			if err := pruneDroppedManagedDests(req.Root, req.Home, present, staged); err != nil {
+				return result, err
+			}
+			if err := PublishTree(req.Root, staged, digest); err != nil {
+				return result, err
+			}
 		}
 	}
 	if req.Logs != nil {
@@ -333,7 +340,18 @@ func writeRegularDest(path string, body []byte) error {
 		return errors.New("fleet-config apply failed")
 	}
 	tmp := path + ".punaro-tmp"
-	if err := os.WriteFile(tmp, body, 0o600); err != nil { // #nosec G703 -- dest path fenced by Lstat as a regular file under an apply-owned tree.
+	_ = os.Remove(tmp)
+	file, err := os.OpenFile(tmp, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600) // #nosec G304 -- tmp is a sibling of a validated destination.
+	if err != nil {
+		return errors.New("fleet-config apply failed")
+	}
+	if _, err := file.Write(body); err != nil {
+		_ = file.Close()
+		_ = os.Remove(tmp)
+		return errors.New("fleet-config apply failed")
+	}
+	if err := file.Close(); err != nil {
+		_ = os.Remove(tmp)
 		return errors.New("fleet-config apply failed")
 	}
 	if statErr == nil && info.Mode().IsRegular() {
@@ -360,6 +378,76 @@ func readRegularFile(path string) ([]byte, bool) {
 		return nil, false
 	}
 	return body, true
+}
+
+func sameDestSnapshot(root, digest string) bool {
+	body, err := os.ReadFile(filepath.Join(root, "applied.json")) // #nosec G304 -- apply root is created by this process.
+	if err != nil {
+		return false
+	}
+	var state ApplyState
+	if json.Unmarshal(body, &state) != nil || digest == "" {
+		return false
+	}
+	return state.Digest == digest
+}
+
+func pruneDroppedManagedDests(root, home string, present map[string]string, staged map[string][]byte) error {
+	current := filepath.Join(root, "current")
+	info, err := os.Lstat(current)
+	if errors.Is(err, os.ErrNotExist) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	if !info.IsDir() || info.Mode()&os.ModeSymlink != 0 {
+		return nil
+	}
+	var removeDirs, removeFiles []string
+	if err := filepath.WalkDir(current, func(path string, entry os.DirEntry, walkErr error) error {
+		if walkErr != nil {
+			return walkErr
+		}
+		if entry.IsDir() {
+			return nil
+		}
+		rel, relErr := filepath.Rel(current, path)
+		if relErr != nil {
+			return relErr
+		}
+		slash := filepath.ToSlash(rel)
+		if _, kept := staged[slash]; kept {
+			return nil
+		}
+		live := liveDestPath(home, present, slash)
+		if live == "" {
+			return nil
+		}
+		if skillDir, ok := skillDirForRel(slash, live); ok && IsManagedDir(skillDir) {
+			removeDirs = append(removeDirs, skillDir)
+			return nil
+		}
+		body, ok := readRegularFile(live)
+		if !ok || !IsManagedContent(body) {
+			return nil
+		}
+		removeFiles = append(removeFiles, live)
+		return nil
+	}); err != nil {
+		return err
+	}
+	for _, dir := range removeDirs {
+		if err := os.RemoveAll(dir); err != nil {
+			return err
+		}
+	}
+	for _, file := range removeFiles {
+		if err := os.Remove(file); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 func destSnapshotDigest(files map[string][]byte) string {

@@ -194,6 +194,70 @@ func TestApplyLiveRollbackRestoresCopiedSkill(t *testing.T) {
 	assertRegularCopiedSkill(t, dest)
 }
 
+func TestApplyLiveUnchangedReapplyKeepsLastGood(t *testing.T) {
+	t.Parallel()
+	home := t.TempDir()
+	project := filepath.Join(home, "src", "punaro")
+	if err := os.MkdirAll(project, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	root := t.TempDir()
+	matches := []ProjectMatch{{Name: "punaro", Path: project, Kind: "matched"}}
+	v1 := commonMemberTree(skillMarkdown("shared", "copied-skill-v1"), false)
+	req := ApplyLiveRequest{Tree: v1, Root: root, Home: home, Matches: matches}
+	if _, err := ApplyLive(req); err != nil {
+		t.Fatal(err)
+	}
+	v2 := commonMemberTree(skillMarkdown("shared", "copied-skill-v2"), false)
+	req.Tree = v2
+	if _, err := ApplyLive(req); err != nil {
+		t.Fatal(err)
+	}
+	req.Tree = v2
+	if _, err := ApplyLive(req); err != nil {
+		t.Fatal(err)
+	}
+	if err := RollbackLive(req); err != nil {
+		t.Fatal(err)
+	}
+	dest := filepath.Join(project, ".agents", "skills", "shared", "SKILL.md")
+	got, err := os.ReadFile(dest) //nolint:gosec // G304: test fixture under t.TempDir.
+	if err != nil || !strings.Contains(string(got), "copied-skill-v1") || strings.Contains(string(got), "copied-skill-v2") {
+		t.Fatalf("unchanged reapply rotated last-good: %q err=%v", got, err)
+	}
+}
+
+func TestApplyLiveRemovesDroppedManagedSkill(t *testing.T) {
+	t.Parallel()
+	home := t.TempDir()
+	project := filepath.Join(home, "src", "punaro")
+	if err := os.MkdirAll(project, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	root := t.TempDir()
+	matches := []ProjectMatch{{Name: "punaro", Path: project, Kind: "matched"}}
+	withSkill := commonMemberTree(skillMarkdown("shared", skillBodyProbe), false)
+	req := ApplyLiveRequest{Tree: withSkill, Root: root, Home: home, Matches: matches}
+	if _, err := ApplyLive(req); err != nil {
+		t.Fatal(err)
+	}
+	dest := filepath.Join(project, ".agents", "skills", "shared", "SKILL.md")
+	if _, err := os.Lstat(dest); err != nil {
+		t.Fatal(err)
+	}
+	withoutSkill := Tree{Files: []File{
+		{Path: "AGENTS.md", Data: []byte("# fleet\n")},
+		{Path: "projects/punaro/AGENTS.md", Data: []byte("# punaro\n")},
+	}}
+	req.Tree = withoutSkill
+	if _, err := ApplyLive(req); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Lstat(dest); !os.IsNotExist(err) {
+		t.Fatal("left a dropped managed skill")
+	}
+}
+
 func applyCopiedCommonSkill(t *testing.T, skillBody string, addendums map[string]string) (home, project, skillDest, addendumRoot string) {
 	t.Helper()
 	home = t.TempDir()
