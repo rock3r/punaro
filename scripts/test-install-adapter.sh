@@ -8,9 +8,9 @@ repo_dir=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
 
 # --enable is also the live-apply path: it must restart an already-active user
 # service after switching ExecStart to punaro-bootstrap run.
-grep -Fqx "$(printf '\t\t\tsystemctl --user enable punaro-adapter.service')" "$repo_dir/scripts/install-adapter.sh"
-grep -Fqx "$(printf '\t\t\tsystemctl --user restart punaro-adapter.service')" "$repo_dir/scripts/install-adapter.sh"
-if grep -Fqx "$(printf '\t\t\tsystemctl --user enable --now punaro-adapter.service')" "$repo_dir/scripts/install-adapter.sh"; then
+grep -Eq '^[[:space:]]*systemctl --user enable punaro-adapter\.service$' "$repo_dir/scripts/install-adapter.sh"
+grep -Eq '^[[:space:]]*systemctl --user restart punaro-adapter\.service$' "$repo_dir/scripts/install-adapter.sh"
+if grep -Eq '^[[:space:]]*systemctl --user enable --now punaro-adapter\.service$' "$repo_dir/scripts/install-adapter.sh"; then
 	printf '%s\n' 'live adapter unit would not be applied to an already-running service' >&2
 	exit 1
 fi
@@ -55,10 +55,62 @@ mailbox="$fixture_dir/agent-mailbox"
 mailbox_log="$fixture_dir/mailbox.log"
 guidance_project="$fixture_dir/project"
 mailbox_state="$fixture_dir/custom-mailbox"
-mkdir -p "$home" "$guidance_project"
+fixture_bin="$fixture_dir/bin"
+launchctl_log="$fixture_dir/launchctl.log"
+systemctl_log="$fixture_dir/systemctl.log"
+foreign_plist="$fixture_dir/foreign-home/Library/LaunchAgents/org.punaro.adapter.plist"
+foreign_unit="$fixture_dir/foreign-home/.config/systemd/user/punaro-adapter.service"
+launchctl_loaded_plist="$foreign_plist"
+systemctl_loaded_unit="$foreign_unit"
+launchctl_loaded=1
+systemctl_active=1
+systemctl_known=1
+plist="$home/Library/LaunchAgents/org.punaro.adapter.plist"
+unit="$home/.config/systemd/user/punaro-adapter.service"
+mkdir -p "$home" "$guidance_project" "$fixture_bin"
 # Prove the installer establishes privacy itself instead of inheriting a
 # restrictive caller umask.
 umask 022
+
+cat >"$fixture_bin/launchctl" <<'EOF'
+#!/bin/sh
+case "$1" in
+	print)
+		[ "$PUNARO_TEST_LAUNCHCTL_LOADED" -eq 1 ] || exit 1
+		printf 'gui/501/org.punaro.adapter = {\n\tpath = %s\n}\n' "$PUNARO_TEST_LOADED_PLIST"
+		;;
+	*)
+		printf '%s\n' "$*" >>"$PUNARO_TEST_LAUNCHCTL_LOG"
+		;;
+esac
+EOF
+chmod 700 "$fixture_bin/launchctl"
+
+cat >"$fixture_bin/systemctl" <<'EOF'
+#!/bin/sh
+case "$*" in
+	'--user is-active --quiet punaro-adapter.service')
+		[ "$PUNARO_TEST_SYSTEMCTL_ACTIVE" -eq 1 ]
+		;;
+	'--user show --property=FragmentPath punaro-adapter.service')
+		[ "$PUNARO_TEST_SYSTEMCTL_KNOWN" -eq 1 ] || exit 1
+		printf 'FragmentPath=%s\n' "$PUNARO_TEST_LOADED_UNIT"
+		;;
+	*)
+		printf '%s\n' "$*" >>"$PUNARO_TEST_SYSTEMCTL_LOG"
+		;;
+esac
+EOF
+chmod 700 "$fixture_bin/systemctl"
+PATH="$fixture_bin:$PATH"
+PUNARO_TEST_LAUNCHCTL_LOG="$launchctl_log"
+PUNARO_TEST_SYSTEMCTL_LOG="$systemctl_log"
+PUNARO_TEST_LOADED_PLIST="$foreign_plist"
+PUNARO_TEST_LOADED_UNIT="$foreign_unit"
+PUNARO_TEST_LAUNCHCTL_LOADED=1
+PUNARO_TEST_SYSTEMCTL_ACTIVE=1
+PUNARO_TEST_SYSTEMCTL_KNOWN=1
+export PATH PUNARO_TEST_LAUNCHCTL_LOG PUNARO_TEST_SYSTEMCTL_LOG PUNARO_TEST_LOADED_PLIST PUNARO_TEST_LOADED_UNIT PUNARO_TEST_LAUNCHCTL_LOADED PUNARO_TEST_SYSTEMCTL_ACTIVE PUNARO_TEST_SYSTEMCTL_KNOWN
 
 cat >"$mailbox" <<'EOF'
 #!/bin/sh
@@ -73,16 +125,56 @@ EOF
 chmod 700 "$mailbox"
 
 run_install() {
-	HOME="$home" GOTOOLCHAIN=local GOMODCACHE="$go_mod_cache" GOCACHE="$go_build_cache" PUNARO_TEST_MAILBOX_LOG="$mailbox_log" \
+	HOME="$home" GOTOOLCHAIN=local GOMODCACHE="$go_mod_cache" GOCACHE="$go_build_cache" PUNARO_TEST_MAILBOX_LOG="$mailbox_log" PUNARO_TEST_LOADED_PLIST="$launchctl_loaded_plist" PUNARO_TEST_LOADED_UNIT="$systemctl_loaded_unit" PUNARO_TEST_LAUNCHCTL_LOADED="$launchctl_loaded" PUNARO_TEST_SYSTEMCTL_ACTIVE="$systemctl_active" PUNARO_TEST_SYSTEMCTL_KNOWN="$systemctl_known" \
 		sh "$repo_dir/scripts/install-client.sh" \
 		--relay-url https://relay.example.test \
 		--machine-id macbook \
 		--waypost-bin "$mailbox" \
 		--mailbox-state-dir "$mailbox_state" \
-		--agent-guidance-dir "$guidance_project"
+		--agent-guidance-dir "$guidance_project" \
+		"$@"
 }
 
 run_install >"$fixture_dir/first.out"
+[ ! -s "$launchctl_log" ] || { printf '%s\n' 'installer mutated a LaunchAgent loaded from another HOME' >&2; exit 1; }
+[ ! -s "$systemctl_log" ] || { printf '%s\n' 'installer mutated a systemd user service loaded from another HOME' >&2; exit 1; }
+set +e
+run_install --enable >"$fixture_dir/foreign-enable.out" 2>&1
+status=$?
+set -e
+[ "$status" -eq 2 ] || { printf '%s\n' 'installer replaced a user service loaded from another HOME' >&2; exit 1; }
+case "$(uname -s)" in
+	Darwin) grep -Fqx 'Punaro LaunchAgent label is already loaded from a different path' "$fixture_dir/foreign-enable.out" ;;
+	Linux) grep -Fqx 'Punaro systemd user service is already loaded from a different path' "$fixture_dir/foreign-enable.out" ;;
+esac
+[ ! -s "$launchctl_log" ] || { printf '%s\n' 'installer mutated a foreign LaunchAgent before refusing enable' >&2; exit 1; }
+[ ! -s "$systemctl_log" ] || { printf '%s\n' 'installer mutated a foreign systemd user service before refusing enable' >&2; exit 1; }
+if [ "$(uname -s)" = Linux ]; then
+	systemctl_active=0
+	: >"$systemctl_log"
+	run_install >"$fixture_dir/foreign-inactive.out"
+	[ ! -s "$systemctl_log" ] || { printf '%s\n' 'installer mutated a foreign inactive systemd user service' >&2; exit 1; }
+	set +e
+	run_install --enable >"$fixture_dir/foreign-inactive-enable.out" 2>&1
+	status=$?
+	set -e
+	[ "$status" -eq 2 ] || { printf '%s\n' 'installer enabled a foreign inactive systemd user service' >&2; exit 1; }
+	grep -Fqx 'Punaro systemd user service is already loaded from a different path' "$fixture_dir/foreign-inactive-enable.out"
+	[ ! -s "$systemctl_log" ] || { printf '%s\n' 'installer mutated a foreign inactive service before refusing enable' >&2; exit 1; }
+	systemctl_active=1
+	systemctl_known=0
+	: >"$systemctl_log"
+	run_install >"$fixture_dir/active-unknown.out"
+	[ ! -s "$systemctl_log" ] || { printf '%s\n' 'installer mutated an active service with unresolvable ownership without --enable' >&2; exit 1; }
+	set +e
+	run_install --enable >"$fixture_dir/active-unknown-enable.out" 2>&1
+	status=$?
+	set -e
+	[ "$status" -eq 2 ] || { printf '%s\n' 'installer enabled an active service with unresolvable ownership' >&2; exit 1; }
+	grep -Fqx 'Punaro systemd user service is already loaded from a different path' "$fixture_dir/active-unknown-enable.out"
+	[ ! -s "$systemctl_log" ] || { printf '%s\n' 'installer mutated an active service with unresolvable ownership' >&2; exit 1; }
+	systemctl_known=1
+fi
 
 adapter="$home/.local/bin/punaro-adapter"
 bootstrap="$home/.local/bin/punaro-bootstrap"
@@ -92,7 +184,8 @@ enroll="$home/.local/bin/punaro-enroll"
 config="$home/.config/punaro/adapter.env"
 key="$home/.config/punaro/machine.key"
 enrollment="$home/.config/punaro/enrollment.json"
-plist="$home/Library/LaunchAgents/org.punaro.adapter.plist"
+launchctl_loaded_plist="$plist"
+systemctl_loaded_unit="$unit"
 
 file_mode() {
 	if stat -f %Lp "$1" >/dev/null 2>&1; then
@@ -150,6 +243,49 @@ fi
 cp "$enrollment" "$fixture_dir/enrollment.before"
 run_install >"$fixture_dir/second.out"
 cmp "$fixture_dir/enrollment.before" "$enrollment"
+if [ "$(uname -s)" = Darwin ]; then
+	grep -Fqx "bootout gui/$(id -u) $plist" "$launchctl_log"
+	grep -Fqx "bootstrap gui/$(id -u) $plist" "$launchctl_log"
+else
+	grep -Fqx -- '--user daemon-reload' "$systemctl_log"
+	grep -Fqx -- '--user restart punaro-adapter.service' "$systemctl_log"
+fi
+
+# A matching but inactive systemd unit still needs daemon-reload so a later
+# manual start cannot use the stale in-memory definition. It must not restart.
+if [ "$(uname -s)" = Linux ]; then
+	: >"$systemctl_log"
+	systemctl_active=0
+	run_install >"$fixture_dir/matching-inactive.out"
+	grep -Fqx -- '--user daemon-reload' "$systemctl_log"
+	if grep -Fqx -- '--user restart punaro-adapter.service' "$systemctl_log"; then
+		printf '%s\n' 'installer restarted a matching inactive systemd service without --enable' >&2
+		exit 1
+	fi
+	systemctl_active=1
+fi
+
+# First enable with no manager-owned entry must remain supported and use only
+# the mocked service-manager boundary.
+: >"$launchctl_log"
+: >"$systemctl_log"
+launchctl_loaded=0
+systemctl_active=0
+systemctl_known=0
+run_install >"$fixture_dir/not-loaded.out"
+[ ! -s "$launchctl_log" ] || { printf '%s\n' 'installer mutated an unloaded LaunchAgent without --enable' >&2; exit 1; }
+[ ! -s "$systemctl_log" ] || { printf '%s\n' 'installer mutated an unknown systemd unit without --enable' >&2; exit 1; }
+run_install --enable >"$fixture_dir/not-loaded-enable.out"
+if [ "$(uname -s)" = Darwin ]; then
+	grep -Fqx "bootstrap gui/$(id -u) $plist" "$launchctl_log"
+else
+	grep -Fqx -- '--user daemon-reload' "$systemctl_log"
+	grep -Fqx -- '--user enable punaro-adapter.service' "$systemctl_log"
+	grep -Fqx -- '--user restart punaro-adapter.service' "$systemctl_log"
+fi
+launchctl_loaded=1
+systemctl_active=1
+systemctl_known=1
 
 # Profiles written by the previous installer did not contain the explicit LAN
 # keys. Their absence is the safe HTTPS default and must remain upgradeable.
