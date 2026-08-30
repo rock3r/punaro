@@ -34,6 +34,7 @@ const (
 	autoRollbackFile        = "auto-rollback.json"
 	healthyGenerationFile   = "healthy-generation.json"
 	generationHighWaterFile = "generation.json"
+	defaultDownloadDeadline = 4 * time.Minute
 )
 
 // Request is one host-local update from a fixed origin.
@@ -46,6 +47,9 @@ type Request struct {
 	GOARCH    string
 	Now       time.Time
 	HTTP      fetcher
+	// DownloadTimeout bounds catalog, signature, manifest, and artifact fetches
+	// as one operation. Zero selects the production default.
+	DownloadTimeout time.Duration
 }
 
 // Result is the published slot after a successful update.
@@ -105,7 +109,9 @@ func Update(request Request) (Result, error) {
 			}
 		}
 	}
-	catalog, err := fetchVerifiedCatalog(context.Background(), request)
+	downloadCtx, cancelDownloads := context.WithTimeout(context.Background(), request.DownloadTimeout)
+	defer cancelDownloads()
+	catalog, err := fetchVerifiedCatalog(downloadCtx, request)
 	if err != nil {
 		return Result{}, err
 	}
@@ -142,7 +148,7 @@ func Update(request Request) (Result, error) {
 	if err := writeJournal(request.Directory, journal{Schema: 1, Phase: "staging", Release: listed.Release, Sequence: listed.Sequence, ManifestSHA256: listed.ManifestSHA256}); err != nil {
 		return Result{}, err
 	}
-	manifestBody, err := client.Get(context.Background(), listed.ManifestPath, listed.ManifestLength)
+	manifestBody, err := fetchDownload(downloadCtx, client, "manifest", listed.ManifestPath, listed.ManifestLength)
 	if err != nil {
 		return Result{}, err
 	}
@@ -153,7 +159,7 @@ func Update(request Request) (Result, error) {
 	if hex.EncodeToString(sum[:]) != listed.ManifestSHA256 {
 		return Result{}, errors.New("release manifest digest mismatch")
 	}
-	manifestSig, err := client.Get(context.Background(), listed.Release+"/"+punarorelease.ReleaseSignatureFile, punarorelease.MaximumEnvelopeBytes)
+	manifestSig, err := fetchDownload(downloadCtx, client, "signature", listed.Release+"/"+punarorelease.ReleaseSignatureFile, punarorelease.MaximumEnvelopeBytes)
 	if err != nil {
 		return Result{}, err
 	}
@@ -210,7 +216,7 @@ func Update(request Request) (Result, error) {
 	}
 	var installed []string
 	for _, artifact := range artifacts {
-		body, err := client.Get(context.Background(), artifact.Path, artifact.Length)
+		body, err := fetchDownload(downloadCtx, client, "artifact", artifact.Path, artifact.Length)
 		if err != nil {
 			return Result{}, err
 		}
@@ -282,6 +288,12 @@ func (request *Request) normalize() error {
 	if request.Now.IsZero() {
 		request.Now = time.Now().UTC()
 	}
+	if request.DownloadTimeout < 0 {
+		return errors.New("bootstrap download timeout is invalid")
+	}
+	if request.DownloadTimeout == 0 {
+		request.DownloadTimeout = defaultDownloadDeadline
+	}
 	return nil
 }
 
@@ -297,11 +309,11 @@ func fetchVerifiedCatalog(ctx context.Context, request Request) (punarorelease.C
 		}
 		client = transport
 	}
-	catalogBody, err := client.Get(ctx, punarorelease.CatalogReleaseName+"/"+punarorelease.CatalogFile, punarorelease.MaximumManifestBytes)
+	catalogBody, err := fetchDownload(ctx, client, "catalog", punarorelease.CatalogReleaseName+"/"+punarorelease.CatalogFile, punarorelease.MaximumManifestBytes)
 	if err != nil {
 		return punarorelease.Catalog{}, err
 	}
-	catalogSig, err := client.Get(ctx, punarorelease.CatalogReleaseName+"/"+punarorelease.CatalogSignatureFile, punarorelease.MaximumEnvelopeBytes)
+	catalogSig, err := fetchDownload(ctx, client, "signature", punarorelease.CatalogReleaseName+"/"+punarorelease.CatalogSignatureFile, punarorelease.MaximumEnvelopeBytes)
 	if err != nil {
 		return punarorelease.Catalog{}, err
 	}
@@ -316,6 +328,14 @@ func fetchVerifiedCatalog(ctx context.Context, request Request) (punarorelease.C
 		return punarorelease.Catalog{}, errors.New("release catalog is stale")
 	}
 	return catalog, nil
+}
+
+func fetchDownload(ctx context.Context, client fetcher, phase, relative string, limit int64) ([]byte, error) {
+	body, err := client.Get(ctx, relative, limit)
+	if err != nil {
+		return nil, withDownloadPhase(err, phase)
+	}
+	return body, nil
 }
 
 func verifyDocument(document, signature []byte, keys map[string]ed25519.PublicKey) error {

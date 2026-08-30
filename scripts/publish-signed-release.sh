@@ -68,6 +68,7 @@ done
 
 command -v gh >/dev/null 2>&1 || fail 'gh is required'
 command -v jq >/dev/null 2>&1 || fail 'jq is required'
+command -v curl >/dev/null 2>&1 || fail 'curl is required'
 draft_state=$(gh release view "$release" --repo "$repository" --json tagName,isDraft,isPrerelease)
 [ "$(printf '%s\n' "$draft_state" | jq -er .tagName)" = "$release" ] || fail 'draft release identity is invalid'
 release_is_draft=$(printf '%s\n' "$draft_state" | jq -er 'if .isDraft == true then "true" elif .isDraft == false then "false" else error("invalid draft state") end')
@@ -93,6 +94,20 @@ download_release_candidate() {
 	while IFS= read -r asset; do
 		[ -n "$asset" ] || return 1
 		gh release download "$tag" --repo "$repository" --pattern "$asset" --dir "$destination"
+	done <"$artifact_names"
+}
+download_public_release_candidate() {
+	destination=$1
+	mkdir "$destination"
+	base="https://github.com/$repository/releases/download/$release"
+	for asset in punaro-release.json punaro-release.sig; do
+		curl --proto '=https' --tlsv1.2 --fail --silent --show-error --location \
+			--connect-timeout 15 --max-time 120 --output "$destination/$asset" "$base/$asset"
+	done
+	while IFS= read -r asset; do
+		[ -n "$asset" ] || return 1
+		curl --proto '=https' --tlsv1.2 --fail --silent --show-error --location \
+			--connect-timeout 15 --max-time 120 --output "$destination/$asset" "$base/$asset"
 	done <"$artifact_names"
 }
 restore_previous_catalog() {
@@ -204,6 +219,20 @@ gh release upload "$release" "$manifest_signature" "$catalog_signature" --repo "
 if [ "$release_is_draft" = true ]; then
 	gh release edit "$release" --repo "$repository" --draft=false --prerelease
 fi
+
+# Exercise the same public GitHub Releases origin used by bootstrap, rather
+# than treating an authenticated API download as proof of public egress. Fetch
+# every platform artifact bound by the signed manifest before exposing the new
+# catalog, then compare and cryptographically verify those exact bytes.
+public_origin_dir="$download_dir/public-origin"
+download_public_release_candidate "$public_origin_dir" || fail 'public release origin smoke failed'
+cmp -s "$manifest" "$public_origin_dir/punaro-release.json" || fail 'public origin manifest differs from signed bytes'
+cmp -s "$manifest_signature" "$public_origin_dir/punaro-release.sig" || fail 'public origin manifest signature differs from signed bytes'
+(
+	cd "$repo_dir"
+	go run ./cmd/punaro-release verify --keys-file "$keys_file" --document "$public_origin_dir/punaro-release.json" --signature "$public_origin_dir/punaro-release.sig"
+	go run ./cmd/punaro-release verify-artifacts --manifest "$public_origin_dir/punaro-release.json" --dir "$public_origin_dir"
+) || fail 'public release origin bytes failed signed verification'
 
 if [ "$catalog_exists" = true ] && [ "$catalog_draft" = false ]; then
 	# A clobber is delete-then-upload per asset. Hide the release before changing

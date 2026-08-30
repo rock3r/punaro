@@ -94,8 +94,11 @@ embedded in that bootstrap.
 
 The offline publisher re-hashes every native artifact named by the verified
 manifest in the operator's signing directory and in the GitHub draft before it
-publishes anything. It repeats remote artifact verification after publication;
-a mismatch prevents catalog advancement or restores/hides the previous catalog
+publishes anything. Once the immutable prerelease is visible, it also downloads
+the manifest, detached signature, and every manifest-listed platform artifact
+through the unauthenticated public `github.com/.../releases/download` origin and
+verifies those exact bytes before advancing the catalog. An API or public-origin
+mismatch prevents catalog advancement or restores/hides the previous catalog
 state. Replacing an existing catalog first makes that GitHub Release a draft,
 uploads the document/signature pair while it is unavailable to bootstrap
 clients, downloads and verifies the remote bytes, and only then exposes the
@@ -312,6 +315,16 @@ A healthy child that exits while the supervisor is still running is a
 supervisor failure so the platform service restarts it. The one-shot decision
 is durable across supervisor restarts. It does not enroll or open PostgreSQL. HTTPS is required
 except for loopback test origins.
+
+Each resource fetch retries at most twice after its first attempt, using bounded
+backoff, only for transport/read failures, timeouts, HTTP 408/425/429, and HTTP
+5xx gateway/service failures. All resource attempts share one four-minute
+update deadline. Redirect-policy, bounds, signature, catalog-freshness,
+compatibility, length, and digest failures are single-shot. A failed download
+names only `catalog`, `signature`, `manifest`, or `artifact` plus a content-free
+category such as `transport`, `timeout`, `http_status`, `length`, or `policy`.
+Published slots remain unchanged and any staging journal remains atomically
+parseable for recovery.
 
 ```sh
 punaro-bootstrap update \
