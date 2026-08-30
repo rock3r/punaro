@@ -47,6 +47,18 @@ func TestApplyAgentsReportsDriftAndCollision(t *testing.T) {
 	if err != nil || !result.Collision || result.State != "collision" || collision != nil {
 		t.Fatalf("collision result=%#v next=%s err=%v", result, collision, err)
 	}
+	empty, result, err := ApplyAgents([]byte("# fleet\n"), []byte{}, true, "")
+	if err != nil || !result.Collision || result.State != "collision" || empty != nil {
+		t.Fatalf("empty existing result=%#v next=%s err=%v", result, empty, err)
+	}
+	suffix := append(ComposeAgents([]byte("# fleet v1\n"), []byte("\nkeep\n")), []byte("after\n")...)
+	if _, _, ok := SplitAgents(suffix); ok {
+		t.Fatal("accepted content after trailer end")
+	}
+	lost, result, err := ApplyAgents([]byte("# fleet v2\n"), suffix, true, "")
+	if err != nil || !result.Collision || lost != nil {
+		t.Fatalf("suffix result=%#v next=%s err=%v", result, lost, err)
+	}
 }
 
 func TestApplyAgentsOmitsTrailerFromFleetPrefix(t *testing.T) {

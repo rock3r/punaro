@@ -1,6 +1,7 @@
 package fleetconfig
 
 import (
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"sync"
@@ -79,6 +80,26 @@ func TestPublishTreeRecoversDisplacedLiveFromNext(t *testing.T) {
 	}
 	if _, err := os.Lstat(filepath.Join(root, "last-good.next")); !os.IsNotExist(err) {
 		t.Fatal("left leftover last-good.next")
+	}
+}
+
+func TestPublishTreePersistsPrefixDigests(t *testing.T) {
+	t.Parallel()
+	root := t.TempDir()
+	body := ComposeAgents([]byte("# fleet v1\n"), []byte("\nkeep\n"))
+	if err := PublishTree(root, map[string][]byte{"AGENTS.md": body}, "d1"); err != nil {
+		t.Fatal(err)
+	}
+	raw, err := os.ReadFile(filepath.Join(root, "applied.json")) //nolint:gosec // G304: test fixture under t.TempDir.
+	if err != nil {
+		t.Fatal(err)
+	}
+	var state ApplyState
+	if err := json.Unmarshal(raw, &state); err != nil {
+		t.Fatal(err)
+	}
+	if state.PrefixDigests["AGENTS.md"] != DigestBytes([]byte("# fleet v1")) {
+		t.Fatalf("prefix digests=%#v", state.PrefixDigests)
 	}
 }
 

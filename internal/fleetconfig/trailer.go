@@ -22,6 +22,10 @@ func SplitAgents(content []byte) (prefix, trailer []byte, ok bool) {
 	if start < 0 || end < 0 || end < start {
 		return nil, nil, false
 	}
+	suffix := strings.Trim(text[end+len(TrailerEnd):], "\n")
+	if suffix != "" {
+		return nil, nil, false
+	}
 	prefix = []byte(strings.TrimRight(text[:start], "\n"))
 	bodyStart := start + len(TrailerStart)
 	trailer = []byte(text[bodyStart:end])
@@ -50,7 +54,7 @@ func ComposeAgents(prefix, trailer []byte) []byte {
 
 // ApplyAgents replaces the fleet prefix while preserving or creating the trailer.
 func ApplyAgents(fleetPrefix, existing []byte, existed bool, lastPrefixDigest string) ([]byte, TrailerResult, error) {
-	if !existed || len(existing) == 0 {
+	if !existed {
 		return ComposeAgents(fleetPrefix, nil), TrailerResult{State: "present"}, nil
 	}
 	prefix, trailer, ok := SplitAgents(existing)

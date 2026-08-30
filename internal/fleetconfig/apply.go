@@ -74,7 +74,18 @@ func PublishTree(root string, files map[string][]byte, digest string) error {
 		_ = os.RemoveAll(lastGood)
 		_ = os.Rename(nextGood, lastGood)
 	}
-	state := ApplyState{Digest: digest, LastGoodDigest: digest}
+	prefixDigests := map[string]string{}
+	for path, content := range files {
+		if !stringsHasSuffixAgents(path) {
+			continue
+		}
+		prefix, _, ok := SplitAgents(content)
+		if !ok {
+			continue
+		}
+		prefixDigests[path] = DigestBytes(prefix)
+	}
+	state := ApplyState{Digest: digest, LastGoodDigest: digest, PrefixDigests: prefixDigests}
 	body, err := json.Marshal(state)
 	if err != nil {
 		return errors.New("fleet-config apply state failed")
