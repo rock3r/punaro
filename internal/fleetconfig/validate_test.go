@@ -204,6 +204,21 @@ func TestValidateRejectsOversizedAndDuplicateCasePaths(t *testing.T) {
 	}
 }
 
+func TestValidateAcceptsUSTARSplitBeforeLastComponent(t *testing.T) {
+	t.Parallel()
+	project := strings.Repeat("a", 64)
+	skill := strings.Repeat("b", 64)
+	nested := "projects/" + project + "/skills/" + skill + "/abcdefghijk/x"
+	tree := Tree{Files: []File{
+		{Path: "AGENTS.md", Data: []byte("# fleet\n")},
+		{Path: "projects/" + project + "/skills/" + skill + "/SKILL.md", Data: []byte(skillMarkdown(skill, "Nested USTAR split."))},
+		{Path: nested, Data: []byte("data\n")},
+	}}
+	if err := Validate(tree); err != nil {
+		t.Fatal(err)
+	}
+}
+
 func TestValidateRejectsAbsoluteTraversalAndDuplicatePaths(t *testing.T) {
 	t.Parallel()
 	agents := File{Path: "AGENTS.md", Data: []byte("# fleet\n")}

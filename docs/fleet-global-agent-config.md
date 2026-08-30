@@ -113,6 +113,7 @@ keys are ignored and not executed.
 | Condition | Reason |
 | --- | --- |
 | Absolute path, `\`, NUL, `.`, `..`, empty component | Path escape |
+| Path not USTAR-representable (over 255 bytes, or no `/` split with prefix ≤155 and suffix ≤100) | Archive format |
 | Duplicate path or case-colliding path | Windows/macOS case folding |
 | Symlink, extra hard link (`Nlink > 1` on Unix), device, socket, FIFO, non-regular file | Unsafe file type |
 | File larger than 256 KiB | Bound |
@@ -143,7 +144,9 @@ keys are ignored and not executed.
 
 4. Archive as gzip+tar of those files (and their parent directories):
    sorted paths, mode `0644` files / `0755` dirs, uid/gid 0, empty uname/gname,
-   mtime unix 0, gzip Name empty, ModTime unix 0, OS = 3 (Unix).
+   mtime unix 0, gzip Name empty, ModTime unix 0, OS = 3 (Unix). Directory
+   headers omit a trailing slash so a 100-byte final directory component stays
+   inside the USTAR name field.
 5. Identical input bytes yield identical archive bytes and digest.
 
 The archive does not include trailer text. Manifest `digest` is the release

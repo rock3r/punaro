@@ -119,7 +119,7 @@ func archiveDirectories(files []File) []string {
 				break
 			}
 			dir = dir[:slash]
-			seen[dir+"/"] = struct{}{}
+			seen[dir] = struct{}{}
 		}
 	}
 	dirs := make([]string, 0, len(seen))

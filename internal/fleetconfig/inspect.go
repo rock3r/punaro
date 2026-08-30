@@ -102,17 +102,7 @@ func canonicalPath(path string) (string, error) {
 	if path == "" || strings.Contains(path, "\\") || strings.ContainsRune(path, 0) || strings.HasPrefix(path, "/") {
 		return "", errors.New("fleet-config path is invalid")
 	}
-	if len(path) > 255 {
-		return "", errors.New("fleet-config path is invalid")
-	}
-	slash := strings.LastIndex(path, "/")
-	name := path
-	prefix := ""
-	if slash >= 0 {
-		name = path[slash+1:]
-		prefix = path[:slash]
-	}
-	if len(name) > 100 || len(prefix) > 155 {
+	if !ustarRepresentable(path) {
 		return "", errors.New("fleet-config path is invalid")
 	}
 	for i := 0; i < len(path); i++ {
@@ -127,6 +117,27 @@ func canonicalPath(path string) (string, error) {
 		}
 	}
 	return path, nil
+}
+
+// ustarRepresentable matches archive/tar FormatUSTAR: last '/' within the first
+// 156 bytes must leave a 1..155 byte prefix and 1..100 byte suffix.
+func ustarRepresentable(path string) bool {
+	if path == "" || len(path) > 255 || path[len(path)-1] == '/' {
+		return false
+	}
+	if len(path) <= 100 {
+		return true
+	}
+	n := len(path)
+	if n > 156 {
+		n = 156
+	}
+	i := strings.LastIndex(path[:n], "/")
+	if i <= 0 {
+		return false
+	}
+	nameLen := len(path) - i - 1
+	return nameLen > 0 && nameLen <= 100 && i <= 155
 }
 
 func windowsSafeName(part string) bool {

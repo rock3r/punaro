@@ -92,3 +92,16 @@ func TestMaterializeRejectsInvalidCommit(t *testing.T) {
 		t.Fatal("materialized a branch name")
 	}
 }
+
+func TestMaterializeArchivesHundredByteDirectory(t *testing.T) {
+	t.Parallel()
+	dir := strings.Repeat("c", 100)
+	tree := Tree{Files: []File{
+		{Path: "AGENTS.md", Data: []byte("# fleet\n")},
+		{Path: "skills/demo/SKILL.md", Data: []byte(skillMarkdown("demo", "Demo skill."))},
+		{Path: "skills/demo/" + dir + "/x", Data: []byte("data\n")},
+	}}
+	if _, err := Materialize(tree, testCommit); err != nil {
+		t.Fatal(err)
+	}
+}
