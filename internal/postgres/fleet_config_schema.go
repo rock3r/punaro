@@ -69,7 +69,17 @@ SELECT status_oid IS NOT NULL AND idempotency_oid IS NOT NULL AND put_oid IS NOT
    AND has_function_privilege('punaro_app', put_oid, 'EXECUTE')
    AND NOT has_table_privilege('punaro_app', 'fleet.client_status', 'INSERT')
    AND NOT has_table_privilege('punaro_app', 'fleet.client_status', 'UPDATE')
+   AND NOT has_table_privilege('punaro_app', 'fleet.client_status', 'DELETE')
+   AND NOT has_table_privilege('punaro_app', 'fleet.client_status', 'TRUNCATE')
+   AND NOT has_table_privilege('punaro_app', 'fleet.client_status', 'REFERENCES')
+   AND NOT has_table_privilege('punaro_app', 'fleet.client_status', 'TRIGGER')
+   AND NOT has_table_privilege('punaro_app', 'fleet.client_status_idempotency', 'SELECT')
    AND NOT has_table_privilege('punaro_app', 'fleet.client_status_idempotency', 'INSERT')
+   AND NOT has_table_privilege('punaro_app', 'fleet.client_status_idempotency', 'UPDATE')
+   AND NOT has_table_privilege('punaro_app', 'fleet.client_status_idempotency', 'DELETE')
+   AND NOT has_table_privilege('punaro_app', 'fleet.client_status_idempotency', 'TRUNCATE')
+   AND NOT has_table_privilege('punaro_app', 'fleet.client_status_idempotency', 'REFERENCES')
+   AND NOT has_table_privilege('punaro_app', 'fleet.client_status_idempotency', 'TRIGGER')
 FROM objects`).Scan(&available)
 	return available, err
 }

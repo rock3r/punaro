@@ -53,7 +53,7 @@ BEGIN
     FROM auth.client_installations
     WHERE machine_id = p_machine_id
       AND lifecycle_state = 'active'
-    FOR SHARE;
+    FOR UPDATE;
     IF target IS NULL THEN
         RAISE EXCEPTION 'fleet-config status is not authorized';
     END IF;
