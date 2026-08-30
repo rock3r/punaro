@@ -157,7 +157,8 @@ func Doctor(ctx context.Context, request DoctorRequest) (punarodiagnostic.Report
 	checks = append(checks, absentBootstrapNodeCheck(request.Directory, candidateSlot, "candidate_state", "resume_or_recover_bootstrap"))
 	checks = append(checks, absentBootstrapNodeCheck(request.Directory, swapSlot, "swap_state", "resume_or_recover_bootstrap"))
 
-	catalog, catalogChecks, catalogOK := doctorCatalog(ctx, request, keys, accepted)
+	acceptedAvailable := acceptedErr == nil && accepted.CatalogSequence > 0
+	catalog, catalogChecks, catalogOK := doctorCatalog(ctx, request, keys, accepted, acceptedAvailable)
 	checks = append(checks, catalogChecks...)
 	var currentAdapterDigest string
 	if currentErr == nil && current.Release != "" {
@@ -346,7 +347,7 @@ func absentBootstrapNodeCheck(directory, name, code, remediation string) punarod
 	return punarodiagnostic.Fail(code, remediation)
 }
 
-func doctorCatalog(ctx context.Context, request DoctorRequest, keys map[string]ed25519.PublicKey, accepted acceptedState) (punarorelease.Catalog, []punarodiagnostic.Check, bool) {
+func doctorCatalog(ctx context.Context, request DoctorRequest, keys map[string]ed25519.PublicKey, accepted acceptedState, acceptedAvailable bool) (punarorelease.Catalog, []punarodiagnostic.Check, bool) {
 	checks := make([]punarodiagnostic.Check, 0, 5)
 	client := request.HTTP
 	if client == nil {
@@ -393,9 +394,12 @@ func doctorCatalog(ctx context.Context, request DoctorRequest, keys map[string]e
 	} else {
 		checks = append(checks, punarodiagnostic.Fail("catalog_freshness", "refresh_release_catalog"))
 	}
-	if accepted.CatalogSequence == 0 || catalog.Sequence >= accepted.CatalogSequence {
+	switch {
+	case !acceptedAvailable:
+		checks = append(checks, punarodiagnostic.Unavailable("catalog_sequence", "repair_bootstrap_state"))
+	case catalog.Sequence >= accepted.CatalogSequence:
 		checks = append(checks, punarodiagnostic.Pass("catalog_sequence"))
-	} else {
+	default:
 		checks = append(checks, punarodiagnostic.Fail("catalog_sequence", "repair_release_catalog"))
 	}
 	return catalog, checks, true
