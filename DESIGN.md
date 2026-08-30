@@ -663,6 +663,11 @@ and may write only their own bounded status row (schema 59). There is no client
 publish route. Desired-generation advances emit a payload-free WebSocket wake
 with `topic_id=fleet-config` and `sequence` equal to the generation.
 
+The client reconciler stages a complete tree, applies `AGENTS.md` trailers
+without merging fleet-prefix edits, matches project names only as top-level
+directories under a configured base path (or an explicit override), and keeps
+last-known-good on failed activation. Concurrent reconcile is serialized.
+
 ## Canonical memory model
 
 Canonical memory is project-scoped PostgreSQL authority. Each item has an
