@@ -74,7 +74,7 @@ func InspectRoot(root string) (Tree, error) {
 			return errors.New("fleet-config source walk failed")
 		}
 		opened, statErr := file.Stat()
-		if statErr != nil || !opened.Mode().IsRegular() || opened.Mode()&os.ModeSymlink != 0 || !os.SameFile(info, opened) {
+		if statErr != nil || !opened.Mode().IsRegular() || opened.Mode()&os.ModeSymlink != 0 || !os.SameFile(info, opened) || extraHardLink(opened) || extraHardLinkFile(file) {
 			_ = file.Close()
 			return errors.New("fleet-config source contains a special file")
 		}
@@ -102,7 +102,7 @@ func canonicalPath(path string) (string, error) {
 	if path == "" || strings.Contains(path, "\\") || strings.ContainsRune(path, 0) || strings.HasPrefix(path, "/") {
 		return "", errors.New("fleet-config path is invalid")
 	}
-	if len(path) > 100 {
+	if len(path) > 255 {
 		return "", errors.New("fleet-config path is invalid")
 	}
 	for i := 0; i < len(path); i++ {
