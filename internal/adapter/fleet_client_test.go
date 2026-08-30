@@ -193,6 +193,74 @@ func TestReconcileFleetOnceFetchesAppliesAndReports(t *testing.T) {
 	}
 }
 
+func TestReconcileFleetOnceProjectsClaudeAliasesAndUnsupportedHarness(t *testing.T) {
+	_, private, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	tree := fleetconfig.Tree{Files: []fleetconfig.File{
+		{Path: "AGENTS.md", Data: []byte("# fleet\n")},
+		{Path: "skills/demo/SKILL.md", Data: []byte("---\nname: demo\ndescription: Demo skill.\n---\n# demo\n")},
+		{Path: "projects/punaro/AGENTS.md", Data: []byte("# punaro\n")},
+	}}
+	release, err := fleetconfig.Materialize(tree, "0123456789abcdef0123456789abcdef01234567")
+	if err != nil {
+		t.Fatal(err)
+	}
+	home := t.TempDir()
+	base := filepath.Join(home, "src")
+	if err := os.MkdirAll(filepath.Join(base, "punaro"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Join(home, ".cursor"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodGet && r.URL.Path == "/v1/fleet-config/desired":
+			w.Header().Set("Content-Type", "application/json")
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"generation": 2, "digest": release.Digest, "source_commit": release.SourceCommit,
+				"skill_count": release.SkillCount, "total_bytes": release.TotalBytes,
+			})
+		case r.Method == http.MethodGet && strings.HasPrefix(r.URL.Path, "/v1/fleet-config/releases/"):
+			w.Header().Set("Content-Type", "application/octet-stream")
+			_, _ = w.Write(release.Archive)
+		case r.Method == http.MethodPut && r.URL.Path == "/v1/fleet-config/status":
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`{"status":"recorded"}`))
+		default:
+			t.Fatalf("unexpected %s %s", r.Method, r.URL.Path)
+		}
+	}))
+	defer server.Close()
+	client, err := NewHTTPRelayClient(server.URL, "machine-a", private, server.Client(), AccessServiceToken{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	result, err := ReconcileFleetOnce(context.Background(), FleetReconcileRequest{
+		Client: client,
+		Root:   t.TempDir(),
+		Home:   home,
+		Local:  fleetconfig.LocalConfig{Schema: 1, ProjectBasePath: base, ClaudeAliases: true},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.State != "unsupported" || result.AliasState != "linked" {
+		t.Fatalf("result=%#v", result)
+	}
+	if _, err := os.Lstat(filepath.Join(home, "CLAUDE.md")); err != nil {
+		t.Fatalf("global alias missing: %v", err)
+	}
+	if _, err := os.Lstat(filepath.Join(home, ".claude", "skills")); err != nil {
+		t.Fatalf("global skills alias missing: %v", err)
+	}
+	if _, err := os.Lstat(filepath.Join(base, "punaro", "CLAUDE.md")); err != nil {
+		t.Fatalf("project alias missing: %v", err)
+	}
+}
+
 func bytesRepeat(b byte, n int) []byte {
 	out := make([]byte, n)
 	for i := range out {

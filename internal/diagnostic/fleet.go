@@ -41,6 +41,7 @@ var requiredComponentCheckCodes = map[Component][]string{
 		"installation_paths", "maintenance_fence", "migration_manifest_binding", "owner_credential_file", "postgres_major", "readiness_endpoint", "recovery_receipt", "relay_enrollment",
 		"relay_protocol", "running_image", "storage_capacity", "storage_credential_isolation", "storage_directory_separation", "tunnel_origin", "tunnel_route",
 		"update_recovery", "update_transaction", "verified_backup",
+		"fleet_config_desired", "fleet_config_client_stale", "fleet_config_failed", "fleet_config_drifted", "fleet_config_unsupported",
 	},
 	ComponentAdapter: {
 		"adapter_configuration", "adapter_data_directory", "adapter_profile_file", "adapter_service_enabled", "adapter_service_executable", "adapter_service_installed",

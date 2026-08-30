@@ -85,14 +85,12 @@ func ReconcileFleetOnce(ctx context.Context, request FleetReconcileRequest) (Fle
 	}
 	tree, err := fleetconfig.ReadArchive(archive)
 	if err != nil {
-		_ = fleetconfig.RestoreLastGood(request.Root)
 		result := FleetReconcileResult{State: "failed", Generation: desired.Generation}
 		_ = request.Client.PutFleetStatus(ctx, statusReport(desired, result, reportGeneration, "fleet-status-"+strconv.FormatInt(reportGeneration, 10)))
 		return result, err
 	}
 	release, err := fleetconfig.Materialize(tree, desired.SourceCommit)
 	if err != nil || release.Digest != desired.Digest {
-		_ = fleetconfig.RestoreLastGood(request.Root)
 		result := FleetReconcileResult{State: "failed", Generation: desired.Generation}
 		_ = request.Client.PutFleetStatus(ctx, statusReport(desired, result, reportGeneration, "fleet-status-"+strconv.FormatInt(reportGeneration, 10)))
 		return result, errors.New("fleet-config release digest mismatch")
@@ -127,6 +125,9 @@ func ReconcileFleetOnce(ctx context.Context, request FleetReconcileRequest) (Fle
 		TrailerState:      trailerState(trailers),
 		AliasState:        aliasState(request.Local.ClaudeAliases, aliases),
 		ProjectMatchState: projectMatchState(matches),
+	}
+	if result.State == "current" && unsupportedHarness(request.Home) {
+		result.State = "unsupported"
 	}
 	if err := request.Client.PutFleetStatus(ctx, statusReport(desired, result, reportGeneration, "fleet-status-"+strconv.FormatInt(reportGeneration, 10))); err != nil {
 		return result, err
@@ -392,6 +393,15 @@ func aliasState(enabled bool, results map[string]fleetconfig.AliasResult) string
 		}
 	}
 	return state
+}
+
+func unsupportedHarness(home string) bool {
+	for _, harness := range fleetconfig.DetectHarnesses(home, nil) {
+		if harness.State == "unsupported" {
+			return true
+		}
+	}
+	return false
 }
 
 func projectMatchState(matches []fleetconfig.ProjectMatch) string {

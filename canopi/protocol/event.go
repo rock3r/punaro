@@ -108,9 +108,12 @@ func (e *Event) UnmarshalJSON(payload []byte) error {
 var machineIDPattern = regexp.MustCompile(`^[A-Za-z0-9._-]+$`)
 
 var allowedMetadataKeys = map[string]struct{}{
-	"agent_type": {},
-	"hook":       {},
-	"simulated":  {},
+	"agent_type":       {},
+	"hook":             {},
+	"simulated":        {},
+	"fleet_digest":     {},
+	"fleet_state":      {},
+	"fleet_generation": {},
 }
 
 // Key returns the stable identity used to track an agent across events.
