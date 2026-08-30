@@ -77,6 +77,9 @@ func ApplyLive(req ApplyLiveRequest) (ApplyLiveResult, error) {
 		if err := os.MkdirAll(req.Root, 0o700); err != nil {
 			return result, errors.New("fleet-config apply failed")
 		}
+		if err := pruneMovedProjectDests(req.Home, present, loadDestProjectPaths(req.Root), staged); err != nil {
+			return result, err
+		}
 		digest := destSnapshotDigest(staged)
 		if !sameDestSnapshot(req.Root, digest) {
 			if err := pruneDroppedManagedDests(req.Root, req.Home, destPresent(req.Root, req.Matches), staged); err != nil {
@@ -329,6 +332,9 @@ func unmanagedSkillDir(dir string) bool {
 }
 
 func markManagedSkillDir(dir string) error {
+	if err := rejectUnsafeDestAncestors(filepath.Join(dir, ManagedDirMarker)); err != nil {
+		return err
+	}
 	if err := os.MkdirAll(dir, 0o700); err != nil {
 		return errors.New("fleet-config apply failed")
 	}
@@ -337,6 +343,28 @@ func markManagedSkillDir(dir string) error {
 		return nil
 	}
 	return writeRegularDest(marker, nil)
+}
+
+func rejectUnsafeDestAncestors(path string) error {
+	dir := filepath.Dir(path)
+	for {
+		if dir == "" || dir == "." {
+			return nil
+		}
+		info, err := os.Lstat(dir)
+		if errors.Is(err, os.ErrNotExist) {
+			parent := filepath.Dir(dir)
+			if parent == dir {
+				return nil
+			}
+			dir = parent
+			continue
+		}
+		if err != nil || !info.IsDir() || info.Mode()&os.ModeSymlink != 0 || destIsJunctionOrReparse(info) {
+			return errors.New("fleet-config live tree is unsafe")
+		}
+		return nil
+	}
 }
 
 func writeRegularDest(path string, body []byte) error {
@@ -349,6 +377,9 @@ func writeRegularDest(path string, body []byte) error {
 			return errors.New("fleet-config live tree is unsafe")
 		}
 		statErr = os.ErrNotExist
+	}
+	if err := rejectUnsafeDestAncestors(path); err != nil {
+		return err
 	}
 	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
 		return errors.New("fleet-config apply failed")
@@ -421,6 +452,9 @@ func pruneManagedLiveDests(home string, present map[string]string, dropped []str
 		live := liveDestPath(home, present, slash)
 		if live == "" {
 			continue
+		}
+		if err := rejectUnsafeDestAncestors(live); err != nil {
+			return err
 		}
 		if skillDir, ok := skillDirForRel(slash, live); ok && IsManagedDir(skillDir) {
 			prefix, prefixOK := skillPrefixForRel(slash)
@@ -501,6 +535,26 @@ func projectPresent(matches []ProjectMatch) map[string]string {
 		}
 	}
 	return present
+}
+
+func pruneMovedProjectDests(home string, current, previous map[string]string, staged map[string][]byte) error {
+	for name, oldPath := range previous {
+		newPath := current[name]
+		if name == "" || oldPath == "" || newPath == "" || oldPath == newPath {
+			continue
+		}
+		prefix := "projects/" + name + "/"
+		var dropped []string
+		for rel := range staged {
+			if strings.HasPrefix(rel, prefix) {
+				dropped = append(dropped, rel)
+			}
+		}
+		if err := pruneManagedLiveDests(home, map[string]string{name: oldPath}, dropped, map[string][]byte{}); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 func destPresent(root string, matches []ProjectMatch) map[string]string {

@@ -355,6 +355,73 @@ func TestApplyLiveRemovesManagedDestsWhenProjectDropped(t *testing.T) {
 	}
 }
 
+func TestApplyLiveRejectsSymlinkedDestAncestor(t *testing.T) {
+	t.Parallel()
+	home := t.TempDir()
+	elsewhere := filepath.Join(home, "elsewhere")
+	if err := os.MkdirAll(elsewhere, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(elsewhere, filepath.Join(home, ".agents")); err != nil {
+		t.Fatal(err)
+	}
+	_, err := ApplyLive(ApplyLiveRequest{
+		Tree: Tree{Files: []File{
+			{Path: "AGENTS.md", Data: []byte("# fleet\n")},
+			{Path: "skills/global-demo/SKILL.md", Data: []byte(skillMarkdown("global-demo", "Global demo skill."))},
+		}},
+		Root: t.TempDir(),
+		Home: home,
+	})
+	if err == nil {
+		t.Fatal("wrote dests through a symlinked ~/.agents ancestor")
+	}
+	if _, err := os.Lstat(filepath.Join(elsewhere, "skills", "global-demo", "SKILL.md")); !os.IsNotExist(err) {
+		t.Fatal("created dests inside the symlink target")
+	}
+}
+
+func TestApplyLivePrunesOldPathWhenProjectMappingMoves(t *testing.T) {
+	t.Parallel()
+	home := t.TempDir()
+	first := filepath.Join(home, "src", "punaro")
+	second := filepath.Join(home, "src", "punaro-moved")
+	for _, dir := range []string{first, second} {
+		if err := os.MkdirAll(dir, 0o700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	root := t.TempDir()
+	tree := Tree{Files: []File{
+		{Path: "AGENTS.md", Data: []byte("# fleet\n")},
+		{Path: "projects/punaro/AGENTS.md", Data: []byte("# punaro\n")},
+	}}
+	req := ApplyLiveRequest{
+		Tree:    tree,
+		Root:    root,
+		Home:    home,
+		Matches: []ProjectMatch{{Name: "punaro", Path: first, Kind: "matched"}},
+	}
+	if _, err := ApplyLive(req); err != nil {
+		t.Fatal(err)
+	}
+	oldDest := filepath.Join(first, "AGENTS.md")
+	if _, err := os.Lstat(oldDest); err != nil {
+		t.Fatal(err)
+	}
+	req.Matches = []ProjectMatch{{Name: "punaro", Path: second, Kind: "override"}}
+	if _, err := ApplyLive(req); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Lstat(oldDest); !os.IsNotExist(err) {
+		t.Fatal("left managed dests at the previous project path")
+	}
+	got, err := os.ReadFile(filepath.Join(second, "AGENTS.md")) //nolint:gosec // G304: test fixture under t.TempDir.
+	if err != nil || !IsManagedContent(got) {
+		t.Fatalf("missing dest at the new project path: %q err=%v", got, err)
+	}
+}
+
 func TestApplyLiveReplacesClaudeAliasWithRegularFile(t *testing.T) {
 	t.Parallel()
 	home := t.TempDir()
