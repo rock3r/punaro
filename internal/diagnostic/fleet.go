@@ -51,7 +51,7 @@ var requiredComponentCheckCodes = map[Component][]string{
 		"relay_access", "relay_enrollment", "relay_origin", "relay_protocol", "relay_transport", "skill_set_parity",
 	},
 	ComponentBootstrap: {
-		"accepted_state", "bootstrap_directory", "bootstrap_lock", "candidate_health", "candidate_state", "catalog_freshness", "catalog_reachability", "catalog_sequence",
+		"accepted_state", "auto_rollback_state", "bootstrap_directory", "bootstrap_lock", "candidate_health", "candidate_state", "catalog_freshness", "catalog_reachability", "catalog_sequence",
 		"catalog_signature", "current_artifact_integrity", "current_catalog_allowed", "current_critical_block", "current_manifest_signature", "current_platform_compatibility",
 		"current_slot", "disk_space", "journal_state", "minimum_bootstrap_release", "minimum_recovery_protocol", "previous_artifact_integrity", "previous_catalog_allowed",
 		"previous_critical_block", "previous_manifest_signature", "previous_platform_compatibility", "previous_slot", "recovery_state", "release_keys", "rollback_available",

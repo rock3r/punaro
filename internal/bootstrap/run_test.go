@@ -2330,11 +2330,15 @@ func allowPreviousInCatalog(t *testing.T, origin *signedOrigin, release string, 
 		t.Fatal(err)
 	}
 	current.MinimumSafeSequence = 1
+	manifestLength := int64(32)
+	if manifest, ok := origin.Files[release+"/"+punarorelease.ReleaseManifestFile]; ok {
+		manifestLength = int64(len(manifest))
+	}
 	current.Releases = append(current.Releases, punarorelease.CatalogRelease{
 		Release:        release,
 		Sequence:       sequence,
 		ManifestPath:   release + "/" + punarorelease.ReleaseManifestFile,
-		ManifestLength: 32,
+		ManifestLength: manifestLength,
 		ManifestSHA256: digest,
 	})
 	body, err := json.Marshal(current)

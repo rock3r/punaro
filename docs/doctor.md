@@ -366,8 +366,8 @@ matching string.
 ### Bootstrap
 
 `bootstrap_directory`, `bootstrap_lock`, `run_lock`, `disk_space`,
-`release_keys`, `accepted_state`, `current_slot`, `previous_slot`,
-`journal_state`, `recovery_state`, `candidate_state`, `swap_state`,
+`release_keys`, `accepted_state`, `auto_rollback_state`, `current_slot`,
+`previous_slot`, `journal_state`, `recovery_state`, `candidate_state`, `swap_state`,
 `catalog_reachability`, `catalog_signature`, `catalog_freshness`,
 `catalog_sequence`, `current_catalog_allowed`, `current_critical_block`,
 `current_manifest_signature`, `current_platform_compatibility`,
@@ -377,6 +377,13 @@ matching string.
 `previous_platform_compatibility`, `previous_artifact_integrity`,
 `rollback_available`, `running_artifact`, `supervisor_process`,
 `candidate_health`.
+
+`accepted_state` validates the monotonic signed-release high-water mark. It
+normally matches the current slot. After an intentional or automatic rollback
+it instead matches the rolled-away previous slot, corroborated by the exact
+`auto_rollback_state` identity; rollback deliberately does not lower this
+high-water mark. A malformed auto-rollback record or an accepted/current
+mismatch without that exact rollback evidence fails closed.
 
 Compose-manifest hashing and bootstrap slot inspection reject non-regular or
 linked paths before opening files and use bounded incremental reads. Both the

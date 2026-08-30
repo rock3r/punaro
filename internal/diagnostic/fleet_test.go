@@ -57,6 +57,28 @@ func TestFleetRejectsAdapterReportMissingClientComponentLaunchers(t *testing.T) 
 	}
 }
 
+func TestFleetRejectsBootstrapReportMissingAutoRollbackState(t *testing.T) {
+	report := mustFleetInput(t, ComponentBootstrap, Identity{MachineID: "mac-studio", Release: "v0.1.0-alpha.2", ReleaseSequence: 2, Protocol: 1, Platform: "darwin-arm64"})
+	checks := make([]Check, 0, len(report.Checks)-1)
+	for _, check := range report.Checks {
+		if check.Code != "auto_rollback_state" {
+			checks = append(checks, check)
+		}
+	}
+	incomplete, err := New(ComponentBootstrap, report.Identity, checks)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = AggregateFleet([]Report{incomplete}, FleetPolicy{
+		Expected:        []FleetTarget{{MachineID: "mac-studio", Component: ComponentBootstrap}},
+		CatalogSequence: 2,
+		Catalog:         map[string]int64{"v0.1.0-alpha.2": 2},
+	})
+	if err == nil {
+		t.Fatal("bootstrap report without auto_rollback_state was accepted")
+	}
+}
+
 func TestFleetDetectsMissingDuplicateCatalogAndCompatibilitySkew(t *testing.T) {
 	reports := []Report{
 		mustFleetInput(t, ComponentServer, Identity{MachineID: "punaro-lxc", Release: "v0.1.0-alpha.2", ReleaseSequence: 2, Protocol: 2, StorageSchema: 44, Platform: "linux-arm64"}),
