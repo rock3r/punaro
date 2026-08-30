@@ -385,6 +385,10 @@ it instead matches the rolled-away previous slot, corroborated by the exact
 high-water mark. A malformed auto-rollback record or an accepted/current
 mismatch without that exact rollback evidence fails closed.
 
+`catalog_sequence` is unavailable, rather than passing, when the accepted
+bootstrap state is missing or unreadable because there is no trustworthy local
+high-water mark to compare with the signed catalog.
+
 Compose-manifest hashing and bootstrap slot inspection reject non-regular or
 linked paths before opening files and use bounded incremental reads. Both the
 standalone bootstrap doctor and the adapter's embedded bootstrap checks run the

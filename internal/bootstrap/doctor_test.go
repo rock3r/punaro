@@ -32,7 +32,7 @@ func TestDoctorVerifiesSignedSlotWithoutMutatingBootstrapState(t *testing.T) {
 	if report.Component != punarodiagnostic.ComponentBootstrap || report.Identity.Release != "v0.1.0" || report.Identity.ReleaseSequence != 1 || report.Identity.CatalogSequence != 1 || report.Identity.Protocol != BootstrapProtocolVersion || report.Identity.ArtifactDigest == "" {
 		t.Fatalf("report=%#v", report)
 	}
-	for _, code := range []string{"bootstrap_directory", "bootstrap_lock", "run_lock", "disk_space", "release_keys", "catalog_signature", "catalog_freshness", "accepted_state", "current_slot", "current_catalog_allowed", "current_critical_block", "current_manifest_signature", "current_platform_compatibility", "current_artifact_integrity", "minimum_bootstrap_release", "minimum_recovery_protocol", "journal_state", "recovery_state"} {
+	for _, code := range []string{"bootstrap_directory", "bootstrap_lock", "run_lock", "disk_space", "release_keys", "catalog_signature", "catalog_freshness", "catalog_sequence", "accepted_state", "current_slot", "current_catalog_allowed", "current_critical_block", "current_manifest_signature", "current_platform_compatibility", "current_artifact_integrity", "minimum_bootstrap_release", "minimum_recovery_protocol", "journal_state", "recovery_state"} {
 		if doctorCheckStatus(report, code) != punarodiagnostic.StatusPass {
 			t.Fatalf("check %s report=%#v", code, report)
 		}
@@ -422,7 +422,101 @@ func TestDoctorRejectsOversizedAcceptedStateWithoutReadingIt(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if report.Healthy || doctorCheckStatus(report, "accepted_state") != punarodiagnostic.StatusFail {
+	if report.Healthy || doctorCheckStatus(report, "accepted_state") != punarodiagnostic.StatusFail || doctorCheckStatus(report, "catalog_sequence") != punarodiagnostic.StatusUnavailable {
+		t.Fatalf("report=%#v", report)
+	}
+}
+
+func TestDoctorDoesNotPassCatalogSequenceWithoutAcceptedState(t *testing.T) {
+	origin := newSignedOrigin(t, originSpec{payload: testArtifact, goos: runtime.GOOS, goarch: runtime.GOARCH})
+	now := time.Date(2026, 8, 20, 0, 0, 0, 0, time.UTC)
+	for _, test := range []struct {
+		name   string
+		mutate func(*testing.T, string)
+	}{
+		{
+			name: "missing",
+			mutate: func(t *testing.T, directory string) {
+				t.Helper()
+				if err := os.Remove(filepath.Join(directory, acceptedFile)); err != nil {
+					t.Fatal(err)
+				}
+			},
+		},
+		{
+			name: "malformed",
+			mutate: func(t *testing.T, directory string) {
+				t.Helper()
+				if err := os.WriteFile(filepath.Join(directory, acceptedFile), []byte(`{"schema":1`), 0o600); err != nil {
+					t.Fatal(err)
+				}
+			},
+		},
+		{
+			name: "duplicate field",
+			mutate: func(t *testing.T, directory string) {
+				t.Helper()
+				accepted, err := loadAccepted(directory)
+				if err != nil {
+					t.Fatal(err)
+				}
+				body := fmt.Sprintf(`{"schema":1,"schema":1,"release":%q,"release_sequence":%d,"catalog_sequence":%d,"manifest_sha256":%q}`, accepted.Release, accepted.ReleaseSequence, accepted.CatalogSequence, accepted.ManifestSHA256)
+				if err := os.WriteFile(filepath.Join(directory, acceptedFile), []byte(body), 0o600); err != nil {
+					t.Fatal(err)
+				}
+			},
+		},
+		{
+			name: "unsafe node",
+			mutate: func(t *testing.T, directory string) {
+				t.Helper()
+				path := filepath.Join(directory, acceptedFile)
+				if err := os.Remove(path); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.Mkdir(path, 0o700); err != nil {
+					t.Fatal(err)
+				}
+			},
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			directory := privateDir(t)
+			if _, err := Update(Request{Directory: directory, Origin: origin.URL, Keys: origin.Keys, GOOS: runtime.GOOS, GOARCH: runtime.GOARCH, Now: now}); err != nil {
+				t.Fatal(err)
+			}
+			test.mutate(t, directory)
+			report, err := Doctor(t.Context(), DoctorRequest{Directory: directory, Origin: origin.URL, Keys: origin.Keys, GOOS: runtime.GOOS, GOARCH: runtime.GOARCH, Now: now, FreeBytes: func(string) (uint64, error) { return 1 << 40, nil }})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if doctorCheckStatus(report, "catalog_signature") != punarodiagnostic.StatusPass || doctorCheckStatus(report, "accepted_state") != punarodiagnostic.StatusFail || doctorCheckStatus(report, "catalog_sequence") != punarodiagnostic.StatusUnavailable {
+				t.Fatalf("report=%#v", report)
+			}
+		})
+	}
+}
+
+func TestDoctorFailsCatalogSequenceBelowAcceptedHighWater(t *testing.T) {
+	origin := newSignedOrigin(t, originSpec{payload: testArtifact, goos: runtime.GOOS, goarch: runtime.GOARCH})
+	directory := privateDir(t)
+	now := time.Date(2026, 8, 20, 0, 0, 0, 0, time.UTC)
+	if _, err := Update(Request{Directory: directory, Origin: origin.URL, Keys: origin.Keys, GOOS: runtime.GOOS, GOARCH: runtime.GOARCH, Now: now}); err != nil {
+		t.Fatal(err)
+	}
+	accepted, err := loadAccepted(directory)
+	if err != nil {
+		t.Fatal(err)
+	}
+	accepted.CatalogSequence++
+	if err := saveAccepted(directory, accepted); err != nil {
+		t.Fatal(err)
+	}
+	report, err := Doctor(t.Context(), DoctorRequest{Directory: directory, Origin: origin.URL, Keys: origin.Keys, GOOS: runtime.GOOS, GOARCH: runtime.GOARCH, Now: now, FreeBytes: func(string) (uint64, error) { return 1 << 40, nil }})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if doctorCheckStatus(report, "accepted_state") != punarodiagnostic.StatusPass || doctorCheckStatus(report, "catalog_sequence") != punarodiagnostic.StatusFail {
 		t.Fatalf("report=%#v", report)
 	}
 }
