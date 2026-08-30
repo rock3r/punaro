@@ -37,6 +37,33 @@ WHERE desired.id`).Scan(&desired.Digest, &desired.SourceCommit, &desired.Generat
 	return desired, nil
 }
 
+// LoadFleetReleaseByCommit returns the newest stored release for a source commit.
+func (a *Administration) LoadFleetReleaseByCommit(ctx context.Context, commit string) (fleetconfig.Release, error) {
+	if a == nil || a.db == nil {
+		return fleetconfig.Release{}, errors.New("fleet-config store is unavailable")
+	}
+	if _, err := fleetconfig.ParseCommitID(commit); err != nil {
+		return fleetconfig.Release{}, err
+	}
+	var release fleetconfig.Release
+	var fileCount int
+	err := a.db.QueryRowContext(ctx, `
+SELECT digest, source_commit, archive, skill_count, file_count, total_bytes
+FROM fleet.releases
+WHERE source_commit = $1
+ORDER BY created_at DESC
+LIMIT 1`, commit).Scan(&release.Digest, &release.SourceCommit, &release.Archive, &release.SkillCount, &fileCount, &release.TotalBytes)
+	if errors.Is(err, sql.ErrNoRows) || err != nil {
+		return fleetconfig.Release{}, errors.New("fleet-config stored release is unavailable")
+	}
+	release.DataOnly = true
+	release.Schema = fleetconfig.SchemaV1
+	if fileCount > 0 {
+		release.Files = make([]fleetconfig.ManifestFile, fileCount)
+	}
+	return release, nil
+}
+
 // PublishFleetRelease stores the immutable archive first, then sets desired state.
 // An identical digest does not increment generation. expected must match the
 // locked singleton (zero when none exists) or publication is rejected as stale.

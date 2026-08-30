@@ -70,6 +70,32 @@ func TestFleetConfigPublishPreviewIncludesContractFields(t *testing.T) {
 	}
 }
 
+func TestFleetConfigPublishFallsBackToStoredRelease(t *testing.T) {
+	preserveFleetConfig(t)
+	directory := testInstallation(t)
+	writeFleetSource(t, directory)
+	release := testRelease()
+	materializeFleetCommit = func(string, string) (fleetconfig.Release, error) {
+		return fleetconfig.Release{}, errors.New("commit pruned")
+	}
+	loadStoredFleetRelease = func(_ context.Context, _ string, commit string) (fleetconfig.Release, error) {
+		if commit != testPublishCommit {
+			t.Fatalf("commit=%s", commit)
+		}
+		return release, nil
+	}
+	store := &memoryFleetStore{}
+	loadFleetDesired = store.desired
+	persistFleetRelease = store.publish
+	hash := fleetPublishPreviewHash(release, punaropostgres.FleetDesired{})
+	if code := run([]string{"fleet-config", "publish", "--directory", directory, "--yes", "--confirm-preview-hash", hash, testPublishCommit}, bytes.NewBuffer(nil), bytes.NewBuffer(nil)); code != 0 {
+		t.Fatalf("code=%d", code)
+	}
+	if store.desiredState.Digest != release.Digest || store.desiredState.Generation != 1 {
+		t.Fatalf("desired=%#v", store.desiredState)
+	}
+}
+
 func TestFleetConfigPublishFailedMaterializeLeavesDesiredUnchanged(t *testing.T) {
 	preserveFleetConfig(t)
 	directory := testInstallation(t)
@@ -352,10 +378,13 @@ func gitHead(t *testing.T, repo string) string {
 func preserveFleetConfig(t *testing.T) {
 	t.Helper()
 	preserveDependencies(t)
-	originalMaterialize, originalPersist, originalDesired := materializeFleetCommit, persistFleetRelease, loadFleetDesired
+	originalMaterialize, originalPersist, originalDesired, originalStored := materializeFleetCommit, persistFleetRelease, loadFleetDesired, loadStoredFleetRelease
 	t.Cleanup(func() {
-		materializeFleetCommit, persistFleetRelease, loadFleetDesired = originalMaterialize, originalPersist, originalDesired
+		materializeFleetCommit, persistFleetRelease, loadFleetDesired, loadStoredFleetRelease = originalMaterialize, originalPersist, originalDesired, originalStored
 	})
+	loadStoredFleetRelease = func(context.Context, string, string) (fleetconfig.Release, error) {
+		return fleetconfig.Release{}, errors.New("no stored release")
+	}
 	inspectSchema = func(context.Context, string) (punaropostgres.SchemaState, error) {
 		return punaropostgres.SchemaState{Classification: punaropostgres.Compatible, Version: 58}, nil
 	}

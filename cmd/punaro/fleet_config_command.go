@@ -37,6 +37,7 @@ var (
 	materializeFleetCommit = materializeFleetCommitFromGit
 	persistFleetRelease    = persistFleetReleaseDefault
 	loadFleetDesired       = loadFleetDesiredDefault
+	loadStoredFleetRelease = loadStoredFleetReleaseDefault
 )
 
 func runFleetConfigConfigure(args []string, stdout, stderr io.Writer) int {
@@ -115,8 +116,12 @@ func runFleetConfigPublish(args []string, stdout, stderr io.Writer) int {
 	}
 	release, err := materializeFleetCommit(source.Repository, commit)
 	if err != nil {
-		_, _ = fmt.Fprintln(stderr, "fleet-config publish refused: source commit could not be materialized")
-		return 1
+		stored, storedErr := loadStoredFleetRelease(context.Background(), installation.OwnerDSNFile, commit)
+		if storedErr != nil {
+			_, _ = fmt.Fprintln(stderr, "fleet-config publish refused: source commit could not be materialized")
+			return 1
+		}
+		release = stored
 	}
 	desired, err := loadFleetDesired(context.Background(), installation.OwnerDSNFile)
 	if err != nil {
@@ -287,7 +292,7 @@ func persistFleetReleaseDefault(ctx context.Context, ownerDSNFile string, releas
 func fleetGitCommand(args ...string) *exec.Cmd {
 	cmd := exec.CommandContext(context.Background(), "git", args...) // #nosec G204 -- fixed git argv, commit already parsed.
 	cmd.Stderr = io.Discard
-	cmd.Env = append(os.Environ(), "GIT_NO_REPLACE_OBJECTS=1")
+	cmd.Env = append(os.Environ(), "GIT_NO_REPLACE_OBJECTS=1", "GIT_ATTR_NOSYSTEM=1")
 	return cmd
 }
 
@@ -349,6 +354,15 @@ func boundFleetGitTree(repository, commit string) error {
 		return errors.New("fleet-config git tree is too large")
 	}
 	return nil
+}
+
+func loadStoredFleetReleaseDefault(ctx context.Context, ownerDSNFile, commit string) (fleetconfig.Release, error) {
+	admin, err := punaropostgres.OpenAdministration(ctx, punaropostgres.Config{DSNFile: ownerDSNFile})
+	if err != nil {
+		return fleetconfig.Release{}, err
+	}
+	defer func() { _ = admin.Close() }()
+	return admin.LoadFleetReleaseByCommit(ctx, commit)
 }
 
 func loadFleetDesiredDefault(ctx context.Context, ownerDSNFile string) (punaropostgres.FleetDesired, error) {
