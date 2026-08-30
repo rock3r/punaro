@@ -9,7 +9,8 @@ traffic and steal bearer credentials.
 
 Do not port-forward the listener, publish it through a tunnel, place it on a
 guest or shared Wi-Fi network, or treat NAT as an access control. The Internet
-profile requires the separate Tailscale or Cloudflare Tunnel and Access work.
+profile requires the separate Tailscale or Cloudflare Tunnel and Access work
+described in the [indirect Internet deployment design](indirect-internet-deployment-design.md).
 
 ## Server
 

@@ -53,6 +53,8 @@ Read the [accepted platform and Big Brain plan](docs/big-brain-plan.md),
 [doctor and fleet-readiness guide](docs/doctor.md),
 [agent plugin guide](docs/agent-plugin.md),
 [trusted-LAN deployment guide](docs/trusted-lan-deployment.md),
+[indirect Internet deployment design](docs/indirect-internet-deployment-design.md)
+and its [executive summary](docs/indirect-internet-deployment-executive-summary.md),
 [alpha text-relay onboarding](docs/alpha-text-relay.md),
 [Telegram gateway guide](docs/telegram-gateway.md),
 [historical attachment RFC](docs/attachments-v2-rfc.md),
