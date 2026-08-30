@@ -139,7 +139,13 @@ punaro-adapter doctor --plugin-root /absolute/installed/punaro-plugin
 ```
 
 The update verifies the signed catalog and manifest plus every exact artifact
-length/digest before changing slots. Do not download a binary named `latest`,
+length/digest before changing slots. Each catalog, signature, manifest, and
+artifact fetch gets up to three attempts for bounded transient transport,
+timeout, rate-limit, or server failures under one four-minute update deadline.
+Policy, signature, freshness, compatibility, length, and digest failures are
+never retried. Download errors report only a content-free `phase` and
+`category`; they never include an origin, path, token, or response body. Do not
+download a binary named `latest`,
 replace current-slot files manually, or run a versioned adapter directly from
 the service. See [GitHub Releases](github-releases.md) and
 [doctor](doctor.md).

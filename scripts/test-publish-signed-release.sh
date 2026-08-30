@@ -14,16 +14,19 @@ prepare_case() {
 	mkdir -p "$case_root/bin" "$case_root/documents" "$case_root/state/remote/v0.1.0-alpha.1"
 	cp "$repo_dir/scripts/testdata/fake-publish-go.sh" "$case_root/bin/go"
 	cp "$repo_dir/scripts/testdata/fake-publish-gh.sh" "$case_root/bin/gh"
-	chmod +x "$case_root/bin/go" "$case_root/bin/gh"
-	printf '%s\n' '{"artifacts":[{"path":"v0.1.0-alpha.1/punaro-adapter-linux-amd64"}]}' >"$case_root/documents/punaro-release.json"
+	cp "$repo_dir/scripts/testdata/fake-publish-curl.sh" "$case_root/bin/curl"
+	chmod +x "$case_root/bin/go" "$case_root/bin/gh" "$case_root/bin/curl"
+	printf '%s\n' '{"artifacts":[{"path":"v0.1.0-alpha.1/punaro-adapter-linux-amd64"},{"path":"v0.1.0-alpha.1/punaro-adapter-windows-amd64.exe"}]}' >"$case_root/documents/punaro-release.json"
 	printf '%s\n' manifest-signature >"$case_root/documents/punaro-release.sig"
 	printf '%s\n' catalog >"$case_root/documents/punaro-catalog.json"
 	printf '%s\n' catalog-signature >"$case_root/documents/punaro-catalog.sig"
 	printf '%s\n' artifact >"$case_root/documents/punaro-adapter-linux-amd64"
+	printf '%s\n' windows-artifact >"$case_root/documents/punaro-adapter-windows-amd64.exe"
 	printf '%s\n' public-key >"$case_root/release.pub"
 	cp "$case_root/documents/punaro-release.json" "$case_root/state/remote/v0.1.0-alpha.1/"
 	cp "$case_root/documents/punaro-catalog.json" "$case_root/state/remote/v0.1.0-alpha.1/"
 	cp "$case_root/documents/punaro-adapter-linux-amd64" "$case_root/state/remote/v0.1.0-alpha.1/"
+	cp "$case_root/documents/punaro-adapter-windows-amd64.exe" "$case_root/state/remote/v0.1.0-alpha.1/"
 	printf '%s\n' true >"$case_root/state/release-draft"
 	printf '%s\n' false >"$case_root/state/release-prerelease"
 }
@@ -136,6 +139,39 @@ if [ "$(cat "$retry/state/catalog-draft")" != false ]; then
 fi
 if [ "$(grep -Fc 'release edit v0.1.0-alpha.1 --repo rock3r/punaro --draft=false --prerelease' "$retry/gh.log")" -ne 1 ]; then
 	printf '%s\n' 'publication retry attempted to republish the already exact prerelease' >&2
+	exit 1
+fi
+
+public_origin="$temporary/public-origin"
+prepare_case "$public_origin"
+touch "$public_origin/state/fail-public-origin-once"
+if PATH="$public_origin/bin:$PATH" \
+	PUNARO_FAKE_GH_STATE="$public_origin/state" \
+	PUNARO_FAKE_GH_LOG="$public_origin/gh.log" \
+	PUNARO_FAKE_GO_LOG="$public_origin/go.log" \
+	PUNARO_FAKE_CURL_LOG="$public_origin/curl.log" \
+	"$repo_dir/scripts/publish-signed-release.sh" --release v0.1.0-alpha.1 --dir "$public_origin/documents" --keys-file "$public_origin/release.pub" >/dev/null 2>&1; then
+	printf '%s\n' 'failed public-origin smoke unexpectedly published the catalog' >&2
+	exit 1
+fi
+if [ "$(cat "$public_origin/state/release-draft")" != false ] || [ "$(cat "$public_origin/state/release-prerelease")" != true ] || [ -d "$public_origin/state/remote/catalog" ]; then
+	printf '%s\n' 'public-origin smoke failure did not preserve a retryable prerelease and prior catalog' >&2
+	exit 1
+fi
+PATH="$public_origin/bin:$PATH" \
+	PUNARO_FAKE_GH_STATE="$public_origin/state" \
+	PUNARO_FAKE_GH_LOG="$public_origin/gh.log" \
+	PUNARO_FAKE_GO_LOG="$public_origin/go.log" \
+	PUNARO_FAKE_CURL_LOG="$public_origin/curl.log" \
+	"$repo_dir/scripts/publish-signed-release.sh" --release v0.1.0-alpha.1 --dir "$public_origin/documents" --keys-file "$public_origin/release.pub" >/dev/null
+for asset in punaro-release.json punaro-release.sig punaro-adapter-linux-amd64 punaro-adapter-windows-amd64.exe; do
+	if ! grep -Fq "https://github.com/rock3r/punaro/releases/download/v0.1.0-alpha.1/$asset" "$public_origin/curl.log"; then
+		printf '%s\n' "public-origin smoke omitted $asset" >&2
+		exit 1
+	fi
+done
+if [ "$(cat "$public_origin/state/catalog-draft")" != false ]; then
+	printf '%s\n' 'successful public-origin smoke did not expose the verified catalog' >&2
 	exit 1
 fi
 

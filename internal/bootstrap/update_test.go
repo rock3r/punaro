@@ -1,6 +1,7 @@
 package bootstrap
 
 import (
+	"bytes"
 	"context"
 	"crypto/ed25519"
 	"crypto/rand"
@@ -66,6 +67,128 @@ func TestUpdateInstallsSignedPlatformArtifacts(t *testing.T) {
 	}
 	if status.Current != "v0.1.0" || status.CurrentSequence != 1 || status.Previous != "" {
 		t.Fatalf("status=%#v", status)
+	}
+}
+
+func TestUpdateReportsContentFreeDownloadPhase(t *testing.T) {
+	name := artifactName("punaro-adapter", runtime.GOOS, runtime.GOARCH)
+	for _, test := range []struct {
+		name     string
+		failPath string
+		phase    string
+	}{
+		{name: "catalog", failPath: punarorelease.CatalogReleaseName + "/" + punarorelease.CatalogFile, phase: "catalog"},
+		{name: "catalog signature", failPath: punarorelease.CatalogReleaseName + "/" + punarorelease.CatalogSignatureFile, phase: "signature"},
+		{name: "manifest", failPath: "v0.1.0/" + punarorelease.ReleaseManifestFile, phase: "manifest"},
+		{name: "artifact", failPath: "v0.1.0/" + name, phase: "artifact"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			origin := newSignedOrigin(t, originSpec{payload: testArtifact, goos: runtime.GOOS, goarch: runtime.GOARCH})
+			fetcher := &recordingFetcher{files: origin.Files, failPath: test.failPath}
+			_, err := Update(Request{
+				Directory: privateDir(t),
+				Origin:    origin.URL,
+				Keys:      origin.Keys,
+				GOOS:      runtime.GOOS,
+				GOARCH:    runtime.GOARCH,
+				Now:       time.Date(2026, 8, 20, 0, 0, 0, 0, time.UTC),
+				HTTP:      fetcher,
+			})
+			want := "release download failed: phase=" + test.phase + " category=transport"
+			if err == nil || err.Error() != want {
+				t.Fatalf("err=%v want=%q", err, want)
+			}
+			if strings.Contains(err.Error(), test.failPath) || fetcher.calls[test.failPath] != 1 {
+				t.Fatalf("err=%v calls=%d", err, fetcher.calls[test.failPath])
+			}
+		})
+	}
+}
+
+func TestUpdateAppliesOneOverallDownloadDeadline(t *testing.T) {
+	origin := newSignedOrigin(t, originSpec{payload: testArtifact, goos: runtime.GOOS, goarch: runtime.GOARCH})
+	fetcher := &recordingFetcher{files: origin.Files, waitForCancel: true}
+	started := time.Now()
+	_, err := Update(Request{
+		Directory:       privateDir(t),
+		Origin:          origin.URL,
+		Keys:            origin.Keys,
+		GOOS:            runtime.GOOS,
+		GOARCH:          runtime.GOARCH,
+		Now:             time.Date(2026, 8, 20, 0, 0, 0, 0, time.UTC),
+		HTTP:            fetcher,
+		DownloadTimeout: 20 * time.Millisecond,
+	})
+	if err == nil || err.Error() != "release download failed: phase=catalog category=timeout" {
+		t.Fatalf("err=%v", err)
+	}
+	if elapsed := time.Since(started); elapsed > time.Second {
+		t.Fatalf("overall deadline took %s", elapsed)
+	}
+}
+
+func TestUpdateDoesNotRetryVerificationFailure(t *testing.T) {
+	origin := newSignedOrigin(t, originSpec{payload: testArtifact, goos: runtime.GOOS, goarch: runtime.GOARCH})
+	name := artifactName("punaro-adapter", runtime.GOOS, runtime.GOARCH)
+	path := "v0.1.0/" + name
+	files := cloneFiles(origin.Files)
+	files[path] = []byte(strings.Repeat("x", len(testArtifact)))
+	fetcher := &recordingFetcher{files: files}
+	_, err := Update(Request{
+		Directory: privateDir(t),
+		Origin:    origin.URL,
+		Keys:      origin.Keys,
+		GOOS:      runtime.GOOS,
+		GOARCH:    runtime.GOARCH,
+		Now:       time.Date(2026, 8, 20, 0, 0, 0, 0, time.UTC),
+		HTTP:      fetcher,
+	})
+	if err == nil || err.Error() != "release artifact digest mismatch" {
+		t.Fatalf("err=%v", err)
+	}
+	if fetcher.calls[path] != 1 {
+		t.Fatalf("verification failure fetched artifact %d times", fetcher.calls[path])
+	}
+}
+
+func TestFailedArtifactDownloadPreservesPublishedSlotsAndValidJournal(t *testing.T) {
+	origin := newSignedOrigin(t, originSpec{payload: "first", goos: runtime.GOOS, goarch: runtime.GOARCH})
+	dir := privateDir(t)
+	req := Request{Directory: dir, Origin: origin.URL, Keys: origin.Keys, GOOS: runtime.GOOS, GOARCH: runtime.GOARCH, Now: time.Date(2026, 8, 20, 0, 0, 0, 0, time.UTC)}
+	if _, err := Update(req); err != nil {
+		t.Fatal(err)
+	}
+	currentBefore, err := os.ReadFile(filepath.Join(dir, currentSlot, slotRecord)) // #nosec G304 -- fixed fixture path under t.TempDir.
+	if err != nil {
+		t.Fatal(err)
+	}
+	acceptedBefore, err := os.ReadFile(filepath.Join(dir, acceptedFile)) // #nosec G304 -- fixed fixture path under t.TempDir.
+	if err != nil {
+		t.Fatal(err)
+	}
+	origin.republish(t, originSpec{payload: "second", goos: runtime.GOOS, goarch: runtime.GOARCH, release: "v0.2.0", sequence: 2, catalogSequence: 2})
+	artifactPath := "v0.2.0/" + artifactName("punaro-adapter", runtime.GOOS, runtime.GOARCH)
+	req.HTTP = &recordingFetcher{files: origin.Files, failPath: artifactPath}
+	if _, err := Update(req); err == nil {
+		t.Fatal("failed artifact download succeeded")
+	}
+	currentAfter, err := os.ReadFile(filepath.Join(dir, currentSlot, slotRecord)) // #nosec G304 -- fixed fixture path under t.TempDir.
+	if err != nil {
+		t.Fatal(err)
+	}
+	acceptedAfter, err := os.ReadFile(filepath.Join(dir, acceptedFile)) // #nosec G304 -- fixed fixture path under t.TempDir.
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(currentBefore, currentAfter) || !bytes.Equal(acceptedBefore, acceptedAfter) {
+		t.Fatal("failed download changed published current or accepted state")
+	}
+	if _, err := os.Lstat(filepath.Join(dir, previousSlot)); !os.IsNotExist(err) {
+		t.Fatal("failed download published a previous slot")
+	}
+	record, err := readJournal(dir)
+	if err != nil || record.Phase != "staging" || record.Release != "v0.2.0" {
+		t.Fatalf("journal=%#v err=%v", record, err)
 	}
 }
 
@@ -504,6 +627,43 @@ type signedOrigin struct {
 	Keys  map[string]ed25519.PublicKey
 	Files map[string][]byte
 	priv  ed25519.PrivateKey
+}
+
+type recordingFetcher struct {
+	files         map[string][]byte
+	failPath      string
+	waitForCancel bool
+	calls         map[string]int
+}
+
+func (fetcher *recordingFetcher) Get(ctx context.Context, relative string, limit int64) ([]byte, error) {
+	if fetcher.calls == nil {
+		fetcher.calls = map[string]int{}
+	}
+	fetcher.calls[relative]++
+	if fetcher.waitForCancel {
+		<-ctx.Done()
+		return nil, ctx.Err()
+	}
+	if relative == fetcher.failPath {
+		return nil, &downloadFailure{category: downloadCategoryTransport, cause: errors.New("private transport detail")}
+	}
+	body, ok := fetcher.files[relative]
+	if !ok {
+		return nil, &downloadFailure{category: downloadCategoryHTTP, cause: errors.New("missing fixture")}
+	}
+	if int64(len(body)) > limit {
+		return nil, &downloadFailure{category: downloadCategoryLength, cause: errors.New("fixture exceeds bound")}
+	}
+	return append([]byte(nil), body...), nil
+}
+
+func cloneFiles(source map[string][]byte) map[string][]byte {
+	cloned := make(map[string][]byte, len(source))
+	for name, body := range source {
+		cloned[name] = append([]byte(nil), body...)
+	}
+	return cloned
 }
 
 func newSignedOrigin(t *testing.T, spec originSpec) *signedOrigin {
