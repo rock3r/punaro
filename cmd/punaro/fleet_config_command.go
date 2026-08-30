@@ -40,6 +40,7 @@ var (
 	loadFleetDesired       = loadFleetDesiredDefault
 	loadStoredFleetRelease = loadStoredFleetReleaseDefault
 	afterFleetPublish      = func(_, _ int64) {}
+	loadFleetClients       = loadFleetClientsDefault
 )
 
 func runFleetConfigConfigure(args []string, stdout, stderr io.Writer) int {
@@ -189,6 +190,11 @@ func runFleetConfigStatus(args []string, stdout, stderr io.Writer) int {
 		_, _ = fmt.Fprintln(stderr, "fleet-config status refused: desired revision is unavailable")
 		return 1
 	}
+	clients, err := loadFleetClients(context.Background(), installation.OwnerDSNFile)
+	if err != nil {
+		_, _ = fmt.Fprintln(stderr, "fleet-config status refused: client status is unavailable")
+		return 1
+	}
 	state := "pending"
 	if desired.Digest != "" {
 		state = "current"
@@ -200,6 +206,7 @@ func runFleetConfigStatus(args []string, stdout, stderr io.Writer) int {
 		"skill_count":        desired.SkillCount,
 		"total_bytes":        desired.TotalBytes,
 		"state":              state,
+		"clients":            clients,
 	})
 }
 
@@ -369,6 +376,15 @@ func loadStoredFleetReleaseDefault(ctx context.Context, ownerDSNFile, commit str
 	}
 	defer func() { _ = admin.Close() }()
 	return admin.LoadFleetReleaseByCommit(ctx, commit)
+}
+
+func loadFleetClientsDefault(ctx context.Context, ownerDSNFile string) ([]punaropostgres.FleetClientStatus, error) {
+	admin, err := punaropostgres.OpenAdministration(ctx, punaropostgres.Config{DSNFile: ownerDSNFile})
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = admin.Close() }()
+	return admin.ListFleetClientStatus(ctx)
 }
 
 func loadFleetDesiredDefault(ctx context.Context, ownerDSNFile string) (punaropostgres.FleetDesired, error) {
