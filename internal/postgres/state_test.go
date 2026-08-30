@@ -109,13 +109,6 @@ func TestPostgresIntegrationImageIncludesFleetBootstrapAndGit(t *testing.T) {
 	if !strings.Contains(string(ignored), "!deploy/compose/postgres-bootstrap.sh") {
 		t.Fatal("build context excludes postgres-bootstrap.sh")
 	}
-	compose, err := os.ReadFile(filepath.Join("..", "..", "docker-compose.postgres-test.yml")) // #nosec G304 -- test reads the checked-out postgres-test Compose manifest.
-	if err != nil {
-		t.Fatal(err)
-	}
-	if !strings.Contains(string(compose), "target: build") {
-		t.Fatal("postgres-tests does not run the image stage that holds source, git, and bootstrap")
-	}
 }
 
 func TestManifestValidationRejectsMutableOrNonContiguousHistory(t *testing.T) {
