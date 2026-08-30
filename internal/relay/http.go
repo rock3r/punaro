@@ -61,6 +61,7 @@ type HandlerOptions struct {
 	Notifier                  *Notifier
 	SessionRevalidateInterval time.Duration
 	Metrics                   *Metrics
+	FleetConfig               FleetConfigStore
 }
 
 // NewHandler returns the authenticated relay API, including the wake-metadata
@@ -84,7 +85,7 @@ func NewHandler(store Backend, auth *Authenticator, options HandlerOptions) http
 	if options.Metrics == nil {
 		options.Metrics = &Metrics{}
 	}
-	h := &handler{store: store, auth: auth, notifier: options.Notifier, now: options.Now, endpointLeaseTTL: options.EndpointLeaseTTL, deliveryLeaseTTL: options.DeliveryLeaseTTL, sessionRevalidateInterval: options.SessionRevalidateInterval, metrics: options.Metrics}
+	h := &handler{store: store, auth: auth, notifier: options.Notifier, now: options.Now, endpointLeaseTTL: options.EndpointLeaseTTL, deliveryLeaseTTL: options.DeliveryLeaseTTL, sessionRevalidateInterval: options.SessionRevalidateInterval, metrics: options.Metrics, fleet: options.FleetConfig}
 	if setter, ok := store.(interface{ SetMetrics(*Metrics) }); ok {
 		setter.SetMetrics(options.Metrics)
 	}
@@ -100,6 +101,7 @@ type handler struct {
 	deliveryLeaseTTL          time.Duration
 	sessionRevalidateInterval time.Duration
 	metrics                   *Metrics
+	fleet                     FleetConfigStore
 }
 
 func (h *handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
@@ -150,6 +152,17 @@ func (h *handler) serveHTTP(w http.ResponseWriter, r *http.Request) {
 		h.listConversations(w, machineID, now)
 	case r.Method == http.MethodGet && r.URL.Path == "/v1/notifications":
 		h.notifications(w, r, session)
+	case r.Method == http.MethodGet && r.URL.Path == "/v1/fleet-config/desired":
+		h.fleetDesired(w, r, machineID)
+	case r.Method == http.MethodGet && strings.HasPrefix(r.URL.Path, "/v1/fleet-config/releases/"):
+		digest := strings.TrimPrefix(r.URL.Path, "/v1/fleet-config/releases/")
+		if digest == "" || strings.Contains(digest, "/") {
+			writeError(w, http.StatusNotFound, "route not found")
+			return
+		}
+		h.fleetRelease(w, r, digest, machineID)
+	case r.Method == http.MethodPut && r.URL.Path == "/v1/fleet-config/status":
+		h.fleetStatus(w, r, body, machineID, r.Header.Get("Idempotency-Key"))
 	case r.Method == http.MethodPut && r.URL.Path == "/v1/machines/me/endpoints":
 		h.advertiseEndpoints(w, body, machineID, authority, now)
 	case r.Method == http.MethodPost && r.URL.Path == "/v1/roles/bindings":

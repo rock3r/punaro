@@ -10,9 +10,11 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/rock3r/punaro/internal/fleetconfig"
 	punaropostgres "github.com/rock3r/punaro/internal/postgres"
+	"github.com/rock3r/punaro/internal/relay"
 )
 
 const testPublishCommit = "0123456789abcdef0123456789abcdef01234567"
@@ -67,6 +69,35 @@ func TestFleetConfigPublishPreviewIncludesContractFields(t *testing.T) {
 	}
 	if strings.Contains(body, "# fleet") || strings.Contains(body, TrailerLeak()) || strings.Contains(strings.ToLower(body), "skill.md") && strings.Contains(body, "description") {
 		t.Fatalf("preview leaked configuration contents: %s", body)
+	}
+}
+
+func TestFleetConfigPublishBroadcastsWakeOnGenerationAdvance(t *testing.T) {
+	preserveFleetConfig(t)
+	directory := testInstallation(t)
+	writeFleetSource(t, directory)
+	release := testRelease()
+	materializeFleetCommit = func(string, string) (fleetconfig.Release, error) { return release, nil }
+	store := &memoryFleetStore{}
+	loadFleetDesired = store.desired
+	persistFleetRelease = store.publish
+	notifier := relay.NewNotifier()
+	client := notifier.Register("machine-a")
+	t.Cleanup(client.Close)
+	afterFleetPublish = func(previous, current int64) {
+		relay.BroadcastFleetWake(notifier, previous, current)
+	}
+	hash := fleetPublishPreviewHash(release, punaropostgres.FleetDesired{})
+	if code := run([]string{"fleet-config", "publish", "--directory", directory, "--yes", "--confirm-preview-hash", hash, testPublishCommit}, bytes.NewBuffer(nil), bytes.NewBuffer(nil)); code != 0 {
+		t.Fatalf("code=%d", code)
+	}
+	select {
+	case event := <-client.Events():
+		if event.TopicID != relay.FleetConfigTopic || event.Sequence != 1 {
+			t.Fatalf("event=%#v", event)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("publish did not broadcast a fleet-config wake")
 	}
 }
 
@@ -378,9 +409,9 @@ func gitHead(t *testing.T, repo string) string {
 func preserveFleetConfig(t *testing.T) {
 	t.Helper()
 	preserveDependencies(t)
-	originalMaterialize, originalPersist, originalDesired, originalStored := materializeFleetCommit, persistFleetRelease, loadFleetDesired, loadStoredFleetRelease
+	originalMaterialize, originalPersist, originalDesired, originalStored, originalWake := materializeFleetCommit, persistFleetRelease, loadFleetDesired, loadStoredFleetRelease, afterFleetPublish
 	t.Cleanup(func() {
-		materializeFleetCommit, persistFleetRelease, loadFleetDesired, loadStoredFleetRelease = originalMaterialize, originalPersist, originalDesired, originalStored
+		materializeFleetCommit, persistFleetRelease, loadFleetDesired, loadStoredFleetRelease, afterFleetPublish = originalMaterialize, originalPersist, originalDesired, originalStored, originalWake
 	})
 	loadStoredFleetRelease = func(context.Context, string, string) (fleetconfig.Release, error) {
 		return fleetconfig.Release{}, errors.New("no stored release")

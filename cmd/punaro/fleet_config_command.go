@@ -20,6 +20,7 @@ import (
 	"github.com/rock3r/punaro/internal/fleetconfig"
 	"github.com/rock3r/punaro/internal/operator"
 	punaropostgres "github.com/rock3r/punaro/internal/postgres"
+	"github.com/rock3r/punaro/internal/relay"
 )
 
 const (
@@ -38,6 +39,7 @@ var (
 	persistFleetRelease    = persistFleetReleaseDefault
 	loadFleetDesired       = loadFleetDesiredDefault
 	loadStoredFleetRelease = loadStoredFleetReleaseDefault
+	afterFleetPublish      = func(_, _ int64) {}
 )
 
 func runFleetConfigConfigure(args []string, stdout, stderr io.Writer) int {
@@ -157,6 +159,8 @@ func runFleetConfigPublish(args []string, stdout, stderr io.Writer) int {
 		_, _ = fmt.Fprintln(stderr, "fleet-config publish failed; prior desired revision is unchanged")
 		return 1
 	}
+	relay.BroadcastFleetWake(nil, desired.Generation, published.Generation)
+	afterFleetPublish(desired.Generation, published.Generation)
 	return writeJSON(stdout, stderr, map[string]any{
 		"status":             "fleet_config_published",
 		"source_commit":      published.SourceCommit,

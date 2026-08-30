@@ -1352,6 +1352,13 @@ FROM objects, table_ownership, routine_safety, routine_acl, table_acl, schema_ac
 		}
 		snapshot.CurrentObjectsPresent = fleetObjectsPresent
 	}
+	if snapshot.CurrentObjectsPresent && len(snapshot.Records) > 0 && snapshot.Records[len(snapshot.Records)-1].Version >= 59 {
+		statusObjectsPresent, err := fleetClientStatusControlsAvailable(ctx, q)
+		if err != nil {
+			return Snapshot{}, errors.New("PostgreSQL fleet-config client-status schema cannot be inspected")
+		}
+		snapshot.CurrentObjectsPresent = statusObjectsPresent
+	}
 	return snapshot, nil
 }
 

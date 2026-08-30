@@ -658,6 +658,11 @@ changing the singleton desired row (schema 58). A failed publish leaves the
 prior desired revision unchanged; an identical digest is idempotent; rollback
 is the same command against a previously published commit.
 
+Enrolled clients read desired metadata and exact archive bytes over signed HTTP
+and may write only their own bounded status row (schema 59). There is no client
+publish route. Desired-generation advances emit a payload-free WebSocket wake
+with `topic_id=fleet-config` and `sequence` equal to the generation.
+
 ## Canonical memory model
 
 Canonical memory is project-scoped PostgreSQL authority. Each item has an
