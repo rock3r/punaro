@@ -386,6 +386,12 @@ at an unmigrated `mailbox.db`.
    systemctl --user status punaro-adapter.service
    ```
 
+   The installer restarts or enables the service only when the user manager's
+   existing LaunchAgent label or systemd unit resolves to this installation's
+   exact managed service file. A same-name service loaded from another path is
+   left untouched; an explicit `--enable` fails until the operator resolves
+   that ownership conflict.
+
 The client installer is idempotent only for the same machine ID, relay URL,
 and local paths. It refuses to overwrite an existing key, enrollment record,
 configuration file, or project skill that does not match. To revoke a client,
@@ -467,6 +473,10 @@ dirty checkout, reuse another machine's key or Access token, or copy an
    # Linux verification
    systemctl --user status punaro-adapter.service
    ```
+
+   The POSIX installer never takes over a same-name service-manager entry from
+   another installation path. A foreign loaded LaunchAgent or systemd unit is
+   not reloaded or restarted, and an explicit enable fails closed.
 
    ```powershell
    # Windows: append -Enable to the installer invocation.

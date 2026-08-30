@@ -2028,6 +2028,9 @@ The implementation is not internet-exposure-ready until these cases pass:
   installation error. It terminates only processes whose verified image is the
   exact fixed bootstrap path, confirms their bounded exit, and then applies the
   same replaceability fence.
+  POSIX source installer likewise binds service-manager ownership to the exact
+  managed LaunchAgent plist or systemd unit path: it never reloads or restarts
+  a foreign same-name entry, and an explicit enable fails closed on conflict.
   Platform services launch `punaro-bootstrap run`, which supervises the
   current-slot adapter, requires a local ready signal within 60 seconds when a
   previous slot exists, rolls back once if the fresh catalog still allows that

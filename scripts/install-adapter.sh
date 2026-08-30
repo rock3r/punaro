@@ -354,8 +354,14 @@ case "$(uname -s)" in
 		install -m 600 "$repo_dir/deploy/launchd/punaro-adapter.plist" "$service_file"
 		plutil -lint "$service_file" >/dev/null
 		service_active=0
-		if launchctl print "gui/$(id -u)/org.punaro.adapter" >/dev/null 2>&1; then
-			service_active=1
+		loaded_service_file=
+		if service_description=$(launchctl print "gui/$(id -u)/org.punaro.adapter" 2>/dev/null); then
+			loaded_service_file=$(printf '%s\n' "$service_description" | sed -n 's/^[[:space:]]*path = //p' | sed -n '1p')
+			if [ "$loaded_service_file" = "$service_file" ]; then
+				service_active=1
+			elif [ "$enable" -eq 1 ]; then
+				fail 'Punaro LaunchAgent label is already loaded from a different path'
+			fi
 		fi
 		if [ "$enable" -eq 1 ] || [ "$service_active" -eq 1 ]; then
 			launchctl bootout "gui/$(id -u)" "$service_file" >/dev/null 2>&1 || true
@@ -376,21 +382,42 @@ case "$(uname -s)" in
 			grep -Fqx "ReadWritePaths=%h/.local/state/punaro-adapter %h/.local/state/punaro-bootstrap $mailbox_state_dir" "$service_file" || fail 'could not render the Linux mailbox sandbox path'
 		fi
 		service_active=0
-		if systemctl --user is-active --quiet punaro-adapter.service; then
-			service_active=1
-		fi
 		if command -v systemctl >/dev/null 2>&1; then
-			if ! systemctl --user daemon-reload; then
-				if [ "$enable" -eq 1 ] || [ "$service_active" -eq 1 ]; then
-					fail 'could not reload the Linux user manager'
+			if systemctl --user is-active --quiet punaro-adapter.service; then
+				service_active=1
+			fi
+			loaded_service_file=
+			service_description=$(systemctl --user show --property=FragmentPath punaro-adapter.service 2>/dev/null || true)
+			loaded_service_file=$(printf '%s\n' "$service_description" | sed -n 's/^FragmentPath=//p' | sed -n '1p')
+			service_conflict=0
+			if [ -n "$loaded_service_file" ] && [ "$loaded_service_file" != "$service_file" ]; then
+				service_conflict=1
+			elif [ "$service_active" -eq 1 ] && [ -z "$loaded_service_file" ]; then
+				service_conflict=1
+			fi
+			if [ "$service_conflict" -eq 1 ]; then
+				if [ "$enable" -eq 1 ]; then
+					fail 'Punaro systemd user service is already loaded from a different path'
+				fi
+			else
+				manager_mutation_required=0
+				if [ "$enable" -eq 1 ] || [ "$service_active" -eq 1 ] || [ "$loaded_service_file" = "$service_file" ]; then
+					manager_mutation_required=1
+				fi
+				if [ "$manager_mutation_required" -eq 1 ]; then
+					if ! systemctl --user daemon-reload; then
+						fail 'could not reload the Linux user manager'
+					fi
+					if [ "$enable" -eq 1 ]; then
+						systemctl --user enable punaro-adapter.service
+						systemctl --user restart punaro-adapter.service
+					elif [ "$service_active" -eq 1 ]; then
+						systemctl --user restart punaro-adapter.service
+					fi
 				fi
 			fi
-		fi
-		if [ "$enable" -eq 1 ]; then
-			systemctl --user enable punaro-adapter.service
-			systemctl --user restart punaro-adapter.service
-		elif [ "$service_active" -eq 1 ]; then
-			systemctl --user restart punaro-adapter.service
+		elif [ "$enable" -eq 1 ]; then
+			fail 'systemctl is required to enable the Linux user service'
 		fi
 		service_hint='systemctl --user status punaro-adapter.service'
 		;;
