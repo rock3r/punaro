@@ -2,6 +2,9 @@ package release
 
 import (
 	"bytes"
+	"crypto/ed25519"
+	"crypto/rand"
+	"reflect"
 	"strconv"
 	"strings"
 	"testing"
@@ -115,4 +118,126 @@ func TestParseRequiresExactPostgreSQLMajor(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestParseSignedManifestProjectsExactServerUpdateBoundary(t *testing.T) {
+	manifestBody, signatureBody, keysBody := signedServerManifest(t)
+	metadata, err := ParseSignedManifest(manifestBody, signatureBody, keysBody, Environment{CurrentSchema: 10, PostgreSQLMajor: 18})
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := Metadata{
+		Release:                 "v0.1.0",
+		SupportedFrom:           []string{"v0.0.9"},
+		Image:                   "ghcr.io/rock3r/punaro@sha256:" + testDigestA,
+		Schema:                  SchemaRange{Min: 10, Max: 44, Target: 44, RollbackFloor: 10},
+		PostgreSQLMajor:         18,
+		ReleaseSHA256:           testDigestA,
+		ComposeSHA256:           testComposeDigest,
+		MigrationManifestSHA256: testMigrateDigest,
+	}
+	if !reflect.DeepEqual(metadata, want) {
+		t.Fatalf("metadata=%#v want=%#v", metadata, want)
+	}
+}
+
+func TestParseSignedManifestRejectsTamperedServerBindings(t *testing.T) {
+	manifestBody, signatureBody, keysBody := signedServerManifest(t)
+	tamper := func(old, replacement string) []byte {
+		return []byte(strings.Replace(string(manifestBody), old, replacement, 1))
+	}
+	tests := map[string][]byte{
+		"release":          tamper(`"release": "v0.1.0"`, `"release": "v0.1.1"`),
+		"image":            tamper(testDigestA, testDigestB),
+		"schema":           tamper(`"target": 44`, `"target": 43`),
+		"postgres major":   tamper(`"postgres_major": 18`, `"postgres_major": 17`),
+		"release digest":   tamper(`"release_sha256": "`+testDigestA+`"`, `"release_sha256": "`+testDigestB+`"`),
+		"compose digest":   tamper(testComposeDigest, testDigestB),
+		"migration digest": tamper(testMigrateDigest, testDigestC),
+		"supported source": tamper(`"supported_from": ["v0.0.9"]`, `"supported_from": ["v0.0.8"]`),
+	}
+	for name, tampered := range tests {
+		t.Run(name, func(t *testing.T) {
+			if _, err := ParseSignedManifest(tampered, signatureBody, keysBody, Environment{CurrentSchema: 10, PostgreSQLMajor: 18}); err == nil {
+				t.Fatal("tampered signed manifest accepted")
+			}
+		})
+	}
+}
+
+func TestParseSignedManifestRequiresTrustedSignatureAndServerImage(t *testing.T) {
+	manifestBody, signatureBody, _ := signedServerManifest(t)
+	otherPublic, _, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	otherKeys, err := EncodePublicKeys("punaro-release-1", otherPublic)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := ParseSignedManifest(manifestBody, signatureBody, otherKeys, Environment{CurrentSchema: 10, PostgreSQLMajor: 18}); err == nil {
+		t.Fatal("manifest signed by an untrusted key accepted")
+	}
+
+	clientOnly := []byte(validReleaseManifestJSON())
+	public, private, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	envelope, err := Sign(clientOnly, "punaro-release-1", private)
+	if err != nil {
+		t.Fatal(err)
+	}
+	clientSignature, err := EncodeEnvelope(envelope)
+	if err != nil {
+		t.Fatal(err)
+	}
+	clientKeys, err := EncodePublicKeys("punaro-release-1", public)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := ParseSignedManifest(clientOnly, clientSignature, clientKeys, Environment{CurrentSchema: 10, PostgreSQLMajor: 18}); err == nil {
+		t.Fatal("signed client-only manifest accepted as server update metadata")
+	}
+}
+
+func TestParseSignedManifestEnforcesInstalledEnvironment(t *testing.T) {
+	manifestBody, signatureBody, keysBody := signedServerManifest(t)
+	for name, environment := range map[string]Environment{
+		"schema below range": {CurrentSchema: 9, PostgreSQLMajor: 18},
+		"schema downgrade":   {CurrentSchema: 45, PostgreSQLMajor: 18},
+		"postgres mismatch":  {CurrentSchema: 10, PostgreSQLMajor: 17},
+	} {
+		t.Run(name, func(t *testing.T) {
+			if _, err := ParseSignedManifest(manifestBody, signatureBody, keysBody, environment); err == nil {
+				t.Fatal("incompatible signed manifest accepted")
+			}
+		})
+	}
+}
+
+func signedServerManifest(t *testing.T) ([]byte, []byte, []byte) {
+	t.Helper()
+	body := strings.Replace(validReleaseManifestJSON(), `"supported_from": []`, `"supported_from": ["v0.0.9"]`, 1)
+	body = strings.Replace(body, `"postgres_major": 18,`, `"postgres_major": 18,
+  "image": "ghcr.io/rock3r/punaro@sha256:`+testDigestA+`",
+  "release_sha256": "`+testDigestA+`",`, 1)
+	manifestBody := []byte(body)
+	public, private, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	envelope, err := Sign(manifestBody, "punaro-release-1", private)
+	if err != nil {
+		t.Fatal(err)
+	}
+	signatureBody, err := EncodeEnvelope(envelope)
+	if err != nil {
+		t.Fatal(err)
+	}
+	keysBody, err := EncodePublicKeys("punaro-release-1", public)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return manifestBody, signatureBody, keysBody
 }

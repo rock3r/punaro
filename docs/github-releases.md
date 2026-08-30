@@ -296,6 +296,43 @@ image; it must be `@sha256:` and `release_sha256` must match. The separate
 `deploy/compose/production.yaml` file remains the reference single-node bundle;
 it is not the host-local operator artifact checked during update and doctor.
 
+## Server update boundary
+
+The signed public manifest is also the first-class server update boundary; no
+smaller unsigned metadata document is published or derived. Download the exact
+`punaro-release.json` and `punaro-release.sig` bytes from the immutable release,
+the fresh `punaro-catalog.json` and `punaro-catalog.sig` bytes from the live
+catalog release, and the independently distributed `punaro-release.pub` trust
+root. Copy all five to owner-only regular files, and run:
+
+```sh
+punaro update \
+  --directory /absolute/private/punaro-installation \
+  --release-manifest /absolute/private/releases/RELEASE/punaro-release.json \
+  --release-signature /absolute/private/releases/RELEASE/punaro-release.sig \
+  --release-catalog /absolute/private/releases/catalog/punaro-catalog.json \
+  --release-catalog-signature /absolute/private/releases/catalog/punaro-catalog.sig \
+  --release-keys-file /absolute/private/trust/punaro-release.pub \
+  --source-release CURRENT_RELEASE
+```
+
+Before it creates a transaction, the updater verifies the fresh catalog's
+detached signature and lifetime and requires its exact release, sequence, and
+manifest digest to remain allowed. It then durably advances the installation's
+accepted catalog high-water and rejects a sequence below either that state or
+the catalog sequence embedded by the release workflow in the operator binary.
+A synced pending advance is recovered after a crash, and the same lock remains
+held until the database update transaction exists durably so concurrent starts
+cannot reorder catalog authorization and transaction publication. It then verifies the manifest signature
+against the same protected trust root before it parses or projects any server
+value. Release name, direct source allowlist, digest-pinned image, schema range,
+PostgreSQL major, image digest, Compose digest, and migration-manifest digest
+therefore all come from the same verified bytes. Exact durable retries do not
+consult a later catalog, so retirement blocks new starts without stranding
+recovery. The publisher's public-origin smoke downloads the manifest, signature, and every
+manifest-listed artifact through their unauthenticated GitHub Release URLs and
+verifies those remote bytes before the signed catalog can advance.
+
 ## Bootstrap pull
 
 `punaro-bootstrap` fetches only two-component paths beneath the fixed origin,

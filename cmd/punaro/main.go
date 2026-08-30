@@ -430,6 +430,8 @@ func run(args []string, stdout, stderr io.Writer) int {
 		return runDoctorGatewayServiceInspect(args[1:], stdout)
 	case "doctor-update-stage-check":
 		return runDoctorUpdateStageCheck(args[1:], stdout)
+	case "doctor-catalog-acceptance-check":
+		return runDoctorCatalogAcceptanceCheck(args[1:], stdout)
 	case "doctor-relay-profile-check":
 		return runDoctorRelayProfileCheck(args[1:], stdout)
 	case "doctor-recovery-receipt-check":
@@ -516,9 +518,18 @@ func runInit(args []string, stdout, stderr io.Writer) int {
 	if flags.Parse(args) != nil || flags.NArg() != 0 || *directory == "" {
 		return 2
 	}
+	catalogSequence, err := serverInstallationCatalogSequence(0)
+	if err != nil {
+		_, _ = fmt.Fprintf(stderr, "punaro init failed: %v\n", err)
+		return 1
+	}
 	if *resume {
 		installation, err := operator.Resume(context.Background(), *directory, recoverInstallationOwner)
 		if err != nil {
+			_, _ = fmt.Fprintf(stderr, "punaro init recovery failed: %v\n", err)
+			return 1
+		}
+		if err := publishServerCatalogAcceptance(installation.Directory, catalogSequence); err != nil {
 			_, _ = fmt.Fprintf(stderr, "punaro init recovery failed: %v\n", err)
 			return 1
 		}
@@ -561,10 +572,41 @@ func runInit(args []string, stdout, stderr io.Writer) int {
 		_, _ = fmt.Fprintf(stderr, "punaro init failed: %v\n", err)
 		return 1
 	}
+	if err := publishServerCatalogAcceptance(installation.Directory, catalogSequence); err != nil {
+		_, _ = fmt.Fprintf(stderr, "punaro init failed: %v\n", err)
+		return 1
+	}
 	if installation.Ingress.Mode == ingress.LAN {
 		_, _ = fmt.Fprintln(stderr, "WARNING: trusted-LAN HTTP sends enrollment and device credentials without TLS; use only on the validated private/link-local network")
 	}
 	return writeJSON(stdout, stderr, map[string]any{"status": "initialized", "owner_principal_id": installation.OwnerPrincipalID, "directory": *directory})
+}
+
+func serverInstallationCatalogSequence(preserved int64) (int64, error) {
+	if preserved < 0 {
+		return 0, errors.New("release catalog acceptance is invalid")
+	}
+	if serverBuildRelease == "" {
+		return preserved, nil
+	}
+	embedded := serverUpdateCatalogMinimum()
+	if embedded < 1 {
+		return 0, errors.New("embedded release catalog sequence is invalid")
+	}
+	if embedded > preserved {
+		return embedded, nil
+	}
+	return preserved, nil
+}
+
+func publishServerCatalogAcceptance(directory string, sequence int64) error {
+	if sequence == 0 {
+		return nil
+	}
+	if err := operator.AcceptServerCatalogSequence(directory, sequence, 0); err != nil {
+		return errors.New("release catalog acceptance could not be published")
+	}
+	return nil
 }
 
 func runUp(args []string, stdout, stderr io.Writer) int {
@@ -736,7 +778,7 @@ func unavailableServerDoctorChecks(gatewayColocated bool) []punarodiagnostic.Che
 		"health_endpoint", "health_listener_private", "host_update_stage", "image_digest_binding", "installed_release", "operator_binary_release", "installation_directory", "installation_paths", "machine_identity",
 		"maintenance_fence", "migration_manifest_binding", "owner_credential_file", "postgres_major", "readiness_endpoint", "recovery_receipt", "relay_enrollment",
 		"relay_protocol", "running_image", "storage_capacity", "storage_credential_isolation", "storage_directory_separation", "tunnel_origin", "tunnel_route",
-		"update_recovery", "update_transaction", "verified_backup",
+		"release_catalog_acceptance", "update_recovery", "update_transaction", "verified_backup",
 		"mail_cutover_legacy_inventory", "mail_cutover_recovery", "mail_cutover_target",
 	}
 	checks := []punarodiagnostic.Check{punarodiagnostic.Fail("installation_configuration", "repair_installation_configuration")}
@@ -790,6 +832,7 @@ func diagnoseServer(ctx context.Context, installation operator.Installation, mac
 	checks = appendKnownServerCheck(checks, "update_transaction", "resume_abort_or_recover_update", extended.UpdateTransaction)
 	checks = appendKnownServerCheck(checks, "recovery_receipt", "repair_update_recovery_receipt", extended.RecoveryReceipt)
 	checks = appendKnownServerCheck(checks, "update_recovery", "resume_abort_or_recover_update", extended.UpdateRecovery)
+	checks = appendKnownServerCheck(checks, "release_catalog_acceptance", "repair_release_catalog", serverDoctorCatalogAcceptanceCheck(ctx, installation.Directory, extended.CatalogSequence))
 	checks = appendKnownServerCheck(checks, "database_listener_private", "repair_database_listener_topology", extended.DatabasePrivate)
 	checks = appendKnownServerCheck(checks, "health_listener_private", "repair_health_listener_topology", extended.HealthPrivate)
 	checks = appendKnownServerCheck(checks, "administration_listener_private", "repair_administration_listener_topology", extended.AdminPrivate)
@@ -1311,6 +1354,14 @@ func createBackupWithUpdate(ctx context.Context, installation operator.Installat
 	if err := verifyInstallationPair(ctx, installation.AppDSNFile, installation.OwnerDSNFile); err != nil {
 		return punarobackup.Manifest{}, "", punaropostgres.UpdateBackupMarker{}, err
 	}
+	catalogSequence, releaseCatalogSnapshot, err := operator.BeginServerCatalogSnapshot(installation.Directory)
+	if err != nil {
+		return punarobackup.Manifest{}, "", punaropostgres.UpdateBackupMarker{}, errors.New("release catalog acceptance cannot be captured safely")
+	}
+	defer releaseCatalogSnapshot()
+	if err := requireBackupCatalogAcceptance(catalogSequence); err != nil {
+		return punarobackup.Manifest{}, "", punaropostgres.UpdateBackupMarker{}, err
+	}
 	owner, err := inspectOwner(ctx, installation.AppDSNFile)
 	if err != nil || owner.ID != installation.OwnerPrincipalID {
 		return punarobackup.Manifest{}, "", punaropostgres.UpdateBackupMarker{}, errors.New("installation owner does not match configuration")
@@ -1330,13 +1381,14 @@ func createBackupWithUpdate(ctx context.Context, installation operator.Installat
 		return punarobackup.Manifest{}, "", punaropostgres.UpdateBackupMarker{}, err
 	}
 	options := punarobackup.CreateOptions{
-		BackupRoot:       installation.BackupDir,
-		BlobRoot:         backupBlobRoot(installation),
-		InstallationFile: operator.ConfigFile(installation.Directory),
-		EnvironmentFile:  operator.EnvFile(installation.Directory),
-		ComposeFile:      operator.OverrideFile(installation.Directory),
-		OwnerDSNFile:     installation.OwnerDSNFile,
-		AppDSNFile:       installation.AppDSNFile,
+		BackupRoot:            installation.BackupDir,
+		BlobRoot:              backupBlobRoot(installation),
+		InstallationFile:      operator.ConfigFile(installation.Directory),
+		EnvironmentFile:       operator.EnvFile(installation.Directory),
+		ComposeFile:           operator.OverrideFile(installation.Directory),
+		OwnerDSNFile:          installation.OwnerDSNFile,
+		AppDSNFile:            installation.AppDSNFile,
+		ServerCatalogSequence: catalogSequence,
 	}
 	if transaction != nil {
 		_, digest, found := strings.Cut(transaction.TargetImage, "@")
@@ -1364,8 +1416,19 @@ func createBackupWithUpdate(ctx context.Context, installation operator.Installat
 	}, nil
 }
 
+func requireBackupCatalogAcceptance(sequence int64) error {
+	if serverBuildRelease != "" && sequence < 1 {
+		return errors.New("release catalog acceptance is required before backup")
+	}
+	return nil
+}
+
 func restoreBackup(ctx context.Context, request restoreRequest) (punarobackup.State, error) {
 	manifest, err := punarobackup.Verify(request.BackupDirectory)
+	if err != nil {
+		return punarobackup.State{}, err
+	}
+	serverCatalogSequence, err := serverInstallationCatalogSequence(manifest.ServerCatalogSequence)
 	if err != nil {
 		return punarobackup.State{}, err
 	}
@@ -1578,7 +1641,7 @@ func restoreBackup(ctx context.Context, request restoreRequest) (punarobackup.St
 				return errors.New("restored timeline state does not match publication")
 			}
 			finalizationStage = "configuration"
-			if err := operator.PublishRestore(prepared); err != nil {
+			if err := operator.PublishRestoreWithCatalogSequence(prepared, serverCatalogSequence); err != nil {
 				return err
 			}
 			finalizationStage = ""

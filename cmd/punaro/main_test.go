@@ -445,8 +445,10 @@ func preserveDependencies(t *testing.T) {
 	originalStart, originalProbe, originalIssue, originalListClients, originalRevokeClient := startServices, probe, issueEnrollment, listClients, revokeClient
 	originalBackup, originalListBackups, originalVerifyBackup, originalRestore := createOperatorBackup, listOperatorBackups, verifyOperatorBackup, restoreOperatorBackup
 	originalServerDoctorInspect, originalServerDoctorLoad := serverDoctorInspect, serverDoctorLoad
-	originalUpdateStageCheck := serverDoctorUpdateStageCheck
+	originalUpdateStageCheck, originalCatalogAcceptanceCheck := serverDoctorUpdateStageCheck, serverDoctorCatalogAcceptanceCheck
 	originalMailCutoverPreflight := inspectMailCutoverPreflight
+	originalReconcileUpdateTransaction := reconcileUpdateTransaction
+	originalRunUpdateDocker := runUpdateDocker
 	t.Cleanup(func() {
 		inspectSchema, inspectOwner, migratePristinePair, maintenanceActive = originalInspect, originalOwner, originalMigrate, originalMaintenance
 		createOwner, recoverInstallationOwner = originalCreate, originalRecover
@@ -458,7 +460,10 @@ func preserveDependencies(t *testing.T) {
 		serverDoctorInspect = originalServerDoctorInspect
 		serverDoctorLoad = originalServerDoctorLoad
 		serverDoctorUpdateStageCheck = originalUpdateStageCheck
+		serverDoctorCatalogAcceptanceCheck = originalCatalogAcceptanceCheck
 		inspectMailCutoverPreflight = originalMailCutoverPreflight
+		reconcileUpdateTransaction = originalReconcileUpdateTransaction
+		runUpdateDocker = originalRunUpdateDocker
 	})
 	inspectOwner = func(context.Context, string) (punaropostgres.Principal, error) {
 		return punaropostgres.Principal{ID: "11111111-1111-4111-8111-111111111111", DisplayName: "owner"}, nil
@@ -472,6 +477,7 @@ func preserveDependencies(t *testing.T) {
 		return healthyServerDoctorState()
 	}
 	serverDoctorUpdateStageCheck = directServerDoctorUpdateStage
+	serverDoctorCatalogAcceptanceCheck = func(context.Context, string, int64) knownDoctorBool { return known(true, true) }
 }
 
 func TestServerDoctorDeadlineIncludesInstallationLoad(t *testing.T) {
@@ -697,6 +703,41 @@ func TestDoctorUpdateStageIsolationStaysInsideDeadline(t *testing.T) {
 	started := time.Now()
 	if state := isolatedServerDoctorUpdateStage(ctx, t.TempDir()); state.Known || time.Since(started) > time.Second {
 		t.Fatalf("isolated update-stage state=%#v elapsed=%s", state, time.Since(started))
+	}
+}
+
+func TestDoctorCatalogAcceptanceCommandAndIsolationStayInsideDeadline(t *testing.T) {
+	directory := t.TempDir()
+	if err := os.Chmod(directory, 0o700); err != nil { // #nosec G302 -- private operator-state fixture root.
+		t.Fatal(err)
+	}
+	var stdout bytes.Buffer
+	if code := runDoctorCatalogAcceptanceCheck([]string{"--directory", directory, "--minimum", "3"}, &stdout); code != 0 {
+		t.Fatalf("missing catalog acceptance code=%d output=%q", code, stdout.String())
+	}
+	var state knownDoctorBool
+	if json.Unmarshal(stdout.Bytes(), &state) != nil || !state.Known || state.OK {
+		t.Fatalf("missing catalog acceptance=%#v", state)
+	}
+	if err := operator.AcceptServerCatalogSequence(directory, 4, 3); err != nil {
+		t.Fatal(err)
+	}
+	stdout.Reset()
+	if code := runDoctorCatalogAcceptanceCheck([]string{"--directory", directory, "--minimum", "5"}, &stdout); code != 0 {
+		t.Fatalf("downgrade catalog acceptance code=%d output=%q", code, stdout.String())
+	}
+	state = knownDoctorBool{}
+	if json.Unmarshal(stdout.Bytes(), &state) != nil || !state.Known || state.OK {
+		t.Fatalf("downgrade catalog acceptance=%#v", state)
+	}
+
+	blocker := filepath.Join(t.TempDir(), "blocked-catalog-acceptance-doctor")
+	previous := serverDoctorCatalogAcceptanceExecutable
+	serverDoctorCatalogAcceptanceExecutable = func() (string, error) { return blocker, nil }
+	t.Cleanup(func() { serverDoctorCatalogAcceptanceExecutable = previous })
+	started := time.Now()
+	if state := isolatedServerDoctorCatalogAcceptance(t.Context(), directory, 4); state.Known || time.Since(started) > time.Second {
+		t.Fatalf("isolated catalog acceptance=%#v elapsed=%s", state, time.Since(started))
 	}
 }
 
@@ -1830,6 +1871,11 @@ func TestServerDoctorRequiresRecoveryReceiptAtIrreversibleUpdateBoundary(t *test
 
 func TestInitMigratesPristineBeforeCreatingOwner(t *testing.T) {
 	preserveDependencies(t)
+	originalRelease, originalCatalogSequence := serverBuildRelease, serverBuildCatalogSequence
+	serverBuildRelease, serverBuildCatalogSequence = "v0.0.0-test", "9"
+	t.Cleanup(func() {
+		serverBuildRelease, serverBuildCatalogSequence = originalRelease, originalCatalogSequence
+	})
 	root := t.TempDir()
 	for _, name := range []string{"data", "backup", "data/attachments"} {
 		if err := os.Mkdir(filepath.Join(root, name), 0o700); err != nil {
@@ -1870,6 +1916,44 @@ func TestInitMigratesPristineBeforeCreatingOwner(t *testing.T) {
 	wantBlobDir, canonicalErr := filepath.EvalSymlinks(filepath.Join(root, "data", "attachments"))
 	if err != nil || canonicalErr != nil || !installation.MemoryAPIEnabled || !installation.MemoryMutationsEnabled || !installation.RelayEnabled || !installation.TrustedAttachmentsEnabled || installation.TrustedAttachmentBlobDir != wantBlobDir {
 		t.Fatalf("installation=%#v err=%v", installation, err)
+	}
+	if err := operator.InspectServerCatalogAcceptance(installation.Directory, 9); err != nil {
+		t.Fatalf("release-bound init did not publish catalog acceptance: %v", err)
+	}
+}
+
+func TestServerInstallationCatalogSequencePreservesRestoreHighWater(t *testing.T) {
+	originalRelease, originalCatalogSequence := serverBuildRelease, serverBuildCatalogSequence
+	t.Cleanup(func() {
+		serverBuildRelease, serverBuildCatalogSequence = originalRelease, originalCatalogSequence
+	})
+	serverBuildRelease, serverBuildCatalogSequence = "v0.0.0-test", "9"
+
+	if got, err := serverInstallationCatalogSequence(12); err != nil || got != 12 {
+		t.Fatalf("preserved sequence=%d err=%v", got, err)
+	}
+	if got, err := serverInstallationCatalogSequence(4); err != nil || got != 9 {
+		t.Fatalf("embedded floor sequence=%d err=%v", got, err)
+	}
+	serverBuildCatalogSequence = "invalid"
+	if _, err := serverInstallationCatalogSequence(12); err == nil {
+		t.Fatal("release-bound installation accepted an invalid embedded catalog sequence")
+	}
+}
+
+func TestReleaseBoundBackupRequiresCatalogAcceptance(t *testing.T) {
+	originalRelease := serverBuildRelease
+	t.Cleanup(func() { serverBuildRelease = originalRelease })
+	serverBuildRelease = "v0.0.0-test"
+	if err := requireBackupCatalogAcceptance(0); err == nil {
+		t.Fatal("release-bound backup accepted missing catalog state")
+	}
+	if err := requireBackupCatalogAcceptance(9); err != nil {
+		t.Fatalf("release-bound backup rejected catalog high-water: %v", err)
+	}
+	serverBuildRelease = ""
+	if err := requireBackupCatalogAcceptance(0); err != nil {
+		t.Fatalf("unbound legacy backup rejected pristine state: %v", err)
 	}
 }
 
@@ -1959,6 +2043,11 @@ func TestUpRefusesCompatibleDatabaseWithDifferentOwner(t *testing.T) {
 
 func TestInitResumeRecoversUncertainOwnerOutcome(t *testing.T) {
 	preserveDependencies(t)
+	originalRelease, originalCatalogSequence := serverBuildRelease, serverBuildCatalogSequence
+	serverBuildRelease, serverBuildCatalogSequence = "v0.0.0-test", "9"
+	t.Cleanup(func() {
+		serverBuildRelease, serverBuildCatalogSequence = originalRelease, originalCatalogSequence
+	})
 	root := t.TempDir()
 	for _, name := range []string{"data", "backup"} {
 		if err := os.Mkdir(filepath.Join(root, name), 0o700); err != nil {
@@ -1994,6 +2083,9 @@ func TestInitResumeRecoversUncertainOwnerOutcome(t *testing.T) {
 	stderr.Reset()
 	if code := run([]string{"init", "--resume", "--directory", directory}, &stdout, &stderr); code != 0 {
 		t.Fatalf("resume code=%d stdout=%q stderr=%q", code, stdout.String(), stderr.String())
+	}
+	if err := operator.InspectServerCatalogAcceptance(directory, 9); err != nil {
+		t.Fatalf("release-bound init recovery did not publish catalog acceptance: %v", err)
 	}
 }
 

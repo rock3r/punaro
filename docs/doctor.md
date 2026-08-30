@@ -244,6 +244,7 @@ Database, storage, and update recovery: `database_connection`,
 `database_schema`, `postgres_major`, `storage_capacity`, `verified_backup`,
 `backup_freshness`, `maintenance_fence`, `host_update_stage`,
 `update_transaction`, `recovery_receipt`, `update_recovery`,
+`release_catalog_acceptance`,
 `owner_credential_file`, `application_credential_file`,
 `attachment_blob_directory`, `blob_storage_private`.
 
@@ -265,6 +266,15 @@ deadline-isolated child, so stalled `.update` storage reports
 Recovery-receipt absence and exact receipt binding are inspected in a separate
 deadline-isolated child, so `recovery_receipt` becomes unavailable when its
 storage cannot be observed before the total deadline.
+`release_catalog_acceptance` validates the protected accepted and pending
+server-catalog records and their anti-rollback requirement marker in a
+deadline-isolated child. Release-bound initialization and verified restore
+seed this state, so an installation with a missing record or marker fails
+closed instead of being treated as pristine. Restore the state from a verified
+backup, or rerun release-bound initialization only for a genuinely fresh
+installation; do not hand-edit it. The highest durable sequence must be at
+least the catalog sequence embedded in the running operator release. The check
+never reconciles, edits, or removes the records.
 `database_listener_private` and `administration_listener_private` query
 PostgreSQL's effective `listen_addresses` through the application and owner
 connections respectively; every configured TCP address must be localhost or a

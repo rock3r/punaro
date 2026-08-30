@@ -180,10 +180,23 @@ Do not use `/readyz` as this proof, because health and device paths may have
 different routes or policies. Only after this check should a harmless signed
 request be used to prove relay enrollment and the final device origin.
 
-For every later release, use `punaro update --directory INSTALLATION_DIR` with
-the protected release metadata distributed for that release. This preserves the
-same durable update journal and recovery path as the initial installation; do
-not replace `PUNARO_IMAGE` and restart the reference bundle directly.
+For every later release, run the target release's wrapper with the protected
+signed manifest, fresh signed catalog, and independently provisioned trust root:
+
+```sh
+punaro update --directory INSTALLATION_DIR \
+  --source-release CURRENT_RELEASE \
+  --release-manifest RELEASE_DIR/punaro-release.json \
+  --release-signature RELEASE_DIR/punaro-release.sig \
+  --release-catalog CATALOG_DIR/punaro-catalog.json \
+  --release-catalog-signature CATALOG_DIR/punaro-catalog.sig \
+  --release-keys-file TRUST_DIR/punaro-release.pub
+```
+
+This preserves the same durable update journal and recovery path as the initial
+installation; do not derive an unsigned metadata subset, replace
+`PUNARO_IMAGE`, or restart the reference bundle directly. See the complete
+update, abort, and recovery invocations in the operator guide.
 
 Existing installations retain their published configuration through upgrade and
 recovery. Re-run `punaro init --resume --directory INSTALLATION_DIR` only after

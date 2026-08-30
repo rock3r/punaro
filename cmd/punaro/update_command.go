@@ -27,6 +27,10 @@ const minimumUpdateFreeBytes = uint64(512 << 20)
 
 const updateMigratorOwnerDSNPath = "/run/secrets/punaro-owner-dsn"
 
+var errUpdateCatalogRequired = errors.New("fresh signed release catalog is required before starting a new update")
+
+var errUpdateCatalogFloor = errors.New("target updater has no valid embedded release catalog floor")
+
 var runUpdateDocker = func(ctx context.Context, directory string, environment []string, arguments ...string) ([]byte, error) {
 	command := exec.CommandContext(ctx, "docker", arguments...) // #nosec G204 -- fixed executable with validated generated paths and digest-pinned image arguments.
 	command.Dir = directory
@@ -34,32 +38,67 @@ var runUpdateDocker = func(ctx context.Context, directory string, environment []
 	return command.CombinedOutput()
 }
 
+var reconcileUpdateTransaction = loadUpdateTransaction
+
+type v5UpdateBridge interface {
+	Update() punaropostgres.UpdateTransaction
+	CommitWritersStopped(context.Context) (punaropostgres.UpdateTransaction, error)
+	Abort() error
+}
+
 type commandUpdateExecutor struct {
-	installation   operator.Installation
-	metadata       punarorelease.Metadata
-	request        punaropostgres.UpdateRequest
-	stage          operator.UpdateStage
-	staged         operator.StagedUpdate
-	bridge         *punaropostgres.V5UpdateBridge
-	recovery       *operator.Installation
-	recoverySchema int64
+	installation    operator.Installation
+	metadata        punarorelease.Metadata
+	request         punaropostgres.UpdateRequest
+	stage           operator.UpdateStage
+	staged          operator.StagedUpdate
+	bridge          v5UpdateBridge
+	orphanedWriters bool
+	recovery        *operator.Installation
+	recoverySchema  int64
+	startGuard      func()
+	startRevalidate func(time.Time) error
+}
+
+type signedUpdateRelease struct {
+	metadata          punarorelease.Metadata
+	manifestSequence  int64
+	manifestSHA256    string
+	publicReleaseKeys []byte
 }
 
 func runUpdate(args []string, stdout, stderr io.Writer) int {
 	flags := flag.NewFlagSet("update", flag.ContinueOnError)
 	flags.SetOutput(stderr)
 	directory := flags.String("directory", "", "absolute installation directory")
-	metadataPath := flags.String("release-metadata", "", "protected target release metadata JSON")
+	manifestPath := flags.String("release-manifest", "", "protected signed target release manifest JSON")
+	signaturePath := flags.String("release-signature", "", "protected detached target release signature JSON")
+	catalogPath := flags.String("release-catalog", "", "protected fresh signed release catalog JSON for a new update")
+	catalogSignaturePath := flags.String("release-catalog-signature", "", "protected detached release catalog signature JSON for a new update")
+	keysPath := flags.String("release-keys-file", "", "protected trusted release public keys JSON")
 	sourceRelease := flags.String("source-release", "", "current release name for installations predating release locks")
 	abort := flags.Bool("abort", false, "restart the previous image and abort before migration")
 	recovery := flags.String("recover", "", "post-migration recovery choice: compatible or restore")
-	if flags.Parse(args) != nil || flags.NArg() != 0 || *directory == "" || *metadataPath == "" || (*recovery != "" && *recovery != "compatible" && *recovery != "restore") || (*abort && *recovery != "") {
+	if flags.Parse(args) != nil {
+		return 2
+	}
+	cleanupUnpublished := *abort && *manifestPath == "" && *signaturePath == "" && *keysPath == "" && *catalogPath == "" && *catalogSignaturePath == "" && *sourceRelease == ""
+	normalInputs := *manifestPath != "" && *signaturePath != "" && *keysPath != ""
+	if flags.NArg() != 0 || *directory == "" || !cleanupUnpublished && !normalInputs || (*catalogPath == "") != (*catalogSignaturePath == "") || (*recovery != "" && *recovery != "compatible" && *recovery != "restore") || (*abort && *recovery != "") {
 		return 2
 	}
 	installation, err := operator.Load(*directory)
 	if err != nil {
 		_, _ = fmt.Fprintln(stderr, "punaro update refused: installation configuration is unavailable")
 		return 1
+	}
+	if cleanupUnpublished {
+		stage, err := cleanupUnpublishedUpdate(context.Background(), installation)
+		if err != nil {
+			_, _ = fmt.Fprintf(stderr, "punaro update cleanup refused: %v\n", err)
+			return 1
+		}
+		return writeJSON(stdout, stderr, map[string]any{"status": "unpublished_stage_aborted", "update_id": stage.UpdateID, "target_release": stage.TargetRelease, "target_image": stage.TargetImage})
 	}
 	schema, err := inspectSchema(context.Background(), installation.AppDSNFile)
 	if err != nil || (schema.Classification != punaropostgres.Compatible && (schema.Classification != punaropostgres.UpgradeRequired || schema.Version != 5)) {
@@ -71,14 +110,10 @@ func runUpdate(args []string, stdout, stderr io.Writer) int {
 		_, _ = fmt.Fprintln(stderr, "punaro update refused: PostgreSQL major is unavailable")
 		return 1
 	}
-	body, err := readReleaseMetadata(*metadataPath)
-	if err != nil {
-		_, _ = fmt.Fprintln(stderr, "punaro update refused: target release metadata is unavailable or unsafe")
-		return 1
-	}
-	metadata, err := punarorelease.Parse(body, punarorelease.Environment{CurrentSchema: schema.Version, PostgreSQLMajor: major})
-	if err != nil || metadata.MigrationManifestSHA256 != punaropostgres.MigrationManifestSHA256() {
-		_, _ = fmt.Fprintln(stderr, "punaro update refused: target release metadata does not match this updater")
+	signedRelease, err := loadSignedUpdateRelease(*manifestPath, *signaturePath, *keysPath, punarorelease.Environment{CurrentSchema: schema.Version, PostgreSQLMajor: major})
+	metadata := signedRelease.metadata
+	if err != nil || !targetReleaseMatchesUpdater(metadata, serverBuildRelease) || metadata.MigrationManifestSHA256 != punaropostgres.MigrationManifestSHA256() {
+		_, _ = fmt.Fprintln(stderr, "punaro update refused: signed target release manifest is unavailable, unsafe, or does not match this updater")
 		return 1
 	}
 	active, activeErr := loadUpdateTransaction(context.Background(), installation, "")
@@ -100,6 +135,10 @@ func runUpdate(args []string, stdout, stderr io.Writer) int {
 	if errors.Is(activeErr, punaropostgres.ErrNotFound) {
 		latest, latestErr := loadLatestUpdateTransaction(context.Background(), installation)
 		if latestErr == nil && (*sourceRelease == "" || *sourceRelease == latest.SourceRelease) && completedUpdateMatches(latest, metadata, installation.Image, *abort, *recovery) {
+			if err := validateUpdateSource(metadata, latest.SourceRelease); err != nil {
+				_, _ = fmt.Fprintf(stderr, "punaro update refused: %v\n", err)
+				return 1
+			}
 			stage := operator.UpdateStage{Directory: installation.Directory, UpdateID: latest.UpdateID, PreviousRelease: latest.SourceRelease, PreviousImage: latest.SourceImage, TargetRelease: latest.TargetRelease, TargetImage: latest.TargetImage}
 			if latest.Phase == punaropostgres.UpdateCommitted || latest.Phase == punaropostgres.UpdateRecovered || latest.Phase == punaropostgres.UpdateAborted {
 				cleanupErr := operator.AbortStage(stage)
@@ -138,6 +177,25 @@ func runUpdate(args []string, stdout, stderr io.Writer) int {
 		_, _ = fmt.Fprintln(stderr, "punaro update requires --source-release for this installation")
 		return 2
 	}
+	if err := validateUpdateSource(metadata, *sourceRelease); err != nil {
+		_, _ = fmt.Fprintf(stderr, "punaro update refused: %v\n", err)
+		return 1
+	}
+	startGuard, startRevalidate, err := authorizeUpdateStart(request, installation.Directory, *catalogPath, *catalogSignaturePath, signedRelease, time.Now().UTC(), serverUpdateCatalogMinimum())
+	if err != nil {
+		_, _ = fmt.Fprintf(stderr, "punaro update refused: %v\n", err)
+		if errors.Is(err, errUpdateCatalogRequired) {
+			return 2
+		}
+		return 1
+	}
+	releaseStartGuard := func() {
+		if startGuard != nil {
+			startGuard()
+			startGuard = nil
+		}
+	}
+	defer releaseStartGuard()
 	if request.UpdateID == "" {
 		updateID := uuid.NewString()
 		if stage.UpdateID != "" {
@@ -157,7 +215,7 @@ func runUpdate(args []string, stdout, stderr io.Writer) int {
 	}
 	executor := &commandUpdateExecutor{
 		installation: installation, metadata: metadata, request: request,
-		stage: stage,
+		stage: stage, startGuard: releaseStartGuard, startRevalidate: startRevalidate,
 	}
 	transaction, err := executeUpdate(context.Background(), updateExecution{Request: request, Abort: *abort, RecoveryMode: *recovery}, executor)
 	if err != nil {
@@ -165,6 +223,39 @@ func runUpdate(args []string, stdout, stderr io.Writer) int {
 		return 1
 	}
 	return writeJSON(stdout, stderr, map[string]any{"status": transaction.Phase, "update_id": transaction.UpdateID, "target_release": transaction.TargetRelease, "target_image": transaction.TargetImage})
+}
+
+func cleanupUnpublishedUpdate(ctx context.Context, installation operator.Installation) (operator.UpdateStage, error) {
+	stage, err := operator.ExistingUpdateStage(installation.Directory)
+	if err != nil {
+		return operator.UpdateStage{}, errors.New("a valid unpublished update stage is required")
+	}
+	staged, err := operator.ResumeUpdateStage(stage)
+	if err != nil || staged.Published || stage.PreviousImage != installation.Image {
+		return operator.UpdateStage{}, errors.New("update stage does not match the installed previous release")
+	}
+	_, unlock, err := operator.BeginServerCatalogSnapshot(installation.Directory)
+	if err != nil {
+		return operator.UpdateStage{}, errors.New("update start lock is unavailable")
+	}
+	defer unlock()
+	recoveryCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), time.Minute)
+	defer cancel()
+	if _, err := reconcileUpdateTransaction(recoveryCtx, installation, stage.UpdateID); err == nil {
+		return operator.UpdateStage{}, errors.New("the staged update has durable database state; rerun the exact update command")
+	} else if !errors.Is(err, punaropostgres.ErrNotFound) {
+		return operator.UpdateStage{}, errors.New("durable update state could not be inspected")
+	}
+	if _, err := reconcileUpdateTransaction(recoveryCtx, installation, ""); err == nil {
+		return operator.UpdateStage{}, errors.New("a different durable update transaction is active")
+	} else if !errors.Is(err, punaropostgres.ErrNotFound) {
+		return operator.UpdateStage{}, errors.New("active update state could not be inspected")
+	}
+	executor := &commandUpdateExecutor{installation: installation, stage: stage}
+	if err := executor.AbortUnpublishedStart(recoveryCtx); err != nil {
+		return operator.UpdateStage{}, err
+	}
+	return stage, nil
 }
 
 func updatePostgresMajor(ctx context.Context, dsnFile string) (int, error) {
@@ -176,26 +267,185 @@ func updatePostgresMajor(ctx context.Context, dsnFile string) (int, error) {
 	return database.PostgreSQLMajor(ctx)
 }
 
-func readReleaseMetadata(path string) ([]byte, error) {
-	if !filepath.IsAbs(path) || filepath.Clean(path) != path {
-		return nil, errors.New("release metadata path is invalid")
-	}
-	info, err := os.Lstat(path)
-	if err != nil || !info.Mode().IsRegular() || info.Size() < 1 || info.Size() > punarorelease.MaximumMetadataBytes || info.Mode().Perm()&0o077 != 0 {
-		return nil, errors.New("release metadata file is unsafe")
-	}
-	file, err := os.Open(path) // #nosec G304 -- explicit protected release metadata path.
+func loadSignedUpdateMetadata(manifestPath, signaturePath, keysPath string, environment punarorelease.Environment) (punarorelease.Metadata, error) {
+	release, err := loadSignedUpdateRelease(manifestPath, signaturePath, keysPath, environment)
+	return release.metadata, err
+}
+
+func loadSignedUpdateRelease(manifestPath, signaturePath, keysPath string, environment punarorelease.Environment) (signedUpdateRelease, error) {
+	manifestBody, err := readProtectedReleaseFile(manifestPath, punarorelease.MaximumManifestBytes)
 	if err != nil {
-		return nil, err
+		return signedUpdateRelease{}, err
+	}
+	signatureBody, err := readProtectedReleaseFile(signaturePath, punarorelease.MaximumEnvelopeBytes)
+	if err != nil {
+		return signedUpdateRelease{}, err
+	}
+	keysBody, err := readProtectedReleaseFile(keysPath, punarorelease.MaximumEnvelopeBytes)
+	if err != nil {
+		return signedUpdateRelease{}, err
+	}
+	metadata, err := punarorelease.ParseSignedManifest(manifestBody, signatureBody, keysBody, environment)
+	if err != nil {
+		return signedUpdateRelease{}, err
+	}
+	manifest, err := punarorelease.ParseReleaseManifest(manifestBody)
+	if err != nil {
+		return signedUpdateRelease{}, err
+	}
+	sum := sha256.Sum256(manifestBody)
+	return signedUpdateRelease{
+		metadata:          metadata,
+		manifestSequence:  manifest.Sequence,
+		manifestSHA256:    hex.EncodeToString(sum[:]),
+		publicReleaseKeys: append([]byte(nil), keysBody...),
+	}, nil
+}
+
+func authorizeUpdateStart(request punaropostgres.UpdateRequest, directory, catalogPath, catalogSignaturePath string, release signedUpdateRelease, now time.Time, embeddedMinimum int64) (func(), func(time.Time) error, error) {
+	if embeddedMinimum < 1 {
+		return nil, nil, errUpdateCatalogFloor
+	}
+	if request.UpdateID != "" {
+		return func() {}, func(time.Time) error { return nil }, nil
+	}
+	if catalogPath == "" || catalogSignaturePath == "" {
+		return nil, nil, errUpdateCatalogRequired
+	}
+	catalogBody, err := readProtectedReleaseFile(catalogPath, punarorelease.MaximumManifestBytes)
+	if err != nil {
+		return nil, nil, errors.New("signed release catalog is unavailable, unsafe, stale, or does not authorize the target")
+	}
+	signatureBody, err := readProtectedReleaseFile(catalogSignaturePath, punarorelease.MaximumEnvelopeBytes)
+	if err != nil {
+		return nil, nil, errors.New("signed release catalog is unavailable, unsafe, stale, or does not authorize the target")
+	}
+	keys, err := punarorelease.ParsePublicKeys(release.publicReleaseKeys)
+	if err != nil {
+		return nil, nil, errors.New("signed release catalog is unavailable, unsafe, stale, or does not authorize the target")
+	}
+	envelope, err := punarorelease.ParseEnvelope(signatureBody)
+	if err != nil || punarorelease.Verify(catalogBody, envelope, keys) != nil {
+		return nil, nil, errors.New("signed release catalog is unavailable, unsafe, stale, or does not authorize the target")
+	}
+	catalog, err := punarorelease.ParseCatalog(catalogBody)
+	if err != nil || !catalog.Fresh(now) || !catalog.Allows(release.metadata.Release, release.manifestSequence, release.manifestSHA256) {
+		return nil, nil, errors.New("signed release catalog is unavailable, unsafe, stale, or does not authorize the target")
+	}
+	unlock, err := operator.BeginServerCatalogAcceptance(directory, catalog.Sequence, embeddedMinimum)
+	if err != nil {
+		return nil, nil, errors.New("signed release catalog is unavailable, unsafe, stale, or does not authorize the target")
+	}
+	revalidate := func(current time.Time) error {
+		if !catalog.Fresh(current) {
+			return errors.New("signed release catalog expired before durable update transaction creation")
+		}
+		return nil
+	}
+	return unlock, revalidate, nil
+}
+
+func (executor *commandUpdateExecutor) ReleaseStartGuard() {
+	if executor.startGuard != nil {
+		executor.startGuard()
+		executor.startGuard = nil
+	}
+}
+
+func (executor *commandUpdateExecutor) RevalidateStart(context.Context) error {
+	if executor.startRevalidate == nil {
+		return errors.New("signed release catalog authorization is unavailable")
+	}
+	return executor.startRevalidate(time.Now().UTC())
+}
+
+func (executor *commandUpdateExecutor) StartTransactionDurable() bool {
+	return executor.bridge == nil
+}
+
+func (executor *commandUpdateExecutor) AbortUnpublishedStart(ctx context.Context) error {
+	recoveryCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), time.Minute)
+	defer cancel()
+	if !executor.orphanedWriters {
+		if _, err := operator.ResumeUpdateStage(executor.stage); err == nil {
+			stopped, stopErr := executor.configuredWritersStopped(recoveryCtx)
+			if stopErr != nil {
+				return errors.New("configured writer state could not be inspected before unpublished stage cleanup")
+			}
+			executor.orphanedWriters = stopped
+		}
+	}
+	if executor.orphanedWriters {
+		return executor.restorePreviousWriterAndAbortStage(recoveryCtx)
+	}
+	return operator.AbortStage(executor.stage)
+}
+
+func (executor *commandUpdateExecutor) AbortPendingStart(ctx context.Context) error {
+	if executor.bridge == nil {
+		return errors.New("pending update start is unavailable")
+	}
+	bridge := executor.bridge
+	executor.bridge = nil
+	recoveryCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), time.Minute)
+	defer cancel()
+	if abortErr := bridge.Abort(); abortErr != nil {
+		durable, durableErr := reconcileUpdateTransaction(recoveryCtx, executor.installation, executor.request.UpdateID)
+		switch {
+		case durableErr == nil && durable.UpdateRequest == executor.request:
+			return errors.Join(abortErr, errors.New("pending update start became durable during rollback"))
+		case durableErr == nil:
+			return errors.Join(abortErr, errors.New("pending update rollback found a different durable transaction"))
+		case errors.Is(durableErr, punaropostgres.ErrNotFound):
+			return errors.Join(abortErr, executor.restorePreviousWriterAndAbortStage(recoveryCtx))
+		default:
+			return errors.Join(abortErr, errors.New("pending update rollback outcome could not be inspected"))
+		}
+	}
+	return executor.restorePreviousWriterAndAbortStage(recoveryCtx)
+}
+
+func (executor *commandUpdateExecutor) restorePreviousWriterAndAbortStage(ctx context.Context) error {
+	if err := startServices(ctx, executor.installation); err != nil {
+		return errors.New("previous writer could not be restarted")
+	}
+	if err := waitForReady(ctx, executor.installation); err != nil {
+		return errors.New("previous writer did not recover readiness")
+	}
+	if err := operator.AbortStage(executor.stage); err != nil {
+		return errors.New("unpublished update stage could not be removed after writer recovery")
+	}
+	executor.orphanedWriters = false
+	return nil
+}
+
+func serverUpdateCatalogMinimum() int64 {
+	sequence, err := strconv.ParseInt(serverBuildCatalogSequence, 10, 64)
+	if err != nil || sequence < 1 {
+		return 0
+	}
+	return sequence
+}
+
+func readProtectedReleaseFile(path string, maximum int64) ([]byte, error) {
+	if !filepath.IsAbs(path) || filepath.Clean(path) != path {
+		return nil, errors.New("release file path is invalid")
+	}
+	if maximum < 1 {
+		return nil, errors.New("release file is unsafe")
+	}
+	file, err := operator.OpenTrustedExternalFile(path, maximum)
+	if err != nil {
+		return nil, errors.New("release file is unsafe")
 	}
 	defer func() { _ = file.Close() }()
 	opened, err := file.Stat()
-	if err != nil || !os.SameFile(info, opened) {
-		return nil, errors.New("release metadata changed during open")
+	if err != nil || !opened.Mode().IsRegular() || opened.Size() < 1 || opened.Size() > maximum {
+		return nil, errors.New("release file changed during open")
 	}
-	body, err := io.ReadAll(io.LimitReader(file, punarorelease.MaximumMetadataBytes+1))
-	if err != nil || len(body) > punarorelease.MaximumMetadataBytes {
-		return nil, errors.New("release metadata is too large")
+	body, err := io.ReadAll(io.LimitReader(file, maximum+1))
+	if err != nil || int64(len(body)) > maximum {
+		return nil, errors.New("release file is too large")
 	}
 	return body, nil
 }
@@ -246,6 +496,17 @@ func metadataMatchesUpdateRequest(metadata punarorelease.Metadata, request punar
 		request.PostgresMajor == metadata.PostgreSQLMajor && request.ReleaseSHA256 == metadata.ReleaseSHA256 && request.ComposeSHA256 == metadata.ComposeSHA256 && request.MigrationManifestSHA256 == metadata.MigrationManifestSHA256
 }
 
+func targetReleaseMatchesUpdater(metadata punarorelease.Metadata, buildRelease string) bool {
+	return buildRelease != "" && metadata.Release == buildRelease
+}
+
+func validateUpdateSource(metadata punarorelease.Metadata, source string) error {
+	if !metadata.SupportsDirectUpdateFrom(source) {
+		return errors.New("signed target release manifest does not support a direct update from the current release")
+	}
+	return nil
+}
+
 func classifyUpdateLookupOpenError(state punaropostgres.SchemaState, inspectErr, openErr error) error {
 	if inspectErr == nil && state.Classification == punaropostgres.UpgradeRequired && state.Version == 5 {
 		return punaropostgres.ErrNotFound
@@ -275,6 +536,7 @@ func (executor *commandUpdateExecutor) PreflightAndPull(ctx context.Context) err
 		}
 		executor.staged = staged
 		orphanedBridge = true
+		executor.orphanedWriters = true
 	}
 	appIdentity, appErr := postgresDatabaseIdentity(ctx, executor.installation.AppDSNFile)
 	ownerIdentity, ownerErr := postgresOwnerDatabaseIdentity(ctx, executor.installation.OwnerDSNFile)
@@ -610,8 +872,27 @@ func (executor *commandUpdateExecutor) Recover(ctx context.Context, transaction 
 func (executor *commandUpdateExecutor) Advance(ctx context.Context, transaction punaropostgres.UpdateTransaction, to punaropostgres.UpdatePhase, marker *punaropostgres.UpdateBackupMarker) (punaropostgres.UpdateTransaction, error) {
 	if executor.bridge != nil && transaction.Phase == punaropostgres.UpdateFenced && to == punaropostgres.UpdateWritersStopped {
 		advanced, err := executor.bridge.CommitWritersStopped(ctx)
+		if err == nil {
+			executor.bridge = nil
+			return advanced, nil
+		}
+		if !errors.Is(err, punaropostgres.ErrV5UpdateBridgeOutcomeUncertain) {
+			return transaction, errors.Join(err, executor.AbortPendingStart(ctx))
+		}
 		executor.bridge = nil
-		return advanced, err
+		recoveryCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), time.Minute)
+		defer cancel()
+		durable, durableErr := reconcileUpdateTransaction(recoveryCtx, executor.installation, transaction.UpdateID)
+		if durableErr == nil {
+			if durable.UpdateRequest == executor.request && durable.Phase == punaropostgres.UpdateWritersStopped {
+				return durable, nil
+			}
+			return transaction, errors.Join(err, errors.New("v5 update bridge durable outcome does not match the staged request"))
+		}
+		if errors.Is(durableErr, punaropostgres.ErrNotFound) {
+			return transaction, errors.Join(err, executor.restorePreviousWriterAndAbortStage(recoveryCtx))
+		}
+		return transaction, errors.Join(err, errors.New("v5 update bridge durable outcome could not be inspected"))
 	}
 	admin, err := punaropostgres.OpenAdministration(ctx, punaropostgres.Config{DSNFile: executor.installation.OwnerDSNFile})
 	if err != nil {

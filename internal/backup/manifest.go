@@ -52,9 +52,9 @@ type File struct {
 	SHA256 string `json:"sha256"`
 }
 
-// UpdateMetadata binds a v2 backup to the immutable source and target of one
-// update transaction. It deliberately contains identifiers only, never paths
-// or credentials.
+// UpdateMetadata binds an update backup to the immutable source and target of
+// one update transaction. It deliberately contains identifiers only, never
+// paths or credentials.
 type UpdateMetadata struct {
 	UpdateID           string `json:"update_id"`
 	SourceSchema       int64  `json:"source_schema"`
@@ -87,15 +87,16 @@ type UpdateBinding struct {
 
 // Manifest is the single authoritative index for a published backup.
 type Manifest struct {
-	Version              int             `json:"version"`
-	BackupID             string          `json:"backup_id"`
-	CreatedAt            time.Time       `json:"created_at"`
-	SnapshotID           string          `json:"snapshot_id"`
-	SchemaVersion        int64           `json:"schema_version"`
-	State                State           `json:"state"`
-	Files                []File          `json:"files"`
-	ExternalDependencies []string        `json:"external_dependencies"`
-	Update               *UpdateMetadata `json:"update,omitempty"`
+	Version               int             `json:"version"`
+	BackupID              string          `json:"backup_id"`
+	CreatedAt             time.Time       `json:"created_at"`
+	SnapshotID            string          `json:"snapshot_id"`
+	SchemaVersion         int64           `json:"schema_version"`
+	State                 State           `json:"state"`
+	ServerCatalogSequence int64           `json:"server_catalog_sequence,omitempty"`
+	Files                 []File          `json:"files"`
+	ExternalDependencies  []string        `json:"external_dependencies"`
+	Update                *UpdateMetadata `json:"update,omitempty"`
 }
 
 // Summary is safe, content-free metadata returned by backup list.
@@ -193,11 +194,12 @@ func verifyContext(ctx context.Context, directory string) (Manifest, string, err
 	return manifest, manifestDigest, nil
 }
 
-// BuildUpdateBinding verifies a v2 backup and returns the complete marker that
-// must be recorded before an updater may consume it.
+// BuildUpdateBinding verifies a legacy v2 or catalog-aware v3 update backup and
+// returns the complete marker that must be recorded before an updater may
+// consume it.
 func BuildUpdateBinding(directory string) (UpdateBinding, error) {
 	manifest, digest, err := verify(directory)
-	if err != nil || manifest.Version != 2 || manifest.Update == nil {
+	if err != nil || (manifest.Version != 2 && manifest.Version != 3) || manifest.Update == nil {
 		return UpdateBinding{}, errors.New("update backup is unavailable or invalid")
 	}
 	metadata := *manifest.Update
@@ -210,14 +212,14 @@ func BuildUpdateBinding(directory string) (UpdateBinding, error) {
 	}, nil
 }
 
-// VerifyForUpdate requires a complete marker matching both the decoded v2
+// VerifyForUpdate requires a complete marker matching both the decoded update
 // metadata and the digest of the exact manifest bytes opened for verification.
 func VerifyForUpdate(directory string, binding UpdateBinding) (Manifest, error) {
 	if err := validateUpdateBinding(binding); err != nil {
 		return Manifest{}, err
 	}
 	manifest, digest, err := verify(directory)
-	if err != nil || manifest.Version != 2 || manifest.Update == nil {
+	if err != nil || (manifest.Version != 2 && manifest.Version != 3) || manifest.Update == nil {
 		return Manifest{}, errors.New("update backup is unavailable or invalid")
 	}
 	metadata := *manifest.Update
@@ -384,15 +386,21 @@ func rejectDuplicateJSONKeys(body []byte) error {
 }
 
 func validateManifest(manifest Manifest) error {
-	if (manifest.Version != 1 && manifest.Version != 2) || uuid.Validate(manifest.BackupID) != nil || manifest.CreatedAt.IsZero() || manifest.CreatedAt.Location() != time.UTC || manifest.SchemaVersion <= 0 || uuid.Validate(manifest.State.InstallationID) != nil || uuid.Validate(manifest.State.TimelineID) != nil || manifest.State.ChangeSequence < 0 || len(manifest.Files) == 0 || len(manifest.Files) > maximumFileCount {
+	if (manifest.Version != 1 && manifest.Version != 2 && manifest.Version != 3) || uuid.Validate(manifest.BackupID) != nil || manifest.CreatedAt.IsZero() || manifest.CreatedAt.Location() != time.UTC || manifest.SchemaVersion <= 0 || uuid.Validate(manifest.State.InstallationID) != nil || uuid.Validate(manifest.State.TimelineID) != nil || manifest.State.ChangeSequence < 0 || manifest.ServerCatalogSequence < 0 || len(manifest.Files) == 0 || len(manifest.Files) > maximumFileCount {
 		return errors.New("backup manifest metadata is invalid")
 	}
-	if manifest.Version == 1 && manifest.Update != nil {
+	if manifest.Version == 1 && (manifest.Update != nil || manifest.ServerCatalogSequence != 0) {
 		return errors.New("v1 backup manifest cannot contain update metadata")
 	}
-	if manifest.Version == 2 {
+	if manifest.Version == 2 && manifest.ServerCatalogSequence != 0 {
+		return errors.New("v2 backup manifest cannot contain release catalog acceptance")
+	}
+	if manifest.Version == 3 && manifest.ServerCatalogSequence == 0 {
+		return errors.New("v3 backup manifest requires release catalog acceptance")
+	}
+	if manifest.Version == 2 || manifest.Update != nil {
 		if manifest.Update == nil || validateUpdateMetadata(*manifest.Update) != nil || manifest.Update.SourceSchema != manifest.SchemaVersion || manifest.Update.State() != manifest.State || manifest.Update.ExportedSnapshotID != manifest.SnapshotID {
-			return errors.New("v2 backup update metadata is invalid")
+			return errors.New("backup update metadata is invalid")
 		}
 	}
 	if !validSnapshotID(manifest.SnapshotID) {

@@ -56,7 +56,7 @@ func TestPrepareAndPublishRestoreCreatesOnlyNewInstallation(t *testing.T) {
 	if err := os.Mkdir(options.DataDir, 0o700); err != nil {
 		t.Fatal(err)
 	}
-	if err := PublishRestore(installation); err != nil {
+	if err := PublishRestoreWithCatalogSequence(installation, 7); err != nil {
 		t.Fatalf("publish: %v", err)
 	}
 	loaded, err := Load(options.Directory)
@@ -65,6 +65,20 @@ func TestPrepareAndPublishRestoreCreatesOnlyNewInstallation(t *testing.T) {
 	}
 	if loaded.OwnerPrincipalID != options.Source.OwnerPrincipalID || loaded.DataDir != options.DataDir || loaded.RuntimeUID == "" || loaded.RuntimeGID == "" || !loaded.MemoryAPIEnabled {
 		t.Fatalf("unexpected restored installation: %#v", loaded)
+	}
+	sequence, err := ServerCatalogSequence(options.Directory)
+	if err != nil || sequence != 7 {
+		t.Fatalf("restored catalog sequence=%d err=%v", sequence, err)
+	}
+	if required, err := readCatalogAcceptanceRequirement(options.Directory); err != nil || !required {
+		t.Fatalf("restored catalog requirement=%t err=%v", required, err)
+	}
+	if err := PublishRestoreWithCatalogSequence(installation, 6); err != nil {
+		t.Fatalf("idempotent restore retried below newer high-water: %v", err)
+	}
+	sequence, err = ServerCatalogSequence(options.Directory)
+	if err != nil || sequence != 7 {
+		t.Fatalf("restore retry lowered catalog sequence=%d err=%v", sequence, err)
 	}
 }
 

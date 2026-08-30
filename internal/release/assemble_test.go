@@ -1,6 +1,8 @@
 package release
 
 import (
+	"crypto/ed25519"
+	"crypto/rand"
 	"crypto/sha256"
 	"encoding/hex"
 	"os"
@@ -66,6 +68,57 @@ func TestAssembleWritesCatalogAndManifestForScannedArtifacts(t *testing.T) {
 	}
 	if _, err := os.Stat(filepath.Join(dir, CatalogFile)); err != nil {
 		t.Fatal(err)
+	}
+}
+
+func TestAssembledSignedManifestIsTheServerUpdateBoundary(t *testing.T) {
+	directory := t.TempDir()
+	if err := os.WriteFile(filepath.Join(directory, "punaro-adapter-linux-amd64"), []byte("adapter"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	assembled, err := Assemble(AssembleRequest{
+		Directory:               directory,
+		Release:                 "v0.1.0",
+		Sequence:                1,
+		PublishedAt:             time.Date(2026, 8, 16, 12, 0, 0, 0, time.UTC),
+		ExpiresAt:               time.Date(2026, 8, 23, 12, 0, 0, 0, time.UTC),
+		MinimumSafeSequence:     1,
+		CatalogSequence:         1,
+		Image:                   "ghcr.io/rock3r/punaro@sha256:" + testDigestA,
+		ComposeSHA256:           testComposeDigest,
+		MigrationManifestSHA256: testMigrateDigest,
+		Database:                SchemaRange{Min: 10, Max: 44, Target: 44, RollbackFloor: 10},
+		PostgreSQLMajor:         18,
+		GatewayProtocol:         ProtocolRange{Min: 1, Max: 1},
+		ClientProtocol:          ProtocolRange{Min: 1, Max: 1},
+		MinimumRecoveryProtocol: 1,
+		MinimumBootstrapRelease: "v0.1.0",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	public, private, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	envelope, err := Sign(assembled.ManifestJSON, "punaro-release-1", private)
+	if err != nil {
+		t.Fatal(err)
+	}
+	signatureBody, err := EncodeEnvelope(envelope)
+	if err != nil {
+		t.Fatal(err)
+	}
+	keysBody, err := EncodePublicKeys("punaro-release-1", public)
+	if err != nil {
+		t.Fatal(err)
+	}
+	metadata, err := ParseSignedManifest(assembled.ManifestJSON, signatureBody, keysBody, Environment{CurrentSchema: 10, PostgreSQLMajor: 18})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if metadata.Release != assembled.Manifest.Release || metadata.Image != assembled.Manifest.Image || metadata.Schema != assembled.Manifest.Database || metadata.PostgreSQLMajor != assembled.Manifest.PostgreSQLMajor || metadata.ReleaseSHA256 != assembled.Manifest.ReleaseSHA256 || metadata.ComposeSHA256 != assembled.Manifest.ComposeSHA256 || metadata.MigrationManifestSHA256 != assembled.Manifest.MigrationManifestSHA256 {
+		t.Fatalf("projected metadata=%#v manifest=%#v", metadata, assembled.Manifest)
 	}
 }
 

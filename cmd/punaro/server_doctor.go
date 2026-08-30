@@ -96,20 +96,54 @@ type serverDoctorRecoveryReceiptRequest struct {
 }
 
 var (
-	serverDoctorPathCheck                 = isolatedServerDoctorPaths
-	serverDoctorPathExecutable            = os.Executable
-	serverDoctorStorageCheck              = isolatedServerDoctorStorage
-	serverDoctorStorageExecutable         = os.Executable
-	serverDoctorBackupCheck               = isolatedServerDoctorBackups
-	serverDoctorBackupExecutable          = os.Executable
-	serverDoctorUpdateStageCheck          = isolatedServerDoctorUpdateStage
-	serverDoctorUpdateStageExecutable     = os.Executable
-	serverDoctorProfileLoad               = isolatedServerDoctorProfile
-	serverDoctorProfileExecutable         = os.Executable
-	serverDoctorRecoveryReceiptCheck      = isolatedServerDoctorRecoveryReceipt
-	serverDoctorRecoveryReceiptExecutable = os.Executable
-	serverDoctorRunningImageCommand       = boundedCommandInDirectory
+	serverDoctorPathCheck                   = isolatedServerDoctorPaths
+	serverDoctorPathExecutable              = os.Executable
+	serverDoctorStorageCheck                = isolatedServerDoctorStorage
+	serverDoctorStorageExecutable           = os.Executable
+	serverDoctorBackupCheck                 = isolatedServerDoctorBackups
+	serverDoctorBackupExecutable            = os.Executable
+	serverDoctorUpdateStageCheck            = isolatedServerDoctorUpdateStage
+	serverDoctorUpdateStageExecutable       = os.Executable
+	serverDoctorCatalogAcceptanceCheck      = isolatedServerDoctorCatalogAcceptance
+	serverDoctorCatalogAcceptanceExecutable = os.Executable
+	serverDoctorProfileLoad                 = isolatedServerDoctorProfile
+	serverDoctorProfileExecutable           = os.Executable
+	serverDoctorRecoveryReceiptCheck        = isolatedServerDoctorRecoveryReceipt
+	serverDoctorRecoveryReceiptExecutable   = os.Executable
+	serverDoctorRunningImageCommand         = boundedCommandInDirectory
 )
+
+func isolatedServerDoctorCatalogAcceptance(ctx context.Context, directory string, minimum int64) knownDoctorBool {
+	executable, err := serverDoctorCatalogAcceptanceExecutable()
+	if err != nil {
+		return knownDoctorBool{}
+	}
+	output, ok := boundedCommandLimit(ctx, 256, executable, "doctor-catalog-acceptance-check", "--directory", directory, "--minimum", strconv.FormatInt(minimum, 10))
+	if !ok {
+		return knownDoctorBool{}
+	}
+	decoder := json.NewDecoder(strings.NewReader(output))
+	var state knownDoctorBool
+	if decoder.Decode(&state) != nil || decoder.Decode(&struct{}{}) != io.EOF || !state.Known {
+		return knownDoctorBool{}
+	}
+	return state
+}
+
+func runDoctorCatalogAcceptanceCheck(args []string, stdout io.Writer) int {
+	flags := flag.NewFlagSet("punaro doctor-catalog-acceptance-check", flag.ContinueOnError)
+	flags.SetOutput(io.Discard)
+	directory := flags.String("directory", "", "installation directory")
+	minimum := flags.Int64("minimum", 0, "embedded release catalog sequence")
+	if flags.Parse(args) != nil || flags.NArg() != 0 || *directory == "" || !filepath.IsAbs(*directory) || filepath.Clean(*directory) != *directory || *minimum < 1 {
+		return 2
+	}
+	state := known(true, operator.InspectServerCatalogAcceptance(*directory, *minimum) == nil)
+	if json.NewEncoder(stdout).Encode(state) != nil {
+		return 1
+	}
+	return 0
+}
 
 func isolatedServerDoctorProfile(ctx context.Context, path string) (serverDoctorProfile, error) {
 	if path == "" || !filepath.IsAbs(path) || filepath.Clean(path) != path {

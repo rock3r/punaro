@@ -7,6 +7,11 @@ import (
 	"sync"
 )
 
+// ErrV5UpdateBridgeOutcomeUncertain means PostgreSQL did not confirm whether
+// the bridge commit became durable. Callers must inspect the exact update ID
+// before deciding whether to continue or restore the previous writer.
+var ErrV5UpdateBridgeOutcomeUncertain = errors.New("v5 update bridge outcome is uncertain")
+
 // V5UpdateBridge is the one-time transactional bridge from the last schema
 // that predates the durable mutation fence. Its transaction retains exclusive
 // locks on every v5 mutable relation until the caller has stopped all writers.
@@ -141,7 +146,7 @@ func (bridge *V5UpdateBridge) CommitWritersStopped(ctx context.Context) (UpdateT
 	}
 	if err := bridge.transaction.Commit(); err != nil {
 		bridge.close()
-		return UpdateTransaction{}, errors.New("v5 update bridge outcome is uncertain; inspect the durable update transaction")
+		return update, ErrV5UpdateBridgeOutcomeUncertain
 	}
 	bridge.update = update
 	bridge.close()

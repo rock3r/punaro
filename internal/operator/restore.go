@@ -143,12 +143,29 @@ func PrepareRestore(options RestoreOptions) (Installation, error) {
 // PublishRestore atomically publishes generated configuration after verified
 // database/timeline/blob restore has created the new data directory.
 func PublishRestore(installation Installation) error {
+	return PublishRestoreWithCatalogSequence(installation, 0)
+}
+
+// PublishRestoreWithCatalogSequence atomically publishes the restored
+// installation configuration together with its backed-up release-catalog
+// high-water, so disaster recovery cannot make an accepted retirement vanish.
+func PublishRestoreWithCatalogSequence(installation Installation, catalogSequence int64) error {
+	if catalogSequence < 0 {
+		return errors.New("restored release catalog acceptance is invalid")
+	}
 	if uuid.Validate(installation.OwnerPrincipalID) != nil || requireTrustedPrivateDirectory(installation.DataDir) != nil || requireTrustedPrivateDirectory(installation.BackupDir) != nil || requireTrustedProtectedFile(installation.OwnerDSNFile, 64<<10) != nil || requireTrustedProtectedFile(installation.AppDSNFile, 64<<10) != nil || installation.TrustedAttachmentsEnabled && (requireTrustedPrivateDirectory(installation.TrustedAttachmentBlobDir) != nil || !attachmentBlobDirectoryContained(installation.DataDir, installation.TrustedAttachmentBlobDir)) {
 		return errors.New("restored installation inputs are unavailable or unsafe")
 	}
 	if existing, err := Load(installation.Directory); err == nil {
 		if existing == installation {
-			return nil
+			if catalogSequence == 0 {
+				return nil
+			}
+			current, sequenceErr := ServerCatalogSequence(installation.Directory)
+			if sequenceErr == nil && current >= catalogSequence {
+				return nil
+			}
+			return AcceptServerCatalogSequence(installation.Directory, catalogSequence, catalogSequence)
 		}
 		return errors.New("restored installation target belongs to a different request")
 	}
@@ -159,6 +176,9 @@ func PublishRestore(installation Installation) error {
 	if err := os.RemoveAll(stage); err != nil || os.Mkdir(stage, 0o700) != nil {
 		return errors.New("restored installation staging cannot be reserved")
 	}
+	if err := protectNewOperatorDirectory(stage); err != nil {
+		return errors.New("restored installation staging cannot be protected")
+	}
 	published := false
 	defer func() {
 		if !published {
@@ -167,6 +187,11 @@ func PublishRestore(installation Installation) error {
 	}()
 	if requireTrustedPrivateDirectory(stage) != nil || writeExclusive(EnvFile(stage), []byte(daemonEnv(installation))) != nil || writeExclusive(OverrideFile(stage), []byte(composeOverride())) != nil || writeExclusiveJSON(filepath.Join(stage, configName), installation) != nil {
 		return errors.New("restored installation configuration could not be staged")
+	}
+	if catalogSequence > 0 {
+		if err := writeExclusiveJSON(filepath.Join(stage, acceptedCatalogName), acceptedCatalogState{Version: 1, Sequence: catalogSequence}); err != nil || writeExclusive(filepath.Join(stage, acceptedCatalogRequiredName), []byte(acceptedCatalogRequiredBody)) != nil {
+			return errors.New("restored release catalog acceptance could not be staged")
+		}
 	}
 	if syncDirectory(stage) != nil || os.Rename(stage, installation.Directory) != nil || syncDirectory(filepath.Dir(installation.Directory)) != nil {
 		return errors.New("restored installation configuration durability failed")

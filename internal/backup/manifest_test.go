@@ -65,6 +65,39 @@ func TestVerifyAcceptsExactPrivateBackup(t *testing.T) {
 	}
 }
 
+func TestVerifyVersionsReleaseCatalogAcceptanceContract(t *testing.T) {
+	tests := []struct {
+		name       string
+		version    int
+		sequence   int64
+		wantAccept bool
+	}{
+		{name: "legacy v1", version: 1, sequence: 0, wantAccept: true},
+		{name: "v1 cannot carry catalog acceptance", version: 1, sequence: 7},
+		{name: "v2 cannot carry catalog acceptance", version: 2, sequence: 7},
+		{name: "v3 requires catalog acceptance", version: 3, sequence: 0},
+		{name: "v3 catalog-aware backup", version: 3, sequence: 7, wantAccept: true},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			directory := t.TempDir()
+			requirePrivate(t, directory)
+			paths := writeRequiredTestFiles(t, directory)
+			manifest := testManifest(t, directory, paths)
+			manifest.Version = test.version
+			manifest.ServerCatalogSequence = test.sequence
+			if test.version == 2 {
+				manifest.Update = validTestUpdateMetadata(manifest)
+			}
+			writeManifest(t, directory, manifest)
+			_, err := Verify(directory)
+			if (err == nil) != test.wantAccept {
+				t.Fatalf("Verify() error=%v want_accept=%t", err, test.wantAccept)
+			}
+		})
+	}
+}
+
 func TestVerifyForUpdateRequiresExactV2ManifestBinding(t *testing.T) {
 	directory := t.TempDir()
 	requirePrivate(t, directory)
@@ -107,6 +140,25 @@ func TestVerifyForUpdateRequiresExactV2ManifestBinding(t *testing.T) {
 	}
 	if _, err := VerifyForUpdate(directory, binding); err == nil {
 		t.Fatal("update verification accepted a replaced manifest")
+	}
+}
+
+func TestVerifyForUpdateAcceptsCatalogAwareV3Manifest(t *testing.T) {
+	directory := t.TempDir()
+	requirePrivate(t, directory)
+	paths := writeRequiredTestFiles(t, directory)
+	manifest := testManifest(t, directory, paths)
+	manifest.Version = 3
+	manifest.ServerCatalogSequence = 7
+	manifest.Update = validTestUpdateMetadata(manifest)
+	writeManifest(t, directory, manifest)
+	binding, err := BuildUpdateBinding(directory)
+	if err != nil {
+		t.Fatalf("build v3 update binding: %v", err)
+	}
+	verified, err := VerifyForUpdate(directory, binding)
+	if err != nil || verified.Version != 3 || verified.ServerCatalogSequence != 7 {
+		t.Fatalf("verify v3 update backup: manifest=%#v err=%v", verified, err)
 	}
 }
 
@@ -361,6 +413,15 @@ func testManifest(t *testing.T, directory string, paths []string) Manifest {
 		},
 		Files:                files,
 		ExternalDependencies: []string{"host-tls", "oauth", "reverse-proxy", "telegram", "tunnel"},
+	}
+}
+
+func validTestUpdateMetadata(manifest Manifest) *UpdateMetadata {
+	return &UpdateMetadata{
+		UpdateID: "0190ea2e-8a2d-7d42-b320-8515f7604bc1", SourceSchema: manifest.SchemaVersion,
+		InstallationID: manifest.State.InstallationID, TimelineID: manifest.State.TimelineID,
+		ChangeSequence: manifest.State.ChangeSequence, TargetRelease: "v0.7.0",
+		TargetImageDigest: "sha256:" + strings.Repeat("a", 64), ExportedSnapshotID: manifest.SnapshotID,
 	}
 }
 

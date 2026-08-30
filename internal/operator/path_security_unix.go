@@ -30,13 +30,68 @@ func requireTrustedProtectedFile(path string, maximum int64) error {
 	return requireTrustedDirectoryAncestors(filepath.Dir(filepath.Clean(path)))
 }
 
+func requireTrustedExternalFile(path string, maximum int64) error {
+	file, err := openTrustedExternalFile(path, maximum)
+	if err != nil {
+		return err
+	}
+	return file.Close()
+}
+
+func openTrustedExternalFile(path string, maximum int64) (*os.File, error) {
+	if err := requireTrustedProtectedFile(path, maximum); err != nil {
+		return nil, err
+	}
+	info, err := os.Lstat(path)
+	if err != nil {
+		return nil, errors.New("external file is unsafe")
+	}
+	stat, ok := info.Sys().(*syscall.Stat_t)
+	if !ok || stat.Nlink != 1 {
+		return nil, errors.New("external file must have exactly one link")
+	}
+	file, err := os.Open(path) // #nosec G304 -- explicit operator-supplied release input.
+	if err != nil {
+		return nil, err
+	}
+	opened, err := file.Stat()
+	if err != nil || !os.SameFile(info, opened) || !opened.Mode().IsRegular() || opened.Size() > maximum {
+		_ = file.Close()
+		return nil, errors.New("external file changed during open")
+	}
+	return file, nil
+}
+
+func protectNewOperatorDirectory(string) error { return nil }
+
+func protectNewOperatorFile(*os.File) error { return nil }
+
+func requireTrustedCatalogDirectory(path string) error { return requireTrustedPrivateDirectory(path) }
+
+func ensureTrustedCatalogDirectory(path string) error { return requireTrustedCatalogDirectory(path) }
+
+func pinTrustedCatalogDirectory(path string) (func(), error) {
+	if err := requireTrustedCatalogDirectory(path); err != nil {
+		return nil, err
+	}
+	return func() {}, nil
+}
+
+func requireTrustedCatalogFile(path string, maximum int64) error {
+	return requireTrustedProtectedFile(path, maximum)
+}
+
 func ownedByCurrentUser(path string) bool {
 	info, err := os.Lstat(path)
 	if err != nil {
 		return false
 	}
 	stat, ok := info.Sys().(*syscall.Stat_t)
-	return ok && int(stat.Uid) == os.Getuid()
+	return ok && trustedProtectedFileUID(int(stat.Uid))
+}
+
+func trustedProtectedFileUID(uid int) bool {
+	return uid == os.Getuid()
 }
 
 func runtimeIdentityMatches(installation Installation) bool {

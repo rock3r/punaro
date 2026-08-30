@@ -1803,9 +1803,35 @@ The seventh foundation slice adds the single-node supported update transaction.
 Every PostgreSQL business mutation takes the shared side of one transactional
 maintenance gate; the owner-side update fence drains prior writers, rejects
 later writes before acknowledgement, and remains durable through crashes. The
-host wrapper verifies protected release metadata, the exact pulled image digest,
-the generated Compose artifact, PostgreSQL major, installation identity, disk
-capacity, and current health before fencing. It then stops the generated writer,
+host wrapper accepts the exact public release manifest only with its detached
+signature and an independently provisioned operator trust root. All three inputs
+must be bounded owner-controlled regular files beneath trusted ancestors; linked,
+foreign-owned, or group/world-writable trust material fails closed. Signature
+verification covers the exact manifest bytes before the wrapper projects the
+release name, digest-pinned image, schema range, PostgreSQL major, image digest,
+Compose digest, or migration-manifest digest, so no unsigned server-update value
+can enter that boundary. The wrapper also derives the source release from the
+durable transaction or host stage (requiring an explicit source only for an old
+installation without a release lock) and requires that source in the manifest's
+signed `supported_from` allowlist before any preflight or fencing; an empty list
+permits no server update. Before creating a new transaction, it also verifies a
+fresh catalog under that same trust root and requires the exact target release,
+sequence, and manifest digest to remain allowed. Catalog retirement blocks new
+starts but is not re-applied to an exact durable resume, which must remain
+recoverable. Before transaction creation, the wrapper durably advances an
+installation-local accepted catalog high-water under a file lock. Catalogs
+below either the release binary's embedded catalog sequence or that accepted
+sequence are rejected; a synced pending advance is recovered after a crash so
+replaying an older, still-fresh signed catalog cannot undo a retirement. The
+same cross-process lock remains held through preflight until the database
+transaction is durably created, so concurrent starts cannot authorize under
+different catalog generations and publish in the opposite order. The one-time
+schema-5 bridge also reconciles an uncertain commit against the exact durable
+update ID; when none exists, the previous writer must regain readiness before
+the unpublished host stage is removed. It
+then verifies the exact pulled image digest,
+generated Compose artifact, installation identity, disk capacity, and current
+health before fencing. It then stops the generated writer,
 creates an update-bound M-6 backup, and runs the exact target image as a hardened
 one-shot owner migrator. The target starts under the still-active fence and must
 pass readiness and a non-mutating doctor before marker-last configuration
