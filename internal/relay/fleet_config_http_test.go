@@ -158,6 +158,52 @@ func TestHTTPFleetConfigStatusIsBoundedIdempotentAndRejectsStaleGeneration(t *te
 	}
 }
 
+func TestValidFleetStatusRejectsUnknownOptionalEnums(t *testing.T) {
+	t.Parallel()
+	base := FleetStatusReport{
+		Generation: 1, AppliedDigest: strings.Repeat("ab", 32), State: "current",
+		ReportGeneration: 2, IdempotencyKey: "key-1",
+	}
+	if !validFleetStatus(base) {
+		t.Fatal("empty optional enums must be valid")
+	}
+	invalid := []FleetStatusReport{
+		{Generation: 1, State: "current", ReportGeneration: 2, IdempotencyKey: "key-1", TrailerState: "weird"},
+		{Generation: 1, State: "current", ReportGeneration: 2, IdempotencyKey: "key-1", AliasState: "weird"},
+		{Generation: 1, State: "current", ReportGeneration: 2, IdempotencyKey: "key-1", ProjectMatchState: "weird"},
+		{Generation: 1, State: "current", ReportGeneration: 2, IdempotencyKey: "key\x00"},
+	}
+	for _, report := range invalid {
+		if validFleetStatus(report) {
+			t.Fatalf("accepted %#v", report)
+		}
+	}
+}
+
+func TestHTTPFleetConfigStatusRejectsUnknownTrailerState(t *testing.T) {
+	t.Parallel()
+	public, private, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	store, err := Open(filepath.Join(t.TempDir(), "relay.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+	auth, err := NewAuthenticator(store, []Machine{{ID: "machine-a", PublicKey: public, EndpointPrefixes: []string{"agent/a/"}}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	handler := NewHandler(store, auth, HandlerOptions{Now: func() time.Time {
+		return time.Date(2026, time.July, 13, 12, 0, 0, 0, time.UTC)
+	}, FleetConfig: &memoryFleetStore{}})
+	response := serveSigned(t, handler, private, "machine-a", http.MethodPut, "/v1/fleet-config/status", `{"generation":1,"state":"current","trailer_state":"weird","report_generation":1}`, "bad-trailer", "key-1")
+	if response.Code != http.StatusBadRequest {
+		t.Fatalf("status=%d body=%s", response.Code, response.Body.String())
+	}
+}
+
 func TestFleetStatusRequestHashIncludesOptionalFields(t *testing.T) {
 	t.Parallel()
 	base := FleetStatusReport{Generation: 1, AppliedDigest: strings.Repeat("ab", 32), State: "current", ReportGeneration: 2}

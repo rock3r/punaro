@@ -45,7 +45,7 @@ type FleetConfigStore interface {
 }
 
 func validFleetStatus(report FleetStatusReport) bool {
-	if report.Generation < 1 || report.ReportGeneration < 1 || report.IdempotencyKey == "" || len(report.IdempotencyKey) > 128 {
+	if report.Generation < 1 || report.ReportGeneration < 1 || !ValidRequestToken(report.IdempotencyKey) {
 		return false
 	}
 	if report.AppliedDigest != "" && !fleetDigestPattern.MatchString(report.AppliedDigest) {
@@ -62,6 +62,21 @@ func validFleetStatus(report FleetStatusReport) bool {
 		default:
 			return false
 		}
+	}
+	switch report.TrailerState {
+	case "", "missing", "present", "collision":
+	default:
+		return false
+	}
+	switch report.AliasState {
+	case "", "disabled", "linked", "unsupported", "collision":
+	default:
+		return false
+	}
+	switch report.ProjectMatchState {
+	case "", "none", "matched", "override", "unmatched":
+	default:
+		return false
 	}
 	return true
 }

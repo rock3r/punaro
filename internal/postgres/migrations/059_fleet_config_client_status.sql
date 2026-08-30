@@ -1,5 +1,7 @@
 CREATE TABLE fleet.client_status (
-    client_id uuid PRIMARY KEY REFERENCES auth.client_installations (id),
+    machine_id text PRIMARY KEY CHECK (
+        machine_id ~ '^[a-z0-9]([a-z0-9._-]{0,62}[a-z0-9])?$'
+    ),
     generation bigint NOT NULL CHECK (generation >= 1),
     applied_digest text CHECK (applied_digest ~ '^[0-9a-f]{64}$'),
     state text NOT NULL CHECK (state IN (
@@ -16,7 +18,7 @@ CREATE TABLE fleet.client_status (
 );
 
 CREATE TABLE fleet.client_status_idempotency (
-    client_id uuid NOT NULL REFERENCES auth.client_installations (id),
+    machine_id text NOT NULL REFERENCES fleet.client_status (machine_id),
     idempotency_key text NOT NULL CHECK (
         char_length(idempotency_key) BETWEEN 1 AND 128
         AND octet_length(idempotency_key) <= 512
@@ -24,7 +26,7 @@ CREATE TABLE fleet.client_status_idempotency (
     ),
     request_hash text NOT NULL CHECK (request_hash ~ '^[0-9a-f]{64}$'),
     created_at timestamptz NOT NULL DEFAULT statement_timestamp(),
-    PRIMARY KEY (client_id, idempotency_key)
+    PRIMARY KEY (machine_id, idempotency_key)
 );
 
 CREATE FUNCTION fleet.put_client_status(
@@ -45,21 +47,16 @@ SECURITY DEFINER
 SET search_path = pg_catalog
 AS $function$
 DECLARE
-    target uuid;
     previous_generation bigint;
     previous_hash text;
 BEGIN
-    SELECT id INTO target
-    FROM auth.client_installations
-    WHERE machine_id = p_machine_id
-      AND lifecycle_state = 'active'
-    FOR UPDATE;
-    IF target IS NULL THEN
+    IF p_machine_id IS NULL OR p_machine_id !~ '^[a-z0-9]([a-z0-9._-]{0,62}[a-z0-9])?$' THEN
         RAISE EXCEPTION 'fleet-config status is not authorized';
     END IF;
+    PERFORM pg_advisory_xact_lock(88059, hashtext(p_machine_id));
     SELECT request_hash INTO previous_hash
     FROM fleet.client_status_idempotency
-    WHERE client_id = target AND idempotency_key = p_idempotency_key;
+    WHERE machine_id = p_machine_id AND idempotency_key = p_idempotency_key;
     IF FOUND THEN
         IF previous_hash <> p_request_hash THEN
             RAISE EXCEPTION 'fleet-config status idempotency conflict';
@@ -68,19 +65,19 @@ BEGIN
     END IF;
     SELECT report_generation INTO previous_generation
     FROM fleet.client_status
-    WHERE client_id = target
+    WHERE machine_id = p_machine_id
     FOR UPDATE;
     IF FOUND AND previous_generation >= p_report_generation THEN
         RAISE EXCEPTION 'fleet-config status generation is stale';
     END IF;
     INSERT INTO fleet.client_status (
-        client_id, generation, applied_digest, state, activation,
+        machine_id, generation, applied_digest, state, activation,
         trailer_state, alias_state, project_match_state, report_generation
     ) VALUES (
-        target, p_generation, p_applied_digest, p_state, p_activation,
+        p_machine_id, p_generation, p_applied_digest, p_state, p_activation,
         p_trailer_state, p_alias_state, p_project_match_state, p_report_generation
     )
-    ON CONFLICT (client_id) DO UPDATE SET
+    ON CONFLICT (machine_id) DO UPDATE SET
         generation = EXCLUDED.generation,
         applied_digest = EXCLUDED.applied_digest,
         state = EXCLUDED.state,
@@ -91,8 +88,8 @@ BEGIN
         reported_at = statement_timestamp(),
         report_generation = EXCLUDED.report_generation
     WHERE fleet.client_status.report_generation < EXCLUDED.report_generation;
-    INSERT INTO fleet.client_status_idempotency (client_id, idempotency_key, request_hash)
-    VALUES (target, p_idempotency_key, p_request_hash);
+    INSERT INTO fleet.client_status_idempotency (machine_id, idempotency_key, request_hash)
+    VALUES (p_machine_id, p_idempotency_key, p_request_hash);
 END;
 $function$;
 

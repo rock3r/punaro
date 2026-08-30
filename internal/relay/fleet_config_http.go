@@ -47,7 +47,7 @@ func (h *handler) fleetStatus(w http.ResponseWriter, r *http.Request, body []byt
 		writeError(w, http.StatusNotFound, "route not found")
 		return
 	}
-	if idempotencyKey == "" {
+	if !ValidRequestToken(idempotencyKey) {
 		writeError(w, http.StatusBadRequest, "idempotency key is required")
 		return
 	}

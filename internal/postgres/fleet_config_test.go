@@ -28,11 +28,14 @@ func TestFleetPutClientStatusSerializesIdempotencyLookup(t *testing.T) {
 		t.Fatal(err)
 	}
 	sql := string(body)
-	if strings.Contains(sql, "FOR SHARE") {
-		t.Fatal("concurrent first-status retries are not serialized before the idempotency lookup")
+	if strings.Contains(sql, "client_installations") {
+		t.Fatal("status writes require a client installation")
 	}
-	if !strings.Contains(sql, "FROM auth.client_installations") || !strings.Contains(sql, "AND lifecycle_state = 'active'\n    FOR UPDATE;") {
-		t.Fatal("client status does not exclusive-lock the installation before idempotency lookup")
+	if !strings.Contains(sql, "machine_id text PRIMARY KEY") {
+		t.Fatal("status is not keyed by the authenticated machine id")
+	}
+	if !strings.Contains(sql, "pg_advisory_xact_lock") {
+		t.Fatal("concurrent first-status retries are not serialized before the idempotency lookup")
 	}
 }
 
@@ -55,6 +58,9 @@ func TestFleetClientStatusControlsDenyApplicationMutations(t *testing.T) {
 		"AND NOT has_table_privilege('punaro_app', 'fleet.client_status_idempotency', 'TRUNCATE')",
 		"AND NOT has_table_privilege('punaro_app', 'fleet.client_status_idempotency', 'REFERENCES')",
 		"AND NOT has_table_privilege('punaro_app', 'fleet.client_status_idempotency', 'TRIGGER')",
+		"AND NOT has_function_privilege('public', put_oid, 'EXECUTE')",
+		"prosecdef",
+		"search_path=pg_catalog",
 	}
 	for _, want := range required {
 		if !strings.Contains(source, want) {
