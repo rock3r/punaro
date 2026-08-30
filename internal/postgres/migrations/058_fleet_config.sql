@@ -22,11 +22,11 @@ CREATE TABLE fleet.desired (
 );
 
 CREATE TRIGGER application_mutation_fence
-    BEFORE INSERT OR UPDATE OR DELETE ON fleet.releases
-    FOR EACH ROW EXECUTE FUNCTION jobs.guard_application_mutation();
+    BEFORE INSERT OR UPDATE OR DELETE OR TRUNCATE ON fleet.releases
+    FOR EACH STATEMENT EXECUTE FUNCTION jobs.guard_application_mutation();
 CREATE TRIGGER application_mutation_fence
-    BEFORE INSERT OR UPDATE OR DELETE ON fleet.desired
-    FOR EACH ROW EXECUTE FUNCTION jobs.guard_application_mutation();
+    BEFORE INSERT OR UPDATE OR DELETE OR TRUNCATE ON fleet.desired
+    FOR EACH STATEMENT EXECUTE FUNCTION jobs.guard_application_mutation();
 
 REVOKE ALL ON SCHEMA fleet FROM PUBLIC;
 GRANT USAGE ON SCHEMA fleet TO punaro_app;
