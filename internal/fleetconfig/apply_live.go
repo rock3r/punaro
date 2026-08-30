@@ -45,12 +45,7 @@ func ApplyLive(req ApplyLiveRequest) (ApplyLiveResult, error) {
 	if err != nil {
 		return result, err
 	}
-	present := map[string]string{}
-	for _, match := range req.Matches {
-		if match.Name != "" && match.Path != "" {
-			present[match.Name] = match.Path
-		}
-	}
+	present := projectPresent(req.Matches)
 	published := expandDestFiles(req.Tree, present)
 	staged := map[string][]byte{}
 	for _, rel := range destApplyOrder(published) {
@@ -84,12 +79,15 @@ func ApplyLive(req ApplyLiveRequest) (ApplyLiveResult, error) {
 		}
 		digest := destSnapshotDigest(staged)
 		if !sameDestSnapshot(req.Root, digest) {
-			if err := pruneDroppedManagedDests(req.Root, req.Home, present, staged); err != nil {
+			if err := pruneDroppedManagedDests(req.Root, req.Home, destPresent(req.Root, req.Matches), staged); err != nil {
 				return result, err
 			}
 			if err := PublishTree(req.Root, staged, digest); err != nil {
 				return result, err
 			}
+		}
+		if err := persistDestProjectPaths(req.Root, present); err != nil {
+			return result, err
 		}
 	}
 	if req.Logs != nil {
@@ -98,37 +96,39 @@ func ApplyLive(req ApplyLiveRequest) (ApplyLiveResult, error) {
 	return result, nil
 }
 
-// RollbackLive restores last-known-good published dest bytes onto live dests.
+// RollbackLive restores last-known-good published dest bytes onto live dests
+// and removes managed dests that the restored snapshot no longer contains.
 func RollbackLive(req ApplyLiveRequest) error {
 	if req.Root == "" {
 		return errors.New("fleet-config last-known-good is unavailable")
 	}
+	present := destPresent(req.Root, req.Matches)
+	outgoing, err := destSnapshotRels(req.Root)
+	if err != nil {
+		return err
+	}
 	if err := RestoreLastGood(req.Root); err != nil {
 		return err
 	}
-	present := map[string]string{}
-	for _, match := range req.Matches {
-		if match.Name != "" && match.Path != "" {
-			present[match.Name] = match.Path
-		}
-	}
 	current := filepath.Join(req.Root, "current")
-	return filepath.WalkDir(current, func(path string, entry os.DirEntry, err error) error {
-		if err != nil || entry.IsDir() {
-			return err
+	restored := map[string][]byte{}
+	if err := filepath.WalkDir(current, func(path string, entry os.DirEntry, walkErr error) error {
+		if walkErr != nil || entry.IsDir() {
+			return walkErr
 		}
 		rel, relErr := filepath.Rel(current, path)
 		if relErr != nil {
 			return errors.New("fleet-config last-known-good restore failed")
 		}
 		slash := filepath.ToSlash(rel)
-		live := liveDestPath(req.Home, present, slash)
-		if live == "" {
-			return nil
-		}
 		body, readErr := os.ReadFile(path) // #nosec G304,G122 -- adapter-owned last-known-good dest snapshot.
 		if readErr != nil {
 			return errors.New("fleet-config last-known-good restore failed")
+		}
+		restored[slash] = body
+		live := liveDestPath(req.Home, present, slash)
+		if live == "" {
+			return nil
 		}
 		if err := writeRegularDest(live, body); err != nil {
 			return err
@@ -137,7 +137,11 @@ func RollbackLive(req ApplyLiveRequest) error {
 			return markManagedSkillDir(skillDir)
 		}
 		return nil
-	})
+	}); err != nil {
+		return err
+	}
+	dropped := droppedDestRels(outgoing, restored)
+	return pruneManagedLiveDests(req.Home, present, dropped, restored)
 }
 
 // FormatApplyLog is the content-free apply log line. It must not include file bodies.
@@ -393,49 +397,40 @@ func sameDestSnapshot(root, digest string) bool {
 }
 
 func pruneDroppedManagedDests(root, home string, present map[string]string, staged map[string][]byte) error {
-	current := filepath.Join(root, "current")
-	info, err := os.Lstat(current)
-	if errors.Is(err, os.ErrNotExist) {
-		return nil
-	}
+	outgoing, err := destSnapshotRels(root)
 	if err != nil {
 		return err
 	}
-	if !info.IsDir() || info.Mode()&os.ModeSymlink != 0 {
-		return nil
-	}
+	return pruneManagedLiveDests(home, present, droppedDestRels(outgoing, staged), staged)
+}
+
+func pruneManagedLiveDests(home string, present map[string]string, dropped []string, staged map[string][]byte) error {
 	var removeDirs, removeFiles []string
-	if err := filepath.WalkDir(current, func(path string, entry os.DirEntry, walkErr error) error {
-		if walkErr != nil {
-			return walkErr
-		}
-		if entry.IsDir() {
-			return nil
-		}
-		rel, relErr := filepath.Rel(current, path)
-		if relErr != nil {
-			return relErr
-		}
-		slash := filepath.ToSlash(rel)
-		if _, kept := staged[slash]; kept {
-			return nil
-		}
+	seenDir := map[string]struct{}{}
+	for _, slash := range dropped {
 		live := liveDestPath(home, present, slash)
 		if live == "" {
-			return nil
+			continue
 		}
 		if skillDir, ok := skillDirForRel(slash, live); ok && IsManagedDir(skillDir) {
-			removeDirs = append(removeDirs, skillDir)
-			return nil
+			prefix, prefixOK := skillPrefixForRel(slash)
+			if !prefixOK || !stagedHasPrefix(staged, prefix) {
+				if _, seen := seenDir[skillDir]; !seen {
+					removeDirs = append(removeDirs, skillDir)
+					seenDir[skillDir] = struct{}{}
+				}
+				continue
+			}
+			if info, err := os.Lstat(live); err == nil && info.Mode().IsRegular() && info.Mode()&os.ModeSymlink == 0 {
+				removeFiles = append(removeFiles, live)
+			}
+			continue
 		}
 		body, ok := readRegularFile(live)
 		if !ok || !IsManagedContent(body) {
-			return nil
+			continue
 		}
 		removeFiles = append(removeFiles, live)
-		return nil
-	}); err != nil {
-		return err
 	}
 	for _, dir := range removeDirs {
 		if err := os.RemoveAll(dir); err != nil {
@@ -443,11 +438,148 @@ func pruneDroppedManagedDests(root, home string, present map[string]string, stag
 		}
 	}
 	for _, file := range removeFiles {
-		if err := os.Remove(file); err != nil {
+		if err := os.Remove(file); err != nil && !errors.Is(err, os.ErrNotExist) {
 			return err
 		}
 	}
 	return nil
+}
+
+func destSnapshotRels(root string) ([]string, error) {
+	current := filepath.Join(root, "current")
+	info, err := os.Lstat(current)
+	if errors.Is(err, os.ErrNotExist) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	if !info.IsDir() || info.Mode()&os.ModeSymlink != 0 {
+		return nil, nil
+	}
+	var rels []string
+	err = filepath.WalkDir(current, func(path string, entry os.DirEntry, walkErr error) error {
+		if walkErr != nil || entry.IsDir() {
+			return walkErr
+		}
+		rel, relErr := filepath.Rel(current, path)
+		if relErr != nil {
+			return relErr
+		}
+		rels = append(rels, filepath.ToSlash(rel))
+		return nil
+	})
+	return rels, err
+}
+
+func droppedDestRels(outgoing []string, staged map[string][]byte) []string {
+	var dropped []string
+	for _, rel := range outgoing {
+		if _, kept := staged[rel]; kept {
+			continue
+		}
+		dropped = append(dropped, rel)
+	}
+	return dropped
+}
+
+func projectPresent(matches []ProjectMatch) map[string]string {
+	present := map[string]string{}
+	for _, match := range matches {
+		if match.Name != "" && match.Path != "" {
+			present[match.Name] = match.Path
+		}
+	}
+	return present
+}
+
+func destPresent(root string, matches []ProjectMatch) map[string]string {
+	present := projectPresent(matches)
+	for name, path := range loadDestProjectPaths(root) {
+		if present[name] == "" && path != "" {
+			present[name] = path
+		}
+	}
+	return present
+}
+
+func loadDestProjectPaths(root string) map[string]string {
+	if root == "" {
+		return nil
+	}
+	body, err := os.ReadFile(filepath.Join(root, "applied.json")) // #nosec G304 -- dest apply root is created by this process.
+	if err != nil {
+		return nil
+	}
+	var state ApplyState
+	if json.Unmarshal(body, &state) != nil {
+		return nil
+	}
+	return state.ProjectPaths
+}
+
+func persistDestProjectPaths(root string, present map[string]string) error {
+	path := filepath.Join(root, "applied.json")
+	body, err := os.ReadFile(path) // #nosec G304 -- dest apply root is created by this process.
+	if err != nil {
+		return errors.New("fleet-config apply state failed")
+	}
+	var state ApplyState
+	if json.Unmarshal(body, &state) != nil {
+		return errors.New("fleet-config apply state failed")
+	}
+	state.ProjectPaths = map[string]string{}
+	for name, dest := range present {
+		if name != "" && dest != "" {
+			state.ProjectPaths[name] = dest
+		}
+	}
+	encoded, err := json.Marshal(state)
+	if err != nil {
+		return errors.New("fleet-config apply state failed")
+	}
+	if err := os.WriteFile(path, append(encoded, '\n'), 0o600); err != nil {
+		return errors.New("fleet-config apply state failed")
+	}
+	return nil
+}
+
+func skillPrefixForRel(rel string) (string, bool) {
+	switch {
+	case strings.HasPrefix(rel, "skills/"):
+		skill, file, ok := splitFirst(strings.TrimPrefix(rel, "skills/"))
+		if !ok || file == "" {
+			return "", false
+		}
+		return "skills/" + skill + "/", true
+	case strings.HasPrefix(rel, "projects/"):
+		name, rest, ok := strings.Cut(strings.TrimPrefix(rel, "projects/"), "/")
+		if !ok {
+			return "", false
+		}
+		skillRest, ok := strings.CutPrefix(rest, "skills/")
+		if !ok {
+			return "", false
+		}
+		skill, file, ok := splitFirst(skillRest)
+		if !ok || file == "" {
+			return "", false
+		}
+		return "projects/" + name + "/skills/" + skill + "/", true
+	}
+	return "", false
+}
+
+func stagedHasPrefix(staged map[string][]byte, prefix string) bool {
+	if prefix == "" {
+		return false
+	}
+	for rel := range staged {
+		if strings.HasPrefix(rel, prefix) {
+			return true
+		}
+	}
+	return false
 }
 
 func destSnapshotDigest(files map[string][]byte) string {

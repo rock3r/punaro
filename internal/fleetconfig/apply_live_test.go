@@ -258,6 +258,139 @@ func TestApplyLiveRemovesDroppedManagedSkill(t *testing.T) {
 	}
 }
 
+func TestApplyLiveRetainsSkillWhenNestedFileDropped(t *testing.T) {
+	t.Parallel()
+	home := t.TempDir()
+	project := filepath.Join(home, "src", "punaro")
+	if err := os.MkdirAll(project, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	root := t.TempDir()
+	matches := []ProjectMatch{{Name: "punaro", Path: project, Kind: "matched"}}
+	req := ApplyLiveRequest{Tree: commonMemberTree(skillMarkdown("shared", skillBodyProbe), false), Root: root, Home: home, Matches: matches}
+	if _, err := ApplyLive(req); err != nil {
+		t.Fatal(err)
+	}
+	skillRoot := filepath.Join(project, ".agents", "skills", "shared")
+	nested := filepath.Join(skillRoot, "scripts", "run.sh")
+	if _, err := os.Lstat(nested); err != nil {
+		t.Fatal(err)
+	}
+	req.Tree = Tree{Files: []File{
+		{Path: "AGENTS.md", Data: []byte("# fleet\n")},
+		{Path: "common/shared/SKILL.md", Data: []byte(skillMarkdown("shared", skillBodyProbe))},
+		{Path: "projects/punaro/AGENTS.md", Data: []byte("# punaro\n")},
+		{Path: "projects/punaro/skills/shared/COMMON", Data: []byte("shared\n")},
+	}}
+	if _, err := ApplyLive(req); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Lstat(nested); !os.IsNotExist(err) {
+		t.Fatal("left a dropped nested skill file")
+	}
+	skillDest := filepath.Join(skillRoot, "SKILL.md")
+	got, err := os.ReadFile(skillDest) //nolint:gosec // G304: test fixture under t.TempDir.
+	if err != nil || !strings.Contains(string(got), skillBodyProbe) {
+		t.Fatalf("dropped retained skill while pruning nested file: %q err=%v", got, err)
+	}
+	if !IsManagedDir(skillRoot) {
+		t.Fatal("unmarked retained skill directory while pruning nested file")
+	}
+}
+
+func TestApplyLiveRemovesManagedDestsWhenProjectDropped(t *testing.T) {
+	t.Parallel()
+	home := t.TempDir()
+	punaro := filepath.Join(home, "src", "punaro")
+	other := filepath.Join(home, "src", "other")
+	for _, dir := range []string{punaro, other} {
+		if err := os.MkdirAll(dir, 0o700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	root := t.TempDir()
+	withBoth := Tree{Files: []File{
+		{Path: "AGENTS.md", Data: []byte("# fleet\n")},
+		{Path: "common/shared/SKILL.md", Data: []byte(skillMarkdown("shared", skillBodyProbe))},
+		{Path: "projects/punaro/AGENTS.md", Data: []byte("# punaro\n")},
+		{Path: "projects/punaro/skills/shared/COMMON", Data: []byte("shared\n")},
+		{Path: "projects/other/AGENTS.md", Data: []byte("# other\n")},
+		{Path: "projects/other/skills/shared/COMMON", Data: []byte("shared\n")},
+	}}
+	req := ApplyLiveRequest{
+		Tree:    withBoth,
+		Root:    root,
+		Home:    home,
+		Matches: []ProjectMatch{{Name: "punaro", Path: punaro, Kind: "matched"}, {Name: "other", Path: other, Kind: "matched"}},
+	}
+	if _, err := ApplyLive(req); err != nil {
+		t.Fatal(err)
+	}
+	otherAgents := filepath.Join(other, "AGENTS.md")
+	otherClaude := filepath.Join(other, "CLAUDE.md")
+	otherSkill := filepath.Join(other, ".agents", "skills", "shared", "SKILL.md")
+	for _, path := range []string{otherAgents, otherClaude, otherSkill} {
+		if _, err := os.Lstat(path); err != nil {
+			t.Fatalf("missing first-apply dest %s: %v", path, err)
+		}
+	}
+	req.Tree = Tree{Files: []File{
+		{Path: "AGENTS.md", Data: []byte("# fleet\n")},
+		{Path: "common/shared/SKILL.md", Data: []byte(skillMarkdown("shared", skillBodyProbe))},
+		{Path: "projects/punaro/AGENTS.md", Data: []byte("# punaro\n")},
+		{Path: "projects/punaro/skills/shared/COMMON", Data: []byte("shared\n")},
+	}}
+	req.Matches = []ProjectMatch{{Name: "punaro", Path: punaro, Kind: "matched"}}
+	if _, err := ApplyLive(req); err != nil {
+		t.Fatal(err)
+	}
+	for _, path := range []string{otherAgents, otherClaude, otherSkill} {
+		if _, err := os.Lstat(path); !os.IsNotExist(err) {
+			t.Fatalf("left managed dest after project drop: %s", path)
+		}
+	}
+	punaroAgents, err := os.ReadFile(filepath.Join(punaro, "AGENTS.md")) //nolint:gosec // G304: test fixture under t.TempDir.
+	if err != nil || !IsManagedContent(punaroAgents) {
+		t.Fatalf("dropped retained project dest: %q err=%v", punaroAgents, err)
+	}
+}
+
+func TestApplyLiveRollbackRemovesDestsAbsentFromLastGood(t *testing.T) {
+	t.Parallel()
+	home := t.TempDir()
+	project := filepath.Join(home, "src", "punaro")
+	if err := os.MkdirAll(project, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	root := t.TempDir()
+	matches := []ProjectMatch{{Name: "punaro", Path: project, Kind: "matched"}}
+	v1 := commonMemberTree(skillMarkdown("shared", "copied-skill-v1"), false)
+	req := ApplyLiveRequest{Tree: v1, Root: root, Home: home, Matches: matches}
+	if _, err := ApplyLive(req); err != nil {
+		t.Fatal(err)
+	}
+	v2 := commonMemberTree(skillMarkdown("shared", "copied-skill-v2"), true)
+	req.Tree = v2
+	if _, err := ApplyLive(req); err != nil {
+		t.Fatal(err)
+	}
+	extra := filepath.Join(home, ".agents", "skills", "global-demo", "SKILL.md")
+	if _, err := os.Lstat(extra); err != nil {
+		t.Fatal(err)
+	}
+	if err := RollbackLive(req); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Lstat(extra); !os.IsNotExist(err) {
+		t.Fatal("rollback left dests absent from last-good")
+	}
+	dest := filepath.Join(project, ".agents", "skills", "shared", "SKILL.md")
+	got, err := os.ReadFile(dest) //nolint:gosec // G304: test fixture under t.TempDir.
+	if err != nil || !strings.Contains(string(got), "copied-skill-v1") || strings.Contains(string(got), "copied-skill-v2") {
+		t.Fatalf("rollback did not restore copied skill: %q err=%v", got, err)
+	}
+}
+
 func applyCopiedCommonSkill(t *testing.T, skillBody string, addendums map[string]string) (home, project, skillDest, addendumRoot string) {
 	t.Helper()
 	home = t.TempDir()

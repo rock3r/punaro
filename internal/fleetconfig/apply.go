@@ -16,6 +16,7 @@ type ApplyState struct {
 	PrefixDigests    map[string]string `json:"prefix_digests,omitempty"`
 	LastGoodDigest   string            `json:"last_good_digest,omitempty"`
 	ReportGeneration int64             `json:"report_generation,omitempty"`
+	ProjectPaths     map[string]string `json:"project_paths,omitempty"`
 }
 
 var reconcileMu sync.Mutex
