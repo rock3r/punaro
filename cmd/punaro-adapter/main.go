@@ -1133,11 +1133,7 @@ func loadConfig() (adapterConfig, error) {
 	if err != nil {
 		return adapterConfig{}, err
 	}
-	for key := range adapterProfileKeys {
-		if value := strings.TrimSpace(os.Getenv(key)); value != "" {
-			settings[key] = value
-		}
-	}
+	applyAdapterEnvironment(settings)
 	relayURL := settings["PUNARO_ADAPTER_RELAY_URL"]
 	machineID := settings["PUNARO_MACHINE_ID"]
 	keyFile := settings["PUNARO_MACHINE_PRIVATE_KEY_FILE"]
@@ -1242,6 +1238,22 @@ func loadClientIdentity(settings map[string]string, relayURL, machineID string, 
 // loadAdapterProfile reads the installer-managed profile as plain data rather
 // than evaluating it as shell or service-manager syntax. A non-empty process
 // environment setting intentionally overrides the corresponding profile entry.
+func applyAdapterEnvironment(settings map[string]string) {
+	for key := range adapterProfileKeys {
+		if value := strings.TrimSpace(os.Getenv(key)); value != "" {
+			settings[key] = value
+		}
+	}
+	keyEnv := strings.TrimSpace(os.Getenv("PUNARO_MACHINE_PRIVATE_KEY_FILE"))
+	credentialEnv := strings.TrimSpace(os.Getenv("PUNARO_DEVICE_CREDENTIAL_FILE"))
+	switch {
+	case keyEnv != "" && credentialEnv == "":
+		delete(settings, "PUNARO_DEVICE_CREDENTIAL_FILE")
+	case credentialEnv != "" && keyEnv == "":
+		delete(settings, "PUNARO_MACHINE_PRIVATE_KEY_FILE")
+	}
+}
+
 func loadAdapterProfile() (map[string]string, error) {
 	path := selectedAdapterProfilePath()
 	explicitPath := path != ""

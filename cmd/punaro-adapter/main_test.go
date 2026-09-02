@@ -1893,6 +1893,46 @@ func TestEnvironmentSettingsExplicitlyOverrideInstalledProfile(t *testing.T) {
 	}
 }
 
+func TestLoadConfigEnvKeyFileOverridesProfileDeviceCredential(t *testing.T) {
+	clearAdapterEnvironment(t)
+	profile := writeInstallerProfile(t, "https://profile.example")
+	home := filepath.Dir(filepath.Dir(filepath.Dir(profile)))
+	t.Setenv("HOME", home)
+	raw, err := os.ReadFile(profile) // #nosec G304 -- test fixture path from writeInstallerProfile.
+	if err != nil {
+		t.Fatal(err)
+	}
+	keyLine := ""
+	for _, line := range strings.Split(string(raw), "\n") {
+		if strings.HasPrefix(line, "PUNARO_MACHINE_PRIVATE_KEY_FILE=") {
+			keyLine = line
+			break
+		}
+	}
+	if keyLine == "" {
+		t.Fatal("installer profile missing private key path")
+	}
+	keyFile := strings.TrimPrefix(keyLine, "PUNARO_MACHINE_PRIVATE_KEY_FILE=")
+	credentialFile := filepath.Join(filepath.Dir(profile), "device.credential")
+	credential := "11111111-1111-4111-8111-111111111111.AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
+	if err := os.WriteFile(credentialFile, []byte(credential+"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	rewritten := strings.Replace(string(raw), keyLine, "PUNARO_DEVICE_CREDENTIAL_FILE="+credentialFile, 1)
+	if err := os.WriteFile(profile, []byte(rewritten), 0o600); err != nil { // #nosec G703 -- test fixture path from writeInstallerProfile.
+		t.Fatal(err)
+	}
+	t.Setenv("PUNARO_MACHINE_PRIVATE_KEY_FILE", keyFile)
+
+	config, err := loadConfig()
+	if err != nil {
+		t.Fatalf("env key file over profile device credential: %v", err)
+	}
+	if len(config.privateKey) != ed25519.PrivateKeySize || config.deviceCredential != "" {
+		t.Fatalf("wanted exclusive env private-key mode, credential=%q key=%d", config.deviceCredential, len(config.privateKey))
+	}
+}
+
 func TestLoadConfigRequiresMatchingOptInClientIdentityBeforeTransport(t *testing.T) {
 	clearAdapterEnvironment(t)
 	profile := writeInstallerProfile(t, "https://relay.example")
