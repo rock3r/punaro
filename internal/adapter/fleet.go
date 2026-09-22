@@ -78,9 +78,7 @@ func ReconcileFleetOnce(ctx context.Context, request FleetReconcileRequest) (Fle
 			result.State = "failed"
 		} else {
 			result.State = reconcileState(liveTrailers)
-			if request.Local.ClaudeAliases {
-				result.AliasState = aliasState(request.Local.ClaudeAliases, applyClaudeAliases(request, tree, matches))
-			}
+			result.AliasState = aliasState(request.Local.ClaudeAliases, applyClaudeAliases(request, tree, matches))
 			if result.State == "current" && unsupportedHarness(request.Home) {
 				result.State = "unsupported"
 			}
@@ -126,7 +124,6 @@ func ReconcileFleetOnce(ctx context.Context, request FleetReconcileRequest) (Fle
 		return result, err
 	}
 	matches := fleetconfig.MatchProjects(request.Local.ProjectBasePath, request.Local.ProjectPathOverrides, tree.Projects(), nil)
-	aliases := map[string]fleetconfig.AliasResult{}
 	liveTrailers, err := projectLiveTree(request, tree, prefixes)
 	trailers = mergeTrailerResults(trailers, liveTrailers)
 	if err != nil {
@@ -134,9 +131,7 @@ func ReconcileFleetOnce(ctx context.Context, request FleetReconcileRequest) (Fle
 		_ = putFleetStatus(ctx, request, desired, result, reportGeneration)
 		return result, err
 	}
-	if request.Local.ClaudeAliases {
-		aliases = applyClaudeAliases(request, tree, matches)
-	}
+	aliases := applyClaudeAliases(request, tree, matches)
 	result := FleetReconcileResult{
 		State:             reconcileState(trailers),
 		AppliedDigest:     desired.Digest,
@@ -352,11 +347,12 @@ func liveDestination(home string, matched map[string]string, path string) (strin
 func applyClaudeAliases(request FleetReconcileRequest, tree fleetconfig.Tree, matches []fleetconfig.ProjectMatch) map[string]fleetconfig.AliasResult {
 	results := map[string]fleetconfig.AliasResult{}
 	home := request.Home
+	enabled := request.Local.ClaudeAliases
 	if home != "" {
-		if result, err := fleetconfig.CreateAlias(filepath.Join(home, "AGENTS.md"), filepath.Join(home, "CLAUDE.md"), true); err == nil || result.State != "" {
+		if result, err := fleetconfig.CreateAlias(filepath.Join(home, "AGENTS.md"), filepath.Join(home, "CLAUDE.md"), enabled); err == nil || result.State != "" {
 			results["global"] = result
 		}
-		if result, _ := fleetconfig.CreateAlias(filepath.Join(home, ".agents", "skills"), filepath.Join(home, ".claude", "skills"), true); result.State != "" {
+		if result, _ := fleetconfig.CreateAlias(filepath.Join(home, ".agents", "skills"), filepath.Join(home, ".claude", "skills"), enabled); result.State != "" {
 			results["global-skills"] = result
 		}
 	}
@@ -364,9 +360,9 @@ func applyClaudeAliases(request FleetReconcileRequest, tree fleetconfig.Tree, ma
 		if match.Path == "" {
 			continue
 		}
-		result, _ := fleetconfig.CreateAlias(filepath.Join(match.Path, "AGENTS.md"), filepath.Join(match.Path, "CLAUDE.md"), true)
+		result, _ := fleetconfig.CreateAlias(filepath.Join(match.Path, "AGENTS.md"), filepath.Join(match.Path, "CLAUDE.md"), enabled)
 		results[match.Name] = result
-		skillResult, _ := fleetconfig.CreateAlias(filepath.Join(match.Path, ".agents", "skills"), filepath.Join(match.Path, ".claude", "skills"), true)
+		skillResult, _ := fleetconfig.CreateAlias(filepath.Join(match.Path, ".agents", "skills"), filepath.Join(match.Path, ".claude", "skills"), enabled)
 		results[match.Name+"-skills"] = skillResult
 	}
 	_ = tree

@@ -257,9 +257,10 @@ func TestReconcileFleetOnceProjectsClaudeAliasesAndUnsupportedHarness(t *testing
 	if err != nil {
 		t.Fatal(err)
 	}
+	root := t.TempDir()
 	result, err := ReconcileFleetOnce(context.Background(), FleetReconcileRequest{
 		Client: client,
-		Root:   t.TempDir(),
+		Root:   root,
 		Home:   home,
 		Local:  fleetconfig.LocalConfig{Schema: 1, ProjectBasePath: base, ClaudeAliases: true},
 	})
@@ -277,6 +278,32 @@ func TestReconcileFleetOnceProjectsClaudeAliasesAndUnsupportedHarness(t *testing
 	}
 	if _, err := os.Lstat(filepath.Join(base, "punaro", "CLAUDE.md")); err != nil {
 		t.Fatalf("project alias missing: %v", err)
+	}
+	if _, err := os.Lstat(filepath.Join(base, "punaro", ".claude", "skills")); err != nil {
+		t.Fatalf("project skills alias missing: %v", err)
+	}
+
+	result, err = ReconcileFleetOnce(context.Background(), FleetReconcileRequest{
+		Client: client,
+		Root:   root,
+		Home:   home,
+		Local:  fleetconfig.LocalConfig{Schema: 1, ProjectBasePath: base, ClaudeAliases: false},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.AliasState != "disabled" {
+		t.Fatalf("disabled result=%#v", result)
+	}
+	for _, path := range []string{
+		filepath.Join(home, "CLAUDE.md"),
+		filepath.Join(home, ".claude", "skills"),
+		filepath.Join(base, "punaro", "CLAUDE.md"),
+		filepath.Join(base, "punaro", ".claude", "skills"),
+	} {
+		if _, err := os.Lstat(path); !os.IsNotExist(err) {
+			t.Fatalf("disabled alias still exists at %s: %v", path, err)
+		}
 	}
 }
 
