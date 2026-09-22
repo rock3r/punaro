@@ -13,6 +13,99 @@ import (
 
 const updateTargetImage = "registry.example/punaro@sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
 
+func TestUpdateWithPublishedMailCutover(t *testing.T) {
+	for _, action := range []string{"resume", "abort", "publish-and-complete"} {
+		t.Run(action, func(t *testing.T) {
+			request := installedUpdateRequest(t)
+			installation, err := Load(request.Directory)
+			if err != nil {
+				t.Fatal(err)
+			}
+			installation = configureTestRelayMachines(t, installation)
+			publication := MailCutoverPublication{
+				Version: 1, EpochID: "019f7f07-8b88-7c12-a394-b663274a6555",
+				TargetIdentity: strings.Repeat("a", 64), SourceFingerprint: strings.Repeat("b", 64),
+			}
+			if _, err := PublishMailCutover(installation.Directory, publication); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := StageUpdate(request); err != nil {
+				t.Fatal(err)
+			}
+			switch action {
+			case "resume":
+				_, err = ResumeUpdateStage(request)
+			case "abort":
+				err = AbortStage(request)
+			case "publish-and-complete":
+				if _, err = PublishUpdate(request); err == nil {
+					_, err = PublishUpdate(request)
+				}
+				if err == nil {
+					err = CompleteStage(request)
+				}
+			}
+			if err != nil {
+				t.Fatalf("%s with unchanged cutover metadata: %v", action, err)
+			}
+			loaded, err := Load(request.Directory)
+			if err != nil || loaded.MailCutover == nil || *loaded.MailCutover != publication {
+				t.Fatalf("cutover publication changed during %s: %v", action, err)
+			}
+		})
+	}
+}
+
+func TestUpdateRejectsChangedCutoverState(t *testing.T) {
+	cases := []struct {
+		name   string
+		change func(*Installation)
+	}{
+		{name: "removed", change: func(i *Installation) { i.MailCutover = nil }},
+		{name: "epoch", change: func(i *Installation) {
+			i.MailCutover.EpochID = "019f7f07-8b88-7c12-a394-b663274a6556"
+		}},
+		{name: "target", change: func(i *Installation) { i.MailCutover.TargetIdentity = strings.Repeat("c", 64) }},
+		{name: "source", change: func(i *Installation) { i.MailCutover.SourceFingerprint = strings.Repeat("c", 64) }},
+		{name: "unrelated field", change: func(i *Installation) { i.OwnerName = "different owner" }},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			request := installedUpdateRequest(t)
+			installation, err := Load(request.Directory)
+			if err != nil {
+				t.Fatal(err)
+			}
+			installation = configureTestRelayMachines(t, installation)
+			publication := MailCutoverPublication{
+				Version: 1, EpochID: "019f7f07-8b88-7c12-a394-b663274a6555",
+				TargetIdentity: strings.Repeat("a", 64), SourceFingerprint: strings.Repeat("b", 64),
+			}
+			installation, err = PublishMailCutover(installation.Directory, publication)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if _, err := StageUpdate(request); err != nil {
+				t.Fatal(err)
+			}
+			tc.change(&installation)
+			body, err := indentedJSON(installation)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(ConfigFile(request.Directory), body, 0o600); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := ResumeUpdateStage(request); !errors.Is(err, ErrUpdateStageConflict) {
+				t.Fatalf("changed installation resumed: %v", err)
+			}
+			if err := AbortStage(request); !errors.Is(err, ErrUpdateStageConflict) {
+				t.Fatalf("changed installation aborted: %v", err)
+			}
+		})
+	}
+}
+
 func installedUpdateRequest(t *testing.T) UpdateStage {
 	t.Helper()
 	options := validInitOptions(t)
