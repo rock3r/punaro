@@ -254,12 +254,12 @@ func resumeUpdateStage(request UpdateStage) (StagedUpdate, error) {
 	}
 	previous := journal.previous(request.Directory)
 	candidate := journal.candidate(request.Directory)
-	switch current {
-	case previous:
+	switch {
+	case sameInstallation(current, previous):
 		if journal.Published {
 			return StagedUpdate{}, ErrUpdateStageConflict
 		}
-	case candidate:
+	case sameInstallation(current, candidate):
 		if len(CheckPaths(current)) != 0 {
 			return StagedUpdate{}, ErrUpdateStageConflict
 		}
@@ -291,7 +291,7 @@ func PublishUpdate(request UpdateStage) (Installation, error) {
 	}
 	candidate := journal.candidate(request.Directory)
 	if stage.Published {
-		if current, loadErr := Load(request.Directory); loadErr == nil && current == candidate && len(CheckPaths(current)) == 0 {
+		if current, loadErr := Load(request.Directory); loadErr == nil && sameInstallation(current, candidate) && len(CheckPaths(current)) == 0 {
 			return current, nil
 		}
 		return Installation{}, ErrUpdateStageConflict
@@ -353,10 +353,10 @@ func AbortStage(request UpdateStage) error {
 		return ErrUpdateStageConflict
 	}
 	previous := journal.previous(request.Directory)
-	if journal.Published || current == journal.candidate(request.Directory) {
+	if journal.Published || sameInstallation(current, journal.candidate(request.Directory)) {
 		return ErrUpdateAlreadyPublished
 	}
-	if current != previous {
+	if !sameInstallation(current, previous) {
 		return ErrUpdateStageConflict
 	}
 	if err := replacePublishedFile(EnvFile(request.Directory), []byte(daemonEnv(previous)), request.UpdateID); err != nil || replacePublishedFile(OverrideFile(request.Directory), []byte(composeOverride()), request.UpdateID) != nil {
@@ -441,7 +441,7 @@ func CompleteStage(request UpdateStage) error {
 		return ErrUpdateStageConflict
 	}
 	current, err := Load(request.Directory)
-	if err != nil || current != journal.candidate(request.Directory) || len(CheckPaths(current)) != 0 {
+	if err != nil || !sameInstallation(current, journal.candidate(request.Directory)) || len(CheckPaths(current)) != 0 {
 		return ErrUpdateStageConflict
 	}
 	if err := os.RemoveAll(updateStageRoot(request.Directory)); err != nil || syncDirectory(request.Directory) != nil {
@@ -460,6 +460,19 @@ func (request UpdateStage) validate() error {
 func newUpdateJournal(request UpdateStage, installation Installation) updateJournal {
 	installation.Directory = ""
 	return updateJournal{Version: updateJournalVersion, UpdateID: request.UpdateID, PreviousRelease: request.PreviousRelease, PreviousImage: request.PreviousImage, TargetRelease: request.TargetRelease, TargetImage: request.TargetImage, PreviousInstallation: installation}
+}
+
+// sameInstallation compares durable values, not addresses allocated by JSON decoding.
+func sameInstallation(left, right Installation) bool {
+	if (left.MailCutover == nil) != (right.MailCutover == nil) {
+		return false
+	}
+	if left.MailCutover != nil && *left.MailCutover != *right.MailCutover {
+		return false
+	}
+	left.MailCutover = nil
+	right.MailCutover = nil
+	return left == right
 }
 
 func (journal updateJournal) valid() bool {
