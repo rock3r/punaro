@@ -178,6 +178,15 @@ Only the offline-signature publisher can make those stable assets visible.
    `minimum_bootstrap_release=v0.1.0-alpha.8` and
    `supported_from=v0.1.0-alpha.11`; alpha.11 clients can exercise the built-in
    signed update before installing the matching alpha.12 plugin and skills.
+
+   Alpha.13 packages rollback-aware doctor checks, service-manager isolation,
+   signed server-update/catalog enforcement, and fleet-managed agent guidance
+   plus skill projection without changing the signed-slot or fixed-bootstrap
+   protocol. Dispatch `v0.1.0-alpha.13` with
+   `minimum_bootstrap_release=v0.1.0-alpha.8` and
+   `supported_from=v0.1.0-alpha.11,v0.1.0-alpha.12`; installed alpha.11 and
+   alpha.12 clients can exercise the built-in signed update before converging
+   the matching alpha.13 plugin, skills, and fleet policy.
 3. Wait for the draft release to appear. The live `catalog` prerelease is not
    touched by the unsigned workflow.
 4. Generate the offline key once, on an air-gapped or owner-only machine, and

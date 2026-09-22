@@ -127,7 +127,7 @@ func TestFleetDoctorCLIAggregatesOnlyLocallyVerifiedSignedReports(t *testing.T) 
 	}
 	stdout.Reset()
 	stderr.Reset()
-	if code := runFleetDoctorAt(args, &stdout, &stderr, time.Date(2026, 9, 1, 0, 0, 0, 0, time.UTC)); code != 2 || stdout.Len() != 0 {
+	if code := runFleetDoctorAt(args, &stdout, &stderr, time.Now().Add(48*time.Hour)); code != 2 || stdout.Len() != 0 {
 		t.Fatalf("expired catalog exit=%d stdout=%q stderr=%q", code, stdout.String(), stderr.String())
 	}
 }
@@ -158,7 +158,7 @@ func newFleetDoctorFixture(t *testing.T) (string, string, string, string) {
 	}
 	assembled, err := punarorelease.Assemble(punarorelease.AssembleRequest{
 		Directory: artifacts, Release: "v0.1.0", Sequence: 1,
-		PublishedAt: time.Date(2026, 8, 23, 0, 0, 0, 0, time.UTC), ExpiresAt: time.Date(2026, 9, 1, 0, 0, 0, 0, time.UTC),
+		PublishedAt: time.Now().Add(-time.Hour), ExpiresAt: time.Now().Add(24 * time.Hour),
 		MinimumSafeSequence: 1, CatalogSequence: 1, ComposeSHA256: strings.Repeat("a", 64), MigrationManifestSHA256: strings.Repeat("b", 64),
 		Database: punarorelease.SchemaRange{Min: 10, Max: 44, Target: 44, RollbackFloor: 10}, PostgreSQLMajor: 18,
 		GatewayProtocol: punarorelease.ProtocolRange{Min: 1, Max: 1}, ClientProtocol: punarorelease.ProtocolRange{Min: 1, Max: 1},
@@ -355,8 +355,8 @@ func newCLIOrigin(t *testing.T, dir string) (string, string) {
 		Directory:               build,
 		Release:                 "v0.1.0",
 		Sequence:                1,
-		PublishedAt:             time.Date(2026, 8, 16, 12, 0, 0, 0, time.UTC),
-		ExpiresAt:               time.Date(2026, 9, 1, 12, 0, 0, 0, time.UTC),
+		PublishedAt:             time.Now().Add(-time.Hour),
+		ExpiresAt:               time.Now().Add(24 * time.Hour),
 		MinimumSafeSequence:     1,
 		CatalogSequence:         1,
 		ComposeSHA256:           strings.Repeat("a", 64),
