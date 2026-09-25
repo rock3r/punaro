@@ -45,9 +45,10 @@ stops the watcher with an error that names the key.
 | `trusted_author_associations` | `["OWNER", "MEMBER", "COLLABORATOR"]` | Comments from these authors are review items. |
 | `review_bot_login_keywords` | `["codex"]` | Comments from `[bot]` accounts whose login contains one of these words are review items. |
 | `max_session_minutes` | `90` | The default for `--max-session-minutes`. |
-| `require_up_to_date` | `"auto"` | Whether a branch that is behind its base must be updated before merge. `"auto"` reads the base branch's protection and rulesets. `true` or `false` skips that lookup. |
+| `require_up_to_date` | `"auto"` | Whether a branch that is behind its base must be updated before merge. `"auto"` reads the base branch's protection and rulesets, and counts any answer it cannot be sure of (such as a 403) as "required". `true` or `false` skips that lookup: set `false` when you know the base has no strict rule. |
 | `codex.enabled` | `true` | Watch the Codex review bot. |
 | `codex.required` | `false` | Require a Codex review of the head, even on a PR where Codex never posted. |
+| `codex.idle_wait_minutes` | `10` | Without `codex.required`: how long to wait after the checks finish for Codex to start reviewing the head. After that, the missing review no longer blocks. |
 | `pr_af.enabled` | `false` | Watch the label-triggered PR-AF review. The other `pr_af` keys describe it. |
 | `pr_af.label` | `"pr-af"` | The PR label that asks for a PR-AF review. |
 | `pr_af.workflow_names`, `pr_af.check_names` | `[]` | The names of the PR-AF workflow and check. A name matches either list. |
@@ -127,7 +128,7 @@ again.
 | `diagnose_skipping_checks` | A check that should run was skipped or neutral. Find out why. | yes | yes |
 | `stop_non_retryable_failure` | A workflow that the watcher does not rerun failed. Fix it first. | yes | yes |
 | `stop_exhausted_retries` | Reruns used the budget for this SHA (3 by default). The owner must investigate. | yes | yes |
-| `stop_ready_to_merge` | CI is green, no review blocks it, and there are no conflicts. | yes | yes |
+| `stop_ready_to_merge` | CI is green, no review blocks it, and there are no conflicts. When `codex_gate.idle_wait_expired` is `true`, Codex did not review this head: tell the owner. | yes | yes |
 | `stop_draft_pr` | CI is green but the PR is a draft. Ask the owner to mark it ready. | yes | yes |
 | `stop_pr_closed` | The PR is merged or closed. | yes | yes |
 | `stop_session_timeout` | The session limit has passed. It comes with the last snapshot's actions. Report and stop. | yes | yes |
@@ -162,7 +163,10 @@ Review Summary" table on the PR with the status and commit of its latest review.
 watcher also requires a **Completed** review of the head commit (`codex_gate.head_reviewed`). A PR without the
 table does not have Codex active, so this check does not apply, unless `codex.required` is `true`. With
 `codex.required`, the watcher asks for a review (`request_codex_review`) once the checks are done and the grace period
-has passed, when Codex is idle and has not reviewed the head. The table is a status, not a finding, so the watcher never reports it as a review item. When the reactions cannot be read, the
+has passed, when Codex is idle and has not reviewed the head. Without `codex.required`, the watcher waits
+`codex.idle_wait_minutes` for Codex to start. After that, the missing review no longer blocks, and
+`codex_gate.idle_wait_expired` and `codex_gate.note` say that Codex did not review the head. A running review (a 👀
+reaction, or a "Running" row for the head) always blocks. The table is a status, not a finding, so the watcher never reports it as a review item. When the reactions cannot be read, the
 gate stays closed.
 
 **PR-AF** runs when the PR has the `pr_af.label` label, and again on every push while the label stays. Its check is

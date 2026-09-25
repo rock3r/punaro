@@ -43,6 +43,7 @@ class ConfigTests(unittest.TestCase):
         self.assertEqual(config["sync"]["keep"], [])
         self.assertTrue(config["codex"]["enabled"])
         self.assertFalse(config["codex"]["required"])
+        self.assertEqual(config["codex"]["idle_wait_minutes"], 10)
         self.assertNotIn("coderabbit", config)
         self.assertFalse(config["pr_af"]["enabled"])
         self.assertEqual(config["pr_af"]["label"], "pr-af")
@@ -96,6 +97,7 @@ class ConfigTests(unittest.TestCase):
             {"version": "1"},
             {"require_up_to_date": "yes"},
             {"require_up_to_date": 1},
+            {"codex": {"idle_wait_minutes": -1}},
             {"sync": {"keep": "skill-source.json"}},
         ]
         for raw in bad_values:
@@ -1417,8 +1419,12 @@ class UpToDateRequirementTests(unittest.TestCase):
         self.addCleanup(watch._UP_TO_DATE_CACHE.clear)
 
     @staticmethod
-    def _http_error(code):
-        return watch.GhCommandError(f"GitHub CLI command failed: gh api x\nstderr: gh: Not Found (HTTP {code})")
+    def _http_error(code, message="Not Found"):
+        return watch.GhCommandError(
+            f"GitHub CLI command failed: gh api x\n"
+            f'stdout: {{"message":"{message}","status":"{code}"}}\n'
+            f"stderr: gh: {message} (HTTP {code})"
+        )
 
     def _lookup(self, protection, rules, config=None):
         """Run the auto lookup with fake protection and ruleset answers (a value or an error)."""
@@ -1467,12 +1473,40 @@ class UpToDateRequirementTests(unittest.TestCase):
         result, _, _ = self._lookup(self._http_error(404), rules)
         self.assertTrue(result)
 
-    def test_404_and_403_mean_not_required(self):
-        for code in (403, 404):
-            with self.subTest(code=code):
+    def test_an_unprotected_branch_without_rulesets_is_not_required(self):
+        for message in ("Branch not protected", "Required status checks not enabled"):
+            with self.subTest(message=message):
                 watch._UP_TO_DATE_CACHE.clear()
-                result, _, _ = self._lookup(self._http_error(code), self._http_error(code))
+                result, _, _ = self._lookup(self._http_error(404, message), [])
                 self.assertFalse(result)
+
+    def test_403_is_unknown_and_fails_closed(self):
+        # The protection endpoint needs admin access, so a collaborator token gets 403
+        # even when strict checks are required. The rulesets list can still be empty,
+        # because legacy branch protection is separate from rulesets.
+        for message in ("Resource not accessible by integration",
+                        "Upgrade to GitHub Pro or make this repository public to enable this feature."):
+            with self.subTest(message=message):
+                watch._UP_TO_DATE_CACHE.clear()
+                result, _, _ = self._lookup(self._http_error(403, message), [])
+                self.assertTrue(result)
+
+    def test_a_404_without_a_known_message_is_unknown_and_fails_closed(self):
+        result, _, _ = self._lookup(self._http_error(404, "Not Found"), [])
+        self.assertTrue(result)
+
+    def test_a_failed_ruleset_lookup_is_unknown_and_fails_closed(self):
+        for rules_error in (self._http_error(403, "Forbidden"), self._http_error(404, "Not Found")):
+            with self.subTest(rules_error=str(rules_error)):
+                watch._UP_TO_DATE_CACHE.clear()
+                result, _, _ = self._lookup({"strict": False}, rules_error)
+                self.assertTrue(result)
+
+    def test_an_unknown_answer_is_not_cached(self):
+        self._lookup(self._http_error(403, "Forbidden"), [])
+        result, json_calls, _ = self._lookup({"strict": False}, [])
+        self.assertFalse(result)
+        json_calls.assert_called_once()
 
     def test_other_lookup_failures_fail_closed(self):
         result, _, _ = self._lookup(watch.GhCommandError("GitHub CLI command timed out: gh api x"), [])
@@ -2265,6 +2299,79 @@ class PrAfSnapshotTests(unittest.TestCase):
         self.assertFalse(watch.needs_agent_attention(["idle", "wait_pr_af", "wait_codex"]))
         self.assertTrue(watch.needs_agent_attention(["wait_pr_af", "diagnose_ci_failure"]))
         self.assertFalse(watch.needs_agent_attention(["diagnose_branch_behind", "wait_pr_af"]))
+
+
+class CodexIdleWaitTests(unittest.TestCase):
+    """Codex is active on the PR but never starts a review of the head. Without
+    codex.required the watcher waits a bounded time, then stops treating it as blocking."""
+
+    STALE = {"reviewing": False, "status": "idle", "active": True, "head_reviewed": False, "head_status": "none"}
+
+    def _apply(self, gate, elapsed, checks=None, config=None):
+        with configured(config or {}):
+            return watch.apply_codex_idle_wait(dict(gate), checks or _green_checks(), elapsed)
+
+    def test_codex_is_awaited_within_the_idle_wait(self):
+        gate = self._apply(self.STALE, 9 * 60)
+        self.assertFalse(gate.get("idle_wait_expired"))
+        self.assertEqual(_actions_for(_open_pr(), codex_gate=gate, checks_terminal_elapsed=9 * 60), ["wait_codex"])
+
+    def test_missing_head_review_stops_blocking_after_the_idle_wait(self):
+        gate = self._apply(self.STALE, 10 * 60)
+        self.assertTrue(gate["idle_wait_expired"])
+        self.assertIn("did not review", gate["note"])
+        self.assertEqual(_actions_for(_open_pr(), codex_gate=gate, checks_terminal_elapsed=10 * 60),
+                         ["stop_ready_to_merge"])
+
+    def test_idle_wait_comes_from_config(self):
+        gate = self._apply(self.STALE, 120, config={"codex": {"idle_wait_minutes": 2}})
+        self.assertTrue(gate["idle_wait_expired"])
+
+    def test_a_running_review_still_blocks_after_the_idle_wait(self):
+        for gate in (dict(self.STALE, reviewing=True, status="in_progress"), dict(self.STALE, head_status="running")):
+            with self.subTest(gate=gate):
+                applied = self._apply(gate, 60 * 60)
+                self.assertFalse(applied.get("idle_wait_expired"))
+                self.assertEqual(_actions_for(_open_pr(), codex_gate=applied), ["wait_codex"])
+
+    def test_the_idle_wait_starts_only_once_the_checks_are_done(self):
+        gate = self._apply(self.STALE, None, checks=_green_checks(all_terminal=False, pending_count=1))
+        self.assertFalse(gate.get("idle_wait_expired"))
+
+    def test_an_unknown_codex_state_is_never_skipped(self):
+        gate = self._apply(dict(self.STALE, status="unknown"), 60 * 60)
+        self.assertFalse(gate.get("idle_wait_expired"))
+
+    def test_required_codex_is_requested_instead_of_skipped(self):
+        gate = self._apply(self.STALE, 60 * 60, config={"codex": {"required": True}})
+        self.assertFalse(gate.get("idle_wait_expired"))
+        with configured({"codex": {"required": True}}):
+            actions = _actions_for(_open_pr(), codex_gate=gate, checks_terminal_elapsed=60 * 60)
+        self.assertEqual(actions, ["request_codex_review"])
+        self.assertTrue(watch.needs_agent_attention(actions))
+
+    def test_snapshot_marks_a_head_that_codex_did_not_review(self):
+        pr = {"repo": "owner/repo", "number": 21, "head_sha": "abc123", "labels": [], "base_branch": "main",
+              "closed": False, "merged": False, "mergeable": "MERGEABLE",
+              "merge_state_status": "CLEAN", "review_decision": ""}
+        args = SimpleNamespace(pr="21", repo=None, state_file=None, max_flaky_retries=3)
+        now = watch.time.time()
+        with tempfile.TemporaryDirectory() as tmp, configured():
+            state_path = watch.Path(tmp) / "s.json"
+            state_path.write_text(json.dumps({
+                "last_snapshot_at": now, "checks_terminal_sha": "abc123",
+                "checks_went_terminal_at": int(now) - 11 * 60, "last_seen_head_sha": "abc123",
+            }), encoding="utf-8")
+            with patch.object(watch, "resolve_pr", return_value=pr), \
+                    patch.object(watch, "default_state_file_for", return_value=state_path), \
+                    patch.object(watch, "get_pr_checks", return_value=[_ci_pass()]), \
+                    patch.object(watch, "get_authenticated_login", return_value="octocat"), \
+                    patch.object(watch, "collect_codex_gate", return_value=dict(self.STALE)), \
+                    patch.object(watch, "fetch_new_review_items", return_value=([], [])):
+                snapshot, _ = watch.collect_snapshot(args)
+
+        self.assertEqual(snapshot["actions"], ["stop_ready_to_merge"])
+        self.assertTrue(snapshot["codex_gate"]["idle_wait_expired"])
 
 
 class SnapshotOrderingTests(unittest.TestCase):

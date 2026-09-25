@@ -11,7 +11,8 @@
   "require_up_to_date": "auto",
   "codex": {
     "enabled": true,
-    "required": false
+    "required": false,
+    "idle_wait_minutes": 10
   },
   "pr_af": {
     "enabled": false,

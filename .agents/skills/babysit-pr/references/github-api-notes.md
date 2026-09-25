@@ -65,7 +65,10 @@ gh api "repos/{owner}/{repo}/rules/branches/<base>?per_page=100&page=<p>"
 The watcher makes these calls only for a PR whose `mergeStateStatus` is `BEHIND`, and only when
 `require_up_to_date` is `"auto"`. It remembers the answer for the rest of the run. The base requires up-to-date
 branches when `strict` is `true`, or when a `required_status_checks` rule has
-`parameters.strict_required_status_checks_policy` set to `true`. A 403 or 404 answer means no such requirement.
+`parameters.strict_required_status_checks_policy` set to `true`. Only a definitive answer means no such
+requirement: a 404 that says "Branch not protected" or "Required status checks not enabled", or `strict: false`, and
+in both cases no strict ruleset. The protection call needs repository administration access, so a 403 proves
+nothing. A 403, any other 404, and every other failure count as "required", and the watcher does not remember them.
 
 ## Review endpoints
 
