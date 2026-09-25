@@ -32,6 +32,19 @@ class PrChecksExitCodeTests(unittest.TestCase):
                     )
 
 
+    def test_get_pr_checks_still_fails_without_json(self):
+        # Exit 1 also means "no pull request found". Without the JSON payload
+        # there is nothing to report, so it must stay a command failure.
+        error = subprocess.CalledProcessError(
+            1,
+            ["gh", "pr", "checks"],
+            output="",
+            stderr="no pull requests found",
+        )
+        with patch.object(watch.subprocess, "run", side_effect=error):
+            with self.assertRaises(watch.GhCommandError):
+                watch.get_pr_checks("62", repo="rock3r/punaro")
+
 class RetryEligibilityTests(unittest.TestCase):
     def _base_pr(self):
         return {
@@ -167,20 +180,6 @@ class RetryEligibilityTests(unittest.TestCase):
             checks_summary={"all_terminal": True, "failed_count": 0, "pending_count": 0, "passed_count": 2},
             new_review_items=[], checks_terminal_elapsed=120, blocking_review_items=[],
         ))
-
-    def test_is_blocking_review_item_blocks_when_thread_resolution_is_unknown(self):
-        created_at = "2026-01-01T00:00:00Z"
-        created_at_seconds = watch.datetime.fromisoformat("2026-01-01T00:00:00+00:00").timestamp()
-        stale_now = created_at_seconds + watch.BLOCKING_REVIEW_ITEM_FRESH_SECONDS + 1
-        item = {
-            "kind": "review_comment",
-            "commit_id": "abc123",
-            "created_at": created_at,
-        }
-
-        self.assertTrue(
-            watch.is_blocking_review_item(item, head_sha="abc123", now_seconds=stale_now)
-        )
 
     def test_recommend_actions_surfaces_merge_conflict(self):
         pr = self._base_pr()
@@ -1064,6 +1063,8 @@ class RetryEligibilityTests(unittest.TestCase):
                 authenticated_login="octocat",
             )
 
+        # Without thread state an old comment may still be open: block rather
+        # than guess from its age.
         self.assertEqual(len(blocking_items), 1)
         self.assertEqual(blocking_items[0]["id"], "42")
 
@@ -1580,6 +1581,32 @@ class CodexGateTests(unittest.TestCase):
         )
         self.assertFalse(ready)
 
+    def test_codex_unknown_blocks_merge_readiness_even_when_not_reviewing(self):
+        # A failed reactions lookup must never be read as "Codex is done".
+        pr = {
+            "closed": False,
+            "merged": False,
+            "mergeable": "MERGEABLE",
+            "merge_state_status": "CLEAN",
+            "review_decision": "APPROVED",
+        }
+        checks = {
+            "all_terminal": True,
+            "failed_count": 0,
+            "pending_count": 0,
+            "passed_count": 2,
+            "quality_passed_count": 2,
+            "quality_jobs_passed": True,
+            "skipping_count": 0,
+        }
+        ready = watch.is_pr_ready_to_merge(
+            pr, checks, new_review_items=[], checks_terminal_elapsed=120,
+            blocking_review_items=[],
+            bugbot_gate={"required": True, "is_success": True},
+            codex_gate={"reviewing": False, "status": "unknown"},
+        )
+        self.assertFalse(ready)
+
     def test_recommend_actions_emits_wait_codex(self):
         pr = {
             "closed": False,
@@ -1774,6 +1801,115 @@ class CodeRabbitReviewSurfacingTests(unittest.TestCase):
         self.assertEqual(len(blocking_items), 1)
         self.assertEqual(blocking_items[0]["id"], "555")
 
+
+    @staticmethod
+    def _empty_review_state():
+        return {
+            "seen_issue_comment_ids": [],
+            "seen_review_comment_ids": [],
+            "seen_review_ids": [],
+            "last_review_poll_at": None,
+        }
+
+    def test_codex_review_summary_status_comment_is_not_surfaced(self):
+        # Codex edits this status table on every review. It never carries a
+        # finding, so it must not resurface as a new review item on every poll.
+        pr = {"repo": "rock3r/punaro", "number": 62, "head_sha": "abc123"}
+        issue_payload = [
+            {
+                "id": 11,
+                "user": {"login": "chatgpt-codex-connector[bot]"},
+                "author_association": "NONE",
+                "created_at": "2026-01-01T00:00:00Z",
+                "updated_at": "2026-01-02T00:00:00Z",
+                "body": "<!-- codex-pull-request-review-summary -->\n\n## Codex Review Summary\n",
+                "html_url": "https://example.invalid/codex-summary",
+            },
+            {
+                "id": 12,
+                "user": {"login": "chatgpt-codex-connector[bot]"},
+                "author_association": "NONE",
+                "created_at": "2026-01-01T00:00:00Z",
+                "updated_at": "2026-01-01T00:00:00Z",
+                "body": "**P2** Bound the retry queue before accepting new work.",
+                "html_url": "https://example.invalid/codex-finding",
+            },
+        ]
+
+        with patch.object(
+            watch,
+            "gh_api_list_paginated",
+            side_effect=[issue_payload, [], []],
+        ):
+            new_items, _ = watch.fetch_new_review_items(
+                pr,
+                self._empty_review_state(),
+                fresh_state=True,
+                authenticated_login="octocat",
+            )
+
+        self.assertEqual([item["id"] for item in new_items], ["12"])
+
+    def _own_review_comment_payload(self):
+        return [
+            {
+                "id": 7,
+                "user": {"login": "octocat"},
+                "author_association": "OWNER",
+                "created_at": "2025-01-01T00:00:00Z",
+                "body": "Rename this before merging.",
+                "path": "internal/relay/relay.go",
+                "line": 1,
+                "commit_id": "abc123",
+                "html_url": "https://example.invalid/own-comment",
+            }
+        ]
+
+    def test_fetch_new_review_items_blocks_on_own_unresolved_threads(self):
+        # The watcher usually authenticates as the owner. The owner's own open
+        # inline threads are not new items, but they must still block merge.
+        pr = {"repo": "rock3r/punaro", "number": 62, "head_sha": "abc123"}
+
+        with patch.object(
+            watch,
+            "gh_api_list_paginated",
+            side_effect=[[], self._own_review_comment_payload(), []],
+        ), patch.object(
+            watch,
+            "get_unresolved_review_comment_ids",
+            return_value={"ids": {"7"}, "truncated": False},
+        ):
+            new_items, blocking_items = watch.fetch_new_review_items(
+                pr,
+                self._empty_review_state(),
+                fresh_state=True,
+                authenticated_login="octocat",
+            )
+
+        self.assertEqual(new_items, [])
+        self.assertEqual([item["id"] for item in blocking_items], ["7"])
+
+    def test_fetch_new_review_items_does_not_block_on_own_resolved_threads(self):
+        pr = {"repo": "rock3r/punaro", "number": 62, "head_sha": "abc123"}
+
+        with patch.object(
+            watch,
+            "gh_api_list_paginated",
+            side_effect=[[], self._own_review_comment_payload(), []],
+        ), patch.object(
+            watch,
+            "get_unresolved_review_comment_ids",
+            return_value={"ids": set(), "truncated": False},
+        ):
+            new_items, blocking_items = watch.fetch_new_review_items(
+                pr,
+                self._empty_review_state(),
+                fresh_state=True,
+                authenticated_login="octocat",
+            )
+
+        self.assertEqual(new_items, [])
+        self.assertEqual(blocking_items, [])
 
 class ReviewThreadGraphQLPayloadTests(unittest.TestCase):
     def test_rejects_graphql_errors_instead_of_returning_no_blockers(self):

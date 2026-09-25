@@ -37,6 +37,10 @@ REVIEW_BOT_LOGIN_KEYWORDS = {
     "codex",
     "coderabbit",
 }
+# Codex keeps one "Codex Review Summary" status table on the PR and edits it
+# on every review. It never carries a finding, so it must not surface as a
+# review item (otherwise every edit resurfaces it on the next poll).
+STATUS_ONLY_BOT_COMMENT_MARKER = "<!-- codex-pull-request-review-summary -->"
 # Login / check-name keyword fragments for CodeRabbit. CodeRabbit is treated as
 # a *presence-conditional* gate, not an assumed-present one: it only gates a PR
 # when it shows signs of life (a CodeRabbit CI check, a reaction, or an authored
@@ -91,13 +95,6 @@ GREEN_STATE_MAX_POLL_SECONDS = 60
 # stop_ready_to_merge in that narrow window, causing the agent to merge before
 # the bot's findings are ever seen.
 CHECKS_TERMINAL_GRACE_PERIOD_SECONDS = 60
-
-# Actionable inline review comments on the current head SHA block merge
-# readiness for a bounded freshness window. This catches the race where review
-# feedback arrives shortly after checks complete, while avoiding a permanent
-# merge block for comments that were already handled/resolved without a new
-# commit.
-BLOCKING_REVIEW_ITEM_FRESH_SECONDS = 30 * 60
 
 # Per-check-name hung thresholds: if a check has been IN_PROGRESS longer than
 # this many seconds without completing, surface a diagnose_hung_check action.
@@ -234,7 +231,10 @@ def gh_text(args, repo=None, allowed_exit_codes=(0,)):
     except FileNotFoundError as err:
         raise GhCommandError("`gh` command not found") from err
     except subprocess.CalledProcessError as err:
-        if err.returncode in allowed_exit_codes:
+        # An allowed nonzero exit is a state report only when gh printed its
+        # payload. With no output it is still a failure (for example exit 1
+        # for "no pull requests found").
+        if err.returncode in allowed_exit_codes and (err.stdout or "").strip():
             return err.stdout
         raise GhCommandError(_format_gh_error(cmd, err)) from err
     return proc.stdout
@@ -1222,6 +1222,13 @@ def is_inert_bugbot_notice(item):
     )
 
 
+def is_status_only_bot_comment(item):
+    """Return True for bot status comments that never carry a finding."""
+    if not isinstance(item, dict):
+        return False
+    return STATUS_ONLY_BOT_COMMENT_MARKER in str(item.get("body") or "")
+
+
 def is_trusted_human_review_author(item, authenticated_login):
     _ = authenticated_login
     author = str(item.get("author") or "")
@@ -1229,32 +1236,6 @@ def is_trusted_human_review_author(item, authenticated_login):
         return False
     association = str(item.get("author_association") or "").upper()
     return association in TRUSTED_AUTHOR_ASSOCIATIONS
-
-
-def item_age_seconds(item, now_seconds=None, timestamp_field="created_at"):
-    timestamp_value = str(item.get(timestamp_field) or item.get("created_at") or "")
-    if not timestamp_value:
-        return None
-    try:
-        timestamp_seconds = datetime.fromisoformat(
-            timestamp_value.replace("Z", "+00:00")
-        ).timestamp()
-    except ValueError:
-        return None
-
-    now = float(now_seconds) if now_seconds is not None else time.time()
-    return max(0, now - timestamp_seconds)
-
-
-def is_blocking_review_item(item, head_sha, now_seconds=None):
-    if not isinstance(item, dict):
-        return False
-    if str(item.get("kind") or "") != "review_comment":
-        return False
-    # A failed GraphQL lookup leaves the thread's resolution state unknown.
-    # Do not infer resolution from the comment age or commit: an unresolved
-    # comment can outlive several pushes and must keep the merge gate closed.
-    return True
 
 
 def fetch_new_review_items(pr, state, fresh_state, authenticated_login=None):
@@ -1323,7 +1304,6 @@ def fetch_new_review_items(pr, state, fresh_state, authenticated_login=None):
 
     new_items = []
     blocking_items = []
-    now_seconds = time.time()
     for item in all_items:
         item_id = item.get("id")
         if not item_id:
@@ -1331,16 +1311,27 @@ def fetch_new_review_items(pr, state, fresh_state, authenticated_login=None):
         author = item.get("author") or ""
         if not author:
             continue
+        is_review_comment = str(item.get("kind") or "") == "review_comment"
         if authenticated_login and author == authenticated_login:
+            # The watcher usually authenticates as the owner. Never surface its
+            # own comments as new items, but an inline thread it opened that is
+            # still unresolved must keep blocking merge.
+            if is_review_comment and (
+                unresolved_review_comment_ids is None
+                or item_id in unresolved_review_comment_ids
+                or unresolved_lookup_truncated
+            ):
+                blocking_items.append(item)
             continue
         if is_bot_login(author):
             if not is_actionable_review_bot_login(author):
+                continue
+            if is_status_only_bot_comment(item):
                 continue
         elif not is_trusted_human_review_author(item, authenticated_login):
             continue
 
         is_blocking = False
-        is_review_comment = str(item.get("kind") or "") == "review_comment"
         if unresolved_review_comment_ids is not None:
             # Block on any inline comment whose thread is unresolved, regardless
             # of which commit it was posted on.
@@ -1349,8 +1340,11 @@ def fetch_new_review_items(pr, state, fresh_state, authenticated_login=None):
                 and (item_id in unresolved_review_comment_ids or unresolved_lookup_truncated)
             )
         else:
-            # Fallback heuristic when unresolved-thread lookup is unavailable.
-            is_blocking = is_blocking_review_item(item, head_sha=head_sha, now_seconds=now_seconds)
+            # A failed GraphQL lookup leaves every thread's resolution state
+            # unknown. Do not infer resolution from the comment's age or commit:
+            # an unresolved comment can outlive several pushes. Fail closed and
+            # block on every inline comment until the lookup works again.
+            is_blocking = is_review_comment
 
         if is_blocking:
             blocking_items.append(item)
@@ -1483,6 +1477,10 @@ def is_pr_ready_to_merge(
     if bugbot_gate and bool(bugbot_gate.get("required")) and not bool(bugbot_gate.get("is_success")):
         return False
     if codex_gate and bool(codex_gate.get("reviewing")):
+        return False
+    # A failed reactions lookup means the watcher cannot tell whether Codex is
+    # still reviewing. Never read that as "Codex is done".
+    if codex_gate and str(codex_gate.get("status") or "") == "unknown":
         return False
     if coderabbit_gate and bool(coderabbit_gate.get("reviewing")):
         return False

@@ -8,7 +8,7 @@ description: >
   (e.g. CI infrastructure issues, exhausted flaky retries, or ambiguous/blocking review
   feedback). Use when the user asks to monitor a PR, watch CI, handle review comments, or
   keep an eye on failures and feedback on an open PR.
-allowed-tools: Bash(python3 */skills/babysit-pr/scripts/*), Bash(gh pr *), Bash(gh run *), Bash(gh api *), Bash(git fetch *), Bash(git rebase *), Bash(git merge *), Bash(git checkout *), Bash(git switch *), Bash(git push *), Bash(git add *), Bash(git commit *), Bash(git remote *), Bash(git diff *), Bash(git log *), Bash(git status), Bash(git branch *), Bash(cd *), Bash(git worktree *), Bash(make *), Read, Edit, Write
+allowed-tools: Bash(python3 */skills/babysit-pr/scripts/*), Bash(gh pr *), Bash(gh run *), Bash(gh api *), Bash(git fetch *), Bash(git rebase *), Bash(git merge *), Bash(git checkout *), Bash(git switch *), Bash(git push *), Bash(git add *), Bash(git commit *), Bash(git remote *), Bash(git diff *), Bash(git log *), Bash(git status), Bash(git branch *), Bash(git rev-parse *), Bash(cd *), Bash(git worktree *), Bash(make *), Read, Edit, Write
 ---
 
 # PR Babysitter
@@ -78,7 +78,7 @@ python3 .agents/skills/babysit-pr/scripts/gh_pr_watch.py --pr 42 --once
 | `stop_session_timeout` | `--max-session-minutes` elapsed (default 90 min) — stop and report |
 | `diagnose_hung_check` | A pending check exceeded its hung threshold — stop and report |
 | `diagnose_merge_conflict` | PR is merge-conflicted (`CONFLICTING` / `DIRTY`) — resolve before waiting on checks |
-| `diagnose_branch_behind` | PR branch is behind its base — rebase onto the PR's base ref (batch with any pending fixes) |
+| `diagnose_branch_behind` | PR branch is behind its base — merge the PR's base ref into the branch (batch with any pending fixes) |
 | `diagnose_skipping_checks` | One or more checks completed with `neutral`/`skipping` — investigate why |
 | `wait_bugbot` | A *present* Bugbot check is still running — do not push or merge |
 | `wait_codex` | Codex is still reviewing (👀 reaction present) — do not push or merge |
@@ -88,20 +88,35 @@ Keep polling when CI is running (`idle`), when new review items arrive
 (`process_review_comment`), when any review bot is still running, or when CI is green but
 the PR is awaiting approval.
 
-## Post-merge cleanup (when `stop_pr_closed` and PR is merged)
+## Post-merge cleanup
 
-1. **If currently on the PR branch or inside its worktree, switch away first** — check
-   out `main`, or `cd` to the main checkout.
-2. **Remove the git worktree** if the branch was checked out in one — find it with
-   `git worktree list` (worktrees live under `.worktrees/`). Do this before touching the
-   branch: `git branch -D` refuses while a worktree still has the branch checked out.
-3. **Delete the local branch** (squash merges leave it unmerged by default):
-   `git branch -D <head_branch>` — but first confirm the local tip matches the watched
-   PR's final head (or is an ancestor of it). If the branch carries commits that were
-   never pushed, stop and report instead of deleting the only reference to them.
+`stop_pr_closed` also fires for a PR that was closed without merging. Clean up only
+when the PR was merged: check `pr.merged` in the snapshot, or run
+`gh pr view <n> --json mergedAt` and confirm that `mergedAt` is set. For a PR that was
+closed without merging, keep everything and tell the user.
 
-**Only delete the local branch and worktree** — never touch remote branches. Skip
-silently if the branch or worktree doesn't exist locally.
+Run every step from the main checkout, never from inside the PR's worktree. Skip any
+step whose worktree or branch does not exist locally.
+
+1. **Remove the git worktree** if `git worktree list` shows the PR branch in a linked
+   worktree (worktrees live under `.worktrees/`): `git worktree remove <path>`. Git
+   refuses when the worktree has uncommitted changes. Do not force it; ask the user
+   instead. Remove the worktree before the branch, because `git branch -D` refuses
+   while a worktree still has the branch checked out.
+2. **Delete the local branch only when nothing would be lost.** Squash merges leave the
+   branch looking unmerged, so `git branch -d` refuses and `git branch -D` is needed.
+   Force-deleting a branch destroys history, so first prove that the local tip is
+   exactly the head that was merged:
+
+   ```bash
+   merged_head=$(gh pr view <n> --json headRefOid --jq .headRefOid)
+   test "$(git rev-parse <head_branch>)" = "$merged_head" && git branch -D <head_branch>
+   ```
+
+   If the local tip differs, it may carry commits that were never merged. Keep the
+   branch and tell the user.
+
+**Only delete the local branch and worktree** — never touch remote branches.
 
 ## Push discipline — batch all fixes before pushing (cost control)
 
@@ -123,17 +138,20 @@ into the same commit before pushing.
 
 1. **Do not push immediately.** Wait until no review bot is in progress.
 2. Snapshot latest status/comments.
-3. Rebase the branch onto the PR's actual base ref — resolve it with
+3. Merge the PR's actual base ref into the branch — resolve it with
    `gh pr view <n> --json baseRefName`, fetch that base from the repository the PR
-   *targets* before rebasing onto its updated remote-tracking ref (for a same-repo PR
-   that remote is `origin`; for a cross-repository PR resolve the base repo's remote
-   first — a fork's `origin/<base>` is the wrong history). Never assume `main`, and
-   never rebase onto a stale or wrong-remote local ref.
+   *targets*, then merge its updated remote-tracking ref (for a same-repo PR that
+   remote is `origin`, so `git merge origin/<base>`; for a cross-repository PR resolve
+   the base repo's remote first — a fork's `origin/<base>` is the wrong history).
+   Never assume `main`, and never merge a stale or wrong-remote local ref.
 4. Resolve conflicts and **in the same fix cycle** apply all actionable bot comments.
 5. Run the full Punaro gate.
-6. Push once, with `--force-with-lease`: the rebase rewrote the commit IDs, so an
-   ordinary push is rejected as non-fast-forward, and an unqualified force push could
-   overwrite concurrent remote updates.
+6. Push once, with an ordinary push: a merge keeps the existing commits, so no force
+   push is needed.
+
+Rebase only when the user asks for it. A rebase rewrites the branch's history and needs
+`git push --force-with-lease`; never use an unqualified force push, because it could
+overwrite concurrent remote updates.
 
 This avoids paying for multiple bot reruns and prevents a ping-pong where a conflict-fix
 push is immediately followed by a second bot-fix push.
@@ -165,6 +183,11 @@ Codex uses emoji reactions, not a CI check: a 👀 reaction from
 `chatgpt-codex-connector[bot]` means it is actively reviewing (`codex_gate.reviewing` is
 `true`, `wait_codex` is emitted — do not push or merge). Reaction removed with no new
 comments → satisfied. Reaction removed with comments → fix them under push discipline.
+If the reactions lookup fails, `codex_gate.status` is `unknown` and the watcher does not
+declare the PR ready until the lookup works again.
+
+Codex also keeps a "Codex Review Summary" status table as a PR comment and edits it on
+every review. It never carries a finding, so the watcher ignores it.
 
 ### CodeRabbit (presence-conditional)
 
@@ -202,9 +225,9 @@ The watcher surfaces feedback from:
 
 ## Worktree gotchas
 
-When working from a git worktree, watch out for rebases silently reverting fixes — after
-a rebase, verify key changes survived. Always run the full Punaro gate before pushing;
-see the quality gate in [AGENTS.md](../../../AGENTS.md).
+When working from a git worktree, watch out for a merge or rebase silently reverting
+fixes — afterwards, verify key changes survived. Always run the full Punaro gate before
+pushing; see the quality gate in [AGENTS.md](../../../AGENTS.md).
 
 ## Choosing a mode based on harness capabilities
 
@@ -222,15 +245,24 @@ see the quality gate in [AGENTS.md](../../../AGENTS.md).
 
 All modes emit newline-delimited JSON.
 
-- `--once` / `--snapshot` / `--retry-failed-now`: emit a top-level snapshot/result object
-  where `actions` is directly available.
-- `--watch`: emits event envelopes —
-  `{"event":"snapshot","payload":{"snapshot":{...},"state_file":"...","next_poll_seconds":30}}`
-  and `{"event":"stop","payload":{...}}`. Read actions from `payload.snapshot.actions`
-  for `snapshot` events and `payload.actions` for `stop` events.
+Where the actions are depends on the mode:
+
+| Mode | Read the actions from |
+|---|---|
+| `--once`, `--snapshot` | top-level `actions` |
+| `--retry-failed-now` | `snapshot.actions`. The top level reports the rerun: `rerun_attempted`, `rerun_count`, `reason`. |
+| `--watch` | `payload.snapshot.actions` on `snapshot` events, `payload.actions` on `stop` events |
+
+`--watch` emits event envelopes:
+`{"event":"snapshot","payload":{"snapshot":{...},"state_file":"...","next_poll_seconds":30}}`
+and `{"event":"stop","payload":{...}}`.
 
 `blocking_review_items` contains actionable unresolved inline review comments; while it
-is non-empty, `stop_ready_to_merge` is not emitted.
+is non-empty, `stop_ready_to_merge` is not emitted. It also contains unresolved inline
+threads opened by the account the watcher runs as, although those are never listed in
+`new_review_items`. If the unresolved-thread lookup fails, the watcher cannot tell which
+threads are resolved, so every actionable inline comment blocks until the lookup works
+again.
 
 Example snapshot payload shape:
 
