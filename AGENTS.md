@@ -95,4 +95,7 @@ Use the local `using-git-worktree` skill when setting up an isolated workspace.
 Before reinventing a workflow, check `.agents/skills/`. Current Punaro-local skills:
 
 - `using-git-worktree` — isolated workspaces under `.worktrees/`
-- `babysit-pr` — watch a PR's CI, review bots, and mergeability until it lands
+- `babysit-pr` — watch a PR's CI, review bots, and mergeability until it lands.
+  It is vendored from `rock3r/babysit-pr-skill` at the version in its `VERSION` file.
+  Update it with that repository's `sync.py`, and keep Punaro's settings in its
+  `config.json`.

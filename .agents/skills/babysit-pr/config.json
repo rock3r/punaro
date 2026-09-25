@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "local_gate": "make test && make test-race && make staticcheck && make security && make lint",
+  "required_checks": [
+    "Go tests and analysis",
+    "PostgreSQL integration",
+    "Complete product E2E",
+    "Configuration lint",
+    "Windows client build"
+  ]
+}
