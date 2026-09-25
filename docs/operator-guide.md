@@ -900,8 +900,8 @@ no-store`; the server never accepts a principal ID from the caller. A first
 change request uses `"cursor": null`; clients must retain the returned
 installation/timeline/sequence cursor and discard it on the typed restore or
 future-cursor conflict. There is intentionally no offline writable brain,
-mutation route, CLI/MCP binary, semantic retrieval, or Compose Pi integration
-in this slice.
+mutation route, CLI/MCP binary, semantic retrieval, or desktop agent client
+integration in this slice.
 
 ### Dark native memory mutations
 
@@ -921,7 +921,7 @@ need the exact strong ETag returned by the preceding read or mutation in
 are deliberately rejected for every mutation. Purge requires its distinct
 capability and is irreversible. Secret-shaped documents are rejected without
 echoing the value or fingerprint. This slice still has no native client, MCP
-adapter, semantic retrieval, offline queue, or Compose Pi integration.
+adapter, semantic retrieval, offline queue, or desktop agent client integration.
 
 ### Native memory client
 
@@ -995,7 +995,7 @@ return generic content-free MCP errors; request bodies, response bodies,
 credential values, file paths, and server diagnostics are not echoed. This is
 not the remote OAuth MCP gateway planned for a later slice, and it adds no
 offline writable brain, retry queue, Git discovery, enrollment recovery,
-semantic retrieval, or Compose Pi behavior.
+semantic retrieval, or desktop agent client behavior.
 
 ## Operations and incident response
 

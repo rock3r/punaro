@@ -61,7 +61,7 @@ The governing rule is:
 10. Scan every memory write path for likely secrets and direct users toward a
     dedicated secret manager such as 1Password CLI. Secret references are
     allowed; resolved secret values are not memory.
-11. Integrate Compose Pi through a selectable memory backend. Local mode keeps
+11. Integrate the desktop agent client through a selectable memory backend. Local mode keeps
     its current SQLite memory. Punaro mode makes Big Brain the sole writable
     authority; network failure must not silently create a second writable
     local brain.
@@ -597,22 +597,22 @@ duplicates or agent-private derived summaries. One fenced worker owns a scope's
 consolidation run; server load and change volume, not client idleness alone,
 trigger work.
 
-## Compose Pi integration
+## Desktop agent client integration
 
-Compose Pi gains a Punaro integration setting with independently reported mail,
+The desktop agent client gains a Punaro integration setting with independently reported mail,
 attachment, and memory capabilities. Internally memory is a backend choice:
 
-- `Local`: current Compose Pi SQLite memory is authoritative.
+- `Local`: the client's current SQLite memory is authoritative.
 - `Punaro`: Big Brain is the sole writable authority.
 
 These are independent corpora, not synchronized replicas. Settings show which
 backend is active, when the Local corpus was last active, and the last observed
 Punaro timeline/change sequence. Backend-specific semantics are explicit:
-Punaro-mode Compose Pi records use a unique logical key derived from normalized
+Punaro-mode client records use a unique logical key derived from normalized
 scope/title so current title-matched update behavior remains deterministic,
 even though other Big Brain clients may create records with duplicate titles.
 Import previews expose collisions. In Punaro mode explicit delete remains a hard
-content delete matching Compose Pi; archive/restore is a distinct maintenance
+content delete matching the client's Local-mode delete; archive/restore is a distinct maintenance
 surface.
 
 ### Enabling Punaro memory
@@ -622,8 +622,8 @@ surface.
 2. Resolve or create the current project scope.
 3. Preview local global/workspace memories and their destination scopes.
 4. Persist a local backend transition `IMPORTING(batch_id, snapshot_revision)`
-   and take a stable local snapshot. Import identities are namespaced by Compose
-   Pi installation UUID, local memory ID, and source revision.
+   and take a stable local snapshot. Import identities are namespaced by the
+   client installation UUID, local memory ID, and source revision.
 5. Import selected records with a manifest of expected IDs/count/hash and
    preserved provenance. Exact retries are idempotent; conflicting incremental
    re-imports become proposals rather than overwrites.
@@ -821,7 +821,7 @@ Migration is staged; no long-lived dual authority is allowed.
 - Add native local MCP/CLI tools.
 - Prove concurrent multi-agent CRUD/search and authorization isolation.
 
-### Phase F: Compose Pi integration
+### Phase F: desktop agent client integration
 
 - Introduce backend selection without changing local behavior when disabled.
 - Add import preview/checkpoint, project identity upgrade, failure UX, and
@@ -997,7 +997,7 @@ Adversarial reviewers should answer:
    leakage, corruption, or unrecoverable state?
 3. Are PostgreSQL transactions, idempotency, CAS, and worker fencing sufficient
    at every cross-domain boundary?
-4. Can project identity upgrade or Compose Pi backend switching create split
+4. Can project identity upgrade or desktop client backend switching create split
    authority or surprising disclosure?
 5. Can attachment lifecycle crashes produce visible partial files, orphaned
    metadata, or destructive client writes?
@@ -1025,12 +1025,12 @@ findings and resolutions follow.
 | ID | Finding | Resolution |
 | --- | --- | --- |
 | AR-1 / SR-2 | Filesystem rename and PostgreSQL publication cannot be one atomic commit. | Replaced with explicit `RESERVED`/`READY`/`CORRUPT` lifecycle, fsync/rename ordering, visibility boundary, orphan reconciliation, tombstone-first deletion, and restore-skew tests. |
-| AR-2 / OR-2 | Compose Pi import/switch lacked a linearization point and could create two writable authorities. | Added persisted `LOCAL`/`IMPORTING`/`PUNARO` transition, stable manifest/delta import, brief mutation freeze, one-transaction local switch, independent-corpus semantics, and no offline writes in v1. |
+| AR-2 / OR-2 | Desktop client import/switch lacked a linearization point and could create two writable authorities. | Added persisted `LOCAL`/`IMPORTING`/`PUNARO` transition, stable manifest/delta import, brief mutation freeze, one-transaction local switch, independent-corpus semantics, and no offline writes in v1. |
 | SR-1 / OR-3 | Initial enrollment had no trust root and risked public first-user-wins takeover. | Made first owner host-local only; added named, short-lived, single-use client enrollment and pristine-public-bootstrap tests. |
 | AR-3 / SR-3 / OR-6 | Project collision/redirect semantics could disclose data or create permanent graph maintenance. | Common upgrade attaches remote in place. Collision uses generation-bound preview, no membership union, deterministic locks, bounded one-shot merge, private-grant preservation, and a permanent lookup alias rather than redirect graph/background rewriting. |
 | AR-4 | SQLite was incorrectly described as a post-cutover rollback source; leases and legacy auth migration were undefined. | SQLite rollback ends before writes reopen. Active leases are invalidated with generation advance, old SQLite becomes forensic evidence, and existing identities receive a staged token-exchange path. |
 | AR-5 | Asynchronous chunking could delay lexical visibility; embedding rebuild and worker locks lacked fencing. | Lexical vector is synchronous on the canonical revision; search joins current revision; embedding jobs use lease generations; rebuilds use start sequence, dual enqueue/replay, caught-up watermark, then atomic activation. |
-| AR-6 / OR-8 | Compose Pi local and Big Brain title/delete semantics were incompatible. | Added a Compose Pi logical-key compatibility profile, collision preview, explicit hard delete for Compose Pi/Big Brain, and separate maintenance archive semantics. |
+| AR-6 / OR-8 | Desktop client local and Big Brain title/delete semantics were incompatible. | Added a desktop client logical-key compatibility profile, collision preview, explicit hard delete for the desktop client and Big Brain, and separate maintenance archive semantics. |
 | AR-7 | Memory source snippets could leak a source the caller no longer has permission to read. | Target-scope copied evidence and live source references now have distinct authorization rules; unauthorized live references are opaque/redacted and tested. |
 | AR-8 | Idempotency did not explicitly bind the key to request identity. | Standardized principal/operation/key plus request hash and immutable prior result; changed-body/operation/principal conflicts are required tests. |
 | SR-4 | Database restore could rewind a sequence behind cached client cursors. | Added installation/timeline IDs; restore rotates the timeline and clients invalidate future cursors/caches before re-enumeration. |
@@ -1038,7 +1038,7 @@ findings and resolutions follow.
 | SR-6 | Resource exhaustion controls were aspirations rather than a contract. | Added hard configurable ceilings, mail-reserved connection budget, optional-work load shedding, timeouts, retention, and `429`/`503` behavior. |
 | OR-1 | Container update/rollback had no executable migration actor or boundary. | Added `punaro update` preflight, verified backup, pinned pull, short quiescence, one-shot schema-owner migrator, deep readiness, compatibility-aware rollback, and explicit restore requirement. |
 | OR-4 | Backup/restore remained vague and potentially burdensome. | Made finalized blobs immutable, delayed GC, added consistent DB/blob manifest backups and supported backup/verify/new-stack restore commands; off-host copies and operator drills are recommended rather than startup gates. |
-| OR-5 | Remote prompt briefs could block Compose Pi prompt submission. | Added short timeout and bounded timeline/change-keyed local brief cache; prompt sending proceeds with visibly stale or absent memory context. |
+| OR-5 | Remote prompt briefs could block desktop client prompt submission. | Added short timeout and bounded timeline/change-keyed local brief cache; prompt sending proceeds with visibly stale or absent memory context. |
 | SR-S1 / OR-7 | Slow token hashing and multiple application images added cost without material benefit. | Chose indexed SHA-256 digest for random 256-bit tokens and one versioned application image with role subcommands; optional services remain Compose profiles. |
 | SR-S2 | Image signatures were required without a consuming verifier. | Kept digest pinning, SBOM, and scanning; deferred signing until the supported updater verifies it. |
 | SR-S3 | Per-attachment approval would harm routine UX. | Defined a configured safe download root with automatic safe finalization; prompt only outside it. |

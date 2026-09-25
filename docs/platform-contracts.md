@@ -17,9 +17,10 @@ without changing the current alpha runtime.
   retirement are explicit independently reviewed migrations.
 - Native client SQLite is limited to offline queues, deduplication, crash
   recovery, and explicitly stale read caches. It is not server authority.
-- Compose Pi integration is outside the currently authorized Punaro delivery
-  scope. The accepted plan retains its future Phase F unchanged. General Punaro
-  APIs remain clean, but this program adds no contract solely for Compose Pi.
+- Desktop agent client integration is outside the currently authorized Punaro
+  delivery scope. The accepted plan retains its future Phase F unchanged. General
+  Punaro APIs remain clean, but this program adds no contract solely for that
+  client.
 
 ## PostgreSQL schemas and roles
 
@@ -427,7 +428,8 @@ tool calls, and destructive-operation arguments are absent. Memory text can
 still influence model output; framing does not claim otherwise. A future
 client cache must additionally bind principal, normalized query, budget
 version, project, installation, timeline, change sequence, and project
-generations. Compose Pi cache/send behavior is outside this implementation.
+generations. Desktop agent client cache/send behavior is outside this
+implementation.
 
 The first native memory network slice is dark by default behind
 `PUNARO_MEMORY_API_ENABLED` and requires the already validated PostgreSQL device
@@ -476,7 +478,8 @@ and immutable-item conflicts are closed 409 categories; secret rejection is a
 content-free 422 category; proposal capacity is 429; transient failures are
 503. Mutation project IDs are never canonicalized through a retired alias:
 permanent aliases exist only for compatible reads. Local credential/project
-state, retry/cache behavior, semantic retrieval, and Compose Pi remain absent.
+state, retry/cache behavior, semantic retrieval, and desktop agent client
+integration remain absent.
 
 The first native client is `punaro-memory`. It accepts an explicit fixed HTTPS
 origin, absolute owner-protected credential file, and explicit project UUID or
@@ -505,7 +508,7 @@ are generic tool errors and do not echo sensitive values, request bodies,
 response bodies, URLs, file paths, or server diagnostics. This local MCP mode is
 not the later OAuth-protected remote MCP gateway and does not add retries,
 queues, cache, Git inference, local fallback memory, semantic retrieval, or
-Compose Pi behavior.
+desktop agent client behavior.
 
 ### Implemented dark control-plane primitives
 

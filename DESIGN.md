@@ -21,8 +21,8 @@ the Phase A compatibility contracts that implementation slices must preserve.
 This document records both the accepted target and the current alpha. Where a
 current SQLite, Ed25519, systemd, or attachment-v2/v3 description differs from
 the accepted target, it describes preserved implementation evidence or a
-migration source, not the future production direction. Compose Pi integration
-remains in the accepted plan but is outside the currently authorized Punaro
+migration source, not the future production direction. Desktop agent client
+integration remains in the accepted plan but is outside the currently authorized Punaro
 delivery scope.
 
 ## Implementation status
@@ -135,8 +135,8 @@ credential and profile once at startup and exposes only bounded memory tools
 over JSON-RPC. MCP tool arguments cannot set or override origin, credential
 path, profile path, or credential value. Profiles and MCP mode do not add
 retry, queue, cache, Git discovery, project registry, fallback local brain,
-enrollment recovery, semantic retrieval, remote MCP/OAuth, or Compose Pi
-behavior.
+enrollment recovery, semantic retrieval, remote MCP/OAuth, or desktop agent
+client behavior.
 
 Schema 20 adds optional expiry only for explicit evidence. A bounded
 `memory.administer` maintenance transaction archives due active evidence,
@@ -1474,8 +1474,8 @@ lists what is not yet a supported production operation.
 Implementation follows the independently mergeable migration phases in
 [`docs/big-brain-plan.md`](docs/big-brain-plan.md): compatibility contracts,
 PostgreSQL foundation, mail migration, trusted attachments, lexical Big Brain,
-semantic retrieval, and independently optional dreaming and remote MCP. Compose
-Pi integration remains a future plan phase but is excluded from the currently
+semantic retrieval, and independently optional dreaming and remote MCP. Desktop
+agent client integration remains a future plan phase but is excluded from the currently
 authorized Punaro delivery scope. Every slice retains a safe rollback boundary,
 passes the full quality gate, and ships through a separately reviewed PR.
 
